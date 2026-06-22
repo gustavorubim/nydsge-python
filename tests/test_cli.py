@@ -27,6 +27,21 @@ def test_doctor_json() -> None:
     assert "cpu" in result.stdout
 
 
+def test_models_json() -> None:
+    result = CliRunner().invoke(app, ["models", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["models"] == [
+        {
+            "aliases": ["Model1002", "model1002"],
+            "default_subspec": "ss10",
+            "description": "New York Fed DSGE Model1002 representative-agent model.",
+            "name": "m1002",
+        }
+    ]
+
+
 def test_doctor_json_can_resolve_requested_runtime() -> None:
     result = CliRunner().invoke(
         app,
@@ -486,6 +501,75 @@ def test_data_prepare_sources_command_fetches_canonical_fred_and_reports_gaps(
     assert (source_root / "fred_181115.csv").exists()
 
 
+def test_data_prepare_sources_command_defaults_realtime_window_to_vintage(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    source_root = tmp_path / "sources"
+
+    def fake_download(*args, **kwargs) -> pd.DataFrame:
+        assert kwargs["output_path"] == source_root / "fred_181115.csv"
+        assert kwargs["realtime_start"] == "181115"
+        assert kwargs["realtime_end"] == "181115"
+        source_root.mkdir(parents=True, exist_ok=True)
+        data = pd.DataFrame(
+            {
+                "date": ["2016-Q3"],
+                "GDP": [1.0],
+            }
+        )
+        data.to_csv(kwargs["output_path"], index=False)
+        return data
+
+    monkeypatch.setattr("nydsge.cli.download_fred_api_source_csv", fake_download)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "data",
+            "prepare-sources",
+            "--source-root",
+            str(source_root),
+            "--vintage",
+            "181115",
+            "--start-date",
+            "2016-Q3",
+            "--end-date",
+            "2016-Q3",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["vintage"] == "181115"
+    assert payload["realtime_start"] == "181115"
+    assert payload["realtime_end"] == "181115"
+    assert payload["fred_action"] == "downloaded"
+
+
+def test_data_prepare_sources_command_rejects_mixed_vintage_and_realtime_modes(
+    tmp_path,
+) -> None:
+    result = CliRunner().invoke(
+        app,
+        [
+            "data",
+            "prepare-sources",
+            "--source-root",
+            str(tmp_path / "sources"),
+            "--vintage-dates",
+            "181115,181116",
+            "--realtime-start",
+            "181115",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "cannot be combined" in result.stdout
+
+
 def test_data_prepare_sources_command_reports_ready_when_all_sources_exist(
     tmp_path,
     monkeypatch,
@@ -611,6 +695,47 @@ def test_data_fetch_fred_api_command_writes_source_csv(tmp_path, monkeypatch) ->
     assert '"fred_series": 2' in result.stdout
     assert '"realtime_start": "181115"' in result.stdout
     assert output_path.exists()
+
+
+def test_data_fetch_fred_api_command_accepts_vintage_dates_mode(tmp_path, monkeypatch) -> None:
+    output_path = tmp_path / "fred_api_vintages.csv"
+
+    def fake_download(*args, **kwargs) -> pd.DataFrame:
+        assert kwargs["output_path"] == output_path
+        assert kwargs["realtime_start"] is None
+        assert kwargs["realtime_end"] is None
+        assert kwargs["vintage_dates"] == "181115,181116"
+        assert kwargs["output_type"] == 2
+        data = pd.DataFrame({"date": ["2016-Q3"], "GDP": [1.0]})
+        data.to_csv(kwargs["output_path"], index=False)
+        return data
+
+    monkeypatch.setattr("nydsge.cli.download_fred_api_source_csv", fake_download)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "data",
+            "fetch-fred-api",
+            "--output",
+            str(output_path),
+            "--vintage-dates",
+            "181115,181116",
+            "--output-type",
+            "2",
+            "--start-date",
+            "2016-Q3",
+            "--end-date",
+            "2016-Q3",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["vintage_dates"] == "181115,181116"
+    assert payload["output_type"] == 2
+    assert payload["rows"] == 1
 
 
 def test_estimate_command_reports_posterior_metrics(tmp_path) -> None:
@@ -764,6 +889,42 @@ def test_estimate_command_can_run_metropolis_hastings(tmp_path) -> None:
     assert '"alpha"' in result.stdout
     assert '"estimation_draws_shape": [' in result.stdout
     assert '"acceptance_rate":' in result.stdout
+
+
+def test_estimate_command_can_run_blocked_metropolis_hastings(tmp_path) -> None:
+    data_path = _write_observable_csv(tmp_path, periods=1)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "estimate",
+            "--data",
+            str(data_path),
+            "--parameters",
+            "alpha",
+            "--mh-draws",
+            "4",
+            "--mh-blocks",
+            "2",
+            "--mh-param-blocks",
+            "1",
+            "--mh-thin",
+            "2",
+            "--proposal-scale",
+            "0.0001",
+            "--seed",
+            "7",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["sampler"] is not None
+    assert payload["sampler"]["mh_blocks"] == 2
+    assert payload["sampler"]["mh_param_blocks"] == 1
+    assert payload["sampler"]["mh_thin"] == 2
+    assert payload["sampler"]["estimation_draws_shape"] == [4, 1]
 
 
 def test_estimate_command_can_load_proposal_covariance_csv(tmp_path) -> None:
@@ -1298,6 +1459,34 @@ def test_vv_export_hard_target_inputs_writes_deterministic_bundle(tmp_path) -> N
     assert "--include-posterior" in payload["julia_oracle_command"]
     assert "--shock-samples" in payload["python_candidate_command"]
     assert "hard-target" in payload["compare_command"]
+
+
+def test_vv_export_hard_target_inputs_uses_canonical_model_name_for_oracle_file(tmp_path) -> None:
+    output_dir = tmp_path / "hard_target_smoke_alias"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "vv",
+            "export-hard-target-inputs",
+            "--model",
+            "Model1002",
+            "--output-dir",
+            str(output_dir),
+            "--periods",
+            "2",
+            "--horizon",
+            "2",
+            "--draws",
+            "1",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    oracle_args = payload["julia_oracle_command"]
+    assert any(arg.endswith("m1002_ss10_hardtarget.h5") for arg in map(str, oracle_args))
 
 
 def test_vv_raw_data_smoke_builds_observables_and_candidate_suite(tmp_path) -> None:

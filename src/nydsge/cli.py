@@ -75,7 +75,7 @@ from nydsge.forecast import (
     reverse_transform_meansbands,
 )
 from nydsge.kalman import KalmanResult, kalman_log_likelihood, model_process_covariances
-from nydsge.models import Model1002
+from nydsge.models import Model1002, available_models, create_model
 from nydsge.purity import audit_runtime_purity
 from nydsge.runtime import (
     BackendName,
@@ -115,6 +115,31 @@ FINANCIAL_FRICTIONS_CASES = (
     ("lower_sigma", -2.42825276274453, 0.45, (1.0 + 1.7444 / 100.0) ** 0.25),
     ("wide_spread", -2.1, 0.6, (1.0 + 2.5 / 100.0) ** 0.25),
 )
+
+
+def _resolve_model(
+    *,
+    model_name: str,
+    subspec: str,
+    settings: dict[str, Any] | None = None,
+    runtime: RuntimeConfig | None = None,
+    testing: bool = False,
+) -> Model1002:
+    try:
+        return cast(
+            Model1002,
+            create_model(
+                model_name,
+                subspec=subspec,
+                settings=settings,
+                runtime=runtime,
+                testing=testing,
+            ),
+        )
+    except KeyError as err:
+        raise typer.BadParameter(str(err)) from err
+
+
 FINANCIAL_FRICTIONS_FUNCTION_NAMES = (
     "omega",
     "G",
@@ -133,6 +158,35 @@ FINANCIAL_FRICTIONS_FUNCTION_NAMES = (
     "zeta_zomega",
     "zeta_spb",
 )
+
+
+@app.command("models")
+def list_models(
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit JSON instead of a table."),
+    ] = False,
+) -> None:
+    """List translated DSGE model constructors."""
+    entries = available_models()
+    payload = {"models": [entry.to_dict() for entry in entries]}
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+
+    table = Table(title="Translated DSGE models")
+    table.add_column("Model")
+    table.add_column("Default subspec")
+    table.add_column("Aliases")
+    table.add_column("Description")
+    for entry in entries:
+        table.add_row(
+            entry.name,
+            entry.default_subspec or "",
+            ", ".join(entry.aliases),
+            entry.description,
+        )
+    console.print(table)
 
 
 @app.command()
@@ -259,6 +313,10 @@ def data_build(
             help="Optional population forecast CSV used to extend HP filtering.",
         ),
     ] = None,
+    model: Annotated[
+        str,
+        typer.Option("--model", help="Model name from available model registry."),
+    ] = "m1002",
     subspec: Annotated[str, typer.Option(help="Model1002 subspec to build.")] = "ss10",
     hpfilter_population: Annotated[
         bool,
@@ -280,7 +338,8 @@ def data_build(
     ] = False,
 ) -> None:
     """Build model observable data from a local raw level CSV."""
-    model = Model1002(
+    model_obj = _resolve_model(
+        model_name=model,
         subspec=subspec,
         settings={
             "hpfilter_population": hpfilter_population,
@@ -289,7 +348,7 @@ def data_build(
     )
     try:
         transformed = build_data_csv(
-            model,
+            model_obj,
             input_path=input_path,
             output_path=output_path,
             population_forecast_path=population_forecast_path,
@@ -302,12 +361,13 @@ def data_build(
         "population_forecast": (
             None if population_forecast_path is None else str(population_forecast_path)
         ),
+        "model": model,
         "subspec": subspec,
         "hpfilter_population": hpfilter_population,
         "population_hpfilter_lambda": population_hpfilter_lambda,
         "rows": int(transformed.shape[0]),
         "columns": int(transformed.shape[1]),
-        "observables": len(model.observables),
+        "observables": len(model_obj.observables),
         "first_date": (
             None
             if "date" not in transformed or transformed.empty
@@ -322,7 +382,7 @@ def data_build(
     if json_output:
         typer.echo(json.dumps(payload, indent=2))
         return
-    table = Table(title=f"{model.description()} data build")
+    table = Table(title=f"{model_obj.description()} data build")
     table.add_column("Metric")
     table.add_column("Value")
     for key, value in payload.items():
@@ -343,6 +403,10 @@ def data_sources(
         str | None,
         typer.Option("--vintage", help="Data vintage suffix for source files."),
     ] = None,
+    model: Annotated[
+        str,
+        typer.Option("--model", help="Model name from available model registry."),
+    ] = "m1002",
     subspec: Annotated[str, typer.Option(help="Model1002 subspec to inspect.")] = "ss10",
     json_output: Annotated[
         bool,
@@ -350,10 +414,12 @@ def data_sources(
     ] = False,
 ) -> None:
     """List source files and mnemonics required for local observable data builds."""
-    model = Model1002(subspec=subspec)
-    selected_vintage = str(vintage if vintage is not None else model.get_setting("data_vintage"))
+    model_obj = _resolve_model(model_name=model, subspec=subspec)
+    selected_vintage = str(
+        vintage if vintage is not None else model_obj.get_setting("data_vintage")
+    )
     requirements = data_source_requirements(
-        model,
+        model_obj,
         source_root=source_root,
         vintage=vintage,
     )
@@ -377,6 +443,7 @@ def data_sources(
         for requirement in requirements
     ]
     payload = {
+        "model": model,
         "subspec": subspec,
         "vintage": selected_vintage,
         "source_root": None if source_root is None else str(source_root),
@@ -385,7 +452,7 @@ def data_sources(
     if json_output:
         typer.echo(json.dumps(payload, indent=2))
         return
-    table = Table(title=f"{model.description()} data source requirements")
+    table = Table(title=f"{model_obj.description()} data source requirements")
     table.add_column("Source")
     table.add_column("Series")
     table.add_column("Optional")
@@ -420,6 +487,10 @@ def data_fetch_fred(
         str,
         typer.Option("--aggregation", help="Quarter aggregation for higher-frequency FRED series."),
     ] = "mean",
+    model: Annotated[
+        str,
+        typer.Option("--model", help="Model name from available model registry."),
+    ] = "m1002",
     subspec: Annotated[str, typer.Option(help="Model1002 subspec to inspect.")] = "ss10",
     json_output: Annotated[
         bool,
@@ -427,10 +498,10 @@ def data_fetch_fred(
     ] = False,
 ) -> None:
     """Fetch current public FRED graph CSV data for model-declared FRED series."""
-    model = Model1002(subspec=subspec)
+    model_obj = _resolve_model(model_name=model, subspec=subspec)
     try:
         levels = download_current_fred_source_csv(
-            model,
+            model_obj,
             output_path=output_path,
             start_date=start_date,
             end_date=end_date,
@@ -440,6 +511,7 @@ def data_fetch_fred(
         raise _not_ported_exit(str(err)) from err
     payload = {
         "output": str(output_path),
+        "model": model,
         "subspec": subspec,
         "start_date": start_date,
         "end_date": end_date,
@@ -457,7 +529,7 @@ def data_fetch_fred(
     if json_output:
         typer.echo(json.dumps(payload, indent=2))
         return
-    table = Table(title=f"{model.description()} FRED source fetch")
+    table = Table(title=f"{model_obj.description()} FRED source fetch")
     table.add_column("Metric")
     table.add_column("Value")
     for key, value in payload.items():
@@ -489,6 +561,17 @@ def data_fetch_fred_api(
             help="FRED realtime_end date, e.g. 2018-11-15 or 181115.",
         ),
     ] = None,
+    vintage_dates: Annotated[
+        str | None,
+        typer.Option(
+            "--vintage-dates",
+            help="Comma-separated FRED vintage_dates; cannot be combined with realtime bounds.",
+        ),
+    ] = None,
+    output_type: Annotated[
+        int | None,
+        typer.Option("--output-type", help="FRED output_type 1, 2, 3, or 4."),
+    ] = None,
     start_date: Annotated[
         str | None,
         typer.Option("--start-date", help="First required source quarter, e.g. 1959-Q3."),
@@ -501,6 +584,10 @@ def data_fetch_fred_api(
         str,
         typer.Option("--aggregation", help="Quarter aggregation for higher-frequency FRED series."),
     ] = "mean",
+    model: Annotated[
+        str,
+        typer.Option("--model", help="Model name from available model registry."),
+    ] = "m1002",
     subspec: Annotated[str, typer.Option(help="Model1002 subspec to inspect.")] = "ss10",
     json_output: Annotated[
         bool,
@@ -508,14 +595,16 @@ def data_fetch_fred_api(
     ] = False,
 ) -> None:
     """Fetch FRED observations API data for model-declared FRED series."""
-    model = Model1002(subspec=subspec)
+    model_obj = _resolve_model(model_name=model, subspec=subspec)
     try:
         levels = download_fred_api_source_csv(
-            model,
+            model_obj,
             output_path=output_path,
             api_key=api_key,
             realtime_start=realtime_start,
             realtime_end=realtime_end,
+            vintage_dates=vintage_dates,
+            output_type=output_type,
             start_date=start_date,
             end_date=end_date,
             aggregation=aggregation,
@@ -524,9 +613,16 @@ def data_fetch_fred_api(
         raise _not_ported_exit(str(err)) from err
     payload = {
         "output": str(output_path),
+        "model": model,
         "subspec": subspec,
         "realtime_start": realtime_start,
         "realtime_end": realtime_end,
+        "vintage_dates": vintage_dates,
+        "output_type": _effective_fred_output_type(
+            output_type,
+            uses_realtime=realtime_start is not None or realtime_end is not None,
+            uses_vintage_dates=vintage_dates is not None,
+        ),
         "start_date": start_date,
         "end_date": end_date,
         "aggregation": aggregation,
@@ -543,7 +639,7 @@ def data_fetch_fred_api(
     if json_output:
         typer.echo(json.dumps(payload, indent=2))
         return
-    table = Table(title=f"{model.description()} FRED API source fetch")
+    table = Table(title=f"{model_obj.description()} FRED API source fetch")
     table.add_column("Metric")
     table.add_column("Value")
     for key, value in payload.items():
@@ -569,15 +665,26 @@ def data_prepare_sources(
         str | None,
         typer.Option(
             "--realtime-start",
-            help="FRED realtime_start date, e.g. 2018-11-15 or 181115.",
+            help="FRED realtime_start date; defaults to --vintage.",
         ),
     ] = None,
     realtime_end: Annotated[
         str | None,
         typer.Option(
             "--realtime-end",
-            help="FRED realtime_end date, e.g. 2018-11-15 or 181115.",
+            help="FRED realtime_end date; defaults to --realtime-start or --vintage.",
         ),
+    ] = None,
+    vintage_dates: Annotated[
+        str | None,
+        typer.Option(
+            "--vintage-dates",
+            help="Comma-separated FRED vintage_dates; cannot be combined with realtime bounds.",
+        ),
+    ] = None,
+    output_type: Annotated[
+        int | None,
+        typer.Option("--output-type", help="FRED output_type 1, 2, 3, or 4."),
     ] = None,
     start_date: Annotated[
         str | None,
@@ -591,6 +698,10 @@ def data_prepare_sources(
         str,
         typer.Option("--aggregation", help="Quarter aggregation for higher-frequency FRED series."),
     ] = "mean",
+    model: Annotated[
+        str,
+        typer.Option("--model", help="Model name from available model registry."),
+    ] = "m1002",
     overwrite: Annotated[
         bool,
         typer.Option("--overwrite", help="Refresh the FRED source file even if it exists."),
@@ -602,11 +713,22 @@ def data_prepare_sources(
     ] = False,
 ) -> None:
     """Fetch the canonical FRED source file and report remaining local source gaps."""
-    model = Model1002(subspec=subspec)
-    selected_vintage = str(vintage if vintage is not None else model.get_setting("data_vintage"))
+    model_obj = _resolve_model(model_name=model, subspec=subspec)
+    selected_vintage = str(
+        vintage if vintage is not None else model_obj.get_setting("data_vintage")
+    )
+    if vintage_dates is not None and (realtime_start is not None or realtime_end is not None):
+        msg = "--vintage-dates cannot be combined with --realtime-start or --realtime-end."
+        raise _not_ported_exit(msg)
+    effective_realtime_start = (
+        None if vintage_dates is not None else realtime_start or selected_vintage
+    )
+    effective_realtime_end = (
+        None if vintage_dates is not None else realtime_end or effective_realtime_start
+    )
     source_root.mkdir(parents=True, exist_ok=True)
     initial_requirements = data_source_requirements(
-        model,
+        model_obj,
         source_root=source_root,
         vintage=selected_vintage,
     )
@@ -624,11 +746,13 @@ def data_prepare_sources(
     try:
         if overwrite or fred_requirement.existing_path is None:
             levels = download_fred_api_source_csv(
-                model,
+                model_obj,
                 output_path=fred_output,
                 api_key=api_key,
-                realtime_start=realtime_start,
-                realtime_end=realtime_end,
+                realtime_start=effective_realtime_start,
+                realtime_end=effective_realtime_end,
+                vintage_dates=vintage_dates,
+                output_type=output_type,
                 start_date=start_date,
                 end_date=end_date,
                 aggregation=aggregation,
@@ -640,7 +764,7 @@ def data_prepare_sources(
         raise _not_ported_exit(str(err)) from err
 
     requirements = data_source_requirements(
-        model,
+        model_obj,
         source_root=source_root,
         vintage=selected_vintage,
     )
@@ -657,10 +781,18 @@ def data_prepare_sources(
     ]
     payload = {
         "source_root": str(source_root),
+        "model": model,
         "subspec": subspec,
         "vintage": selected_vintage,
-        "realtime_start": realtime_start,
-        "realtime_end": realtime_end,
+        "realtime_start": effective_realtime_start,
+        "realtime_end": effective_realtime_end,
+        "vintage_dates": vintage_dates,
+        "output_type": _effective_fred_output_type(
+            output_type,
+            uses_realtime=effective_realtime_start is not None
+            or effective_realtime_end is not None,
+            uses_vintage_dates=vintage_dates is not None,
+        ),
         "start_date": start_date,
         "end_date": end_date,
         "aggregation": aggregation,
@@ -674,7 +806,7 @@ def data_prepare_sources(
     if json_output:
         typer.echo(json.dumps(payload, indent=2))
         return
-    table = Table(title=f"{model.description()} source preparation")
+    table = Table(title=f"{model_obj.description()} source preparation")
     table.add_column("Metric")
     table.add_column("Value")
     for key, value in payload.items():
@@ -713,6 +845,10 @@ def data_build_sources(
             help="Optional population forecast CSV used to extend HP filtering.",
         ),
     ] = None,
+    model: Annotated[
+        str,
+        typer.Option("--model", help="Model name from available model registry."),
+    ] = "m1002",
     subspec: Annotated[str, typer.Option(help="Model1002 subspec to build.")] = "ss10",
     hpfilter_population: Annotated[
         bool,
@@ -734,7 +870,8 @@ def data_build_sources(
     ] = False,
 ) -> None:
     """Build observable data from local raw source files declared by the model."""
-    model = Model1002(
+    model_obj = _resolve_model(
+        model_name=model,
         subspec=subspec,
         settings={
             "hpfilter_population": hpfilter_population,
@@ -743,7 +880,7 @@ def data_build_sources(
     )
     try:
         transformed = build_data_csv_from_sources(
-            model,
+            model_obj,
             source_root=source_root,
             output_path=output_path,
             vintage=vintage,
@@ -756,7 +893,8 @@ def data_build_sources(
     payload = {
         "source_root": str(source_root),
         "output": str(output_path),
-        "vintage": str(vintage if vintage is not None else model.get_setting("data_vintage")),
+        "model": model,
+        "vintage": str(vintage if vintage is not None else model_obj.get_setting("data_vintage")),
         "start_date": start_date,
         "end_date": end_date,
         "population_forecast": (
@@ -767,7 +905,7 @@ def data_build_sources(
         "population_hpfilter_lambda": population_hpfilter_lambda,
         "rows": int(transformed.shape[0]),
         "columns": int(transformed.shape[1]),
-        "observables": len(model.observables),
+        "observables": len(model_obj.observables),
         "first_date": (
             None
             if "date" not in transformed or transformed.empty
@@ -782,7 +920,7 @@ def data_build_sources(
     if json_output:
         typer.echo(json.dumps(payload, indent=2))
         return
-    table = Table(title=f"{model.description()} source data build")
+    table = Table(title=f"{model_obj.description()} source data build")
     table.add_column("Metric")
     table.add_column("Value")
     for key, value in payload.items():
@@ -792,20 +930,25 @@ def data_build_sources(
 
 @app.command()
 def solve(
-    subspec: str = "ss10",
+    model: Annotated[
+        str,
+        typer.Option("--model", help="Model name from available model registry."),
+    ] = "m1002",
+    subspec: Annotated[str, typer.Option(help="Model1002 subspec to solve.")] = "ss10",
     backend: str = "auto",
     device: str = "auto",
 ) -> None:
     """Construct Model1002 and run the state-space solve once translated."""
-    model = Model1002(
+    model_obj = _resolve_model(
+        model_name=model,
         subspec=subspec,
         runtime=RuntimeConfig(backend=_parse_backend(backend), device=_parse_device(device)),
     )
     try:
-        system = compute_system(model)
+        system = compute_system(model_obj)
     except NotPortedError as err:
         raise _not_ported_exit(str(err)) from err
-    table = Table(title=f"{model.description()} solved system")
+    table = Table(title=f"{model_obj.description()} solved system")
     table.add_column("Matrix")
     table.add_column("Shape")
     table.add_row("TTT", str(system.transition.TTT.shape))
@@ -827,7 +970,11 @@ def estimate(
         Path,
         typer.Option("--data", help="CSV data path used for posterior evaluation."),
     ],
-    subspec: str = "ss10",
+    model: Annotated[
+        str,
+        typer.Option("--model", help="Model name from available model registry."),
+    ] = "m1002",
+    subspec: Annotated[str, typer.Option(help="Model1002 subspec to evaluate.")] = "ss10",
     backend: Annotated[str, typer.Option(help="Runtime backend.")] = "auto",
     device: Annotated[str, typer.Option(help="Runtime device.")] = "auto",
     optimize: Annotated[
@@ -859,10 +1006,60 @@ def estimate(
         int,
         typer.Option("--mh-burnin", help="Metropolis-Hastings burn-in draws."),
     ] = 0,
+    mh_blocks: Annotated[
+        int,
+        typer.Option("--mh-blocks", help="Metropolis-Hastings parameter-block update blocks."),
+    ] = 1,
+    mh_param_blocks: Annotated[
+        int,
+        typer.Option(
+            "--mh-param-blocks",
+            help="Number of parameter blocks to sample each step.",
+        ),
+    ] = 1,
+    mh_thin: Annotated[
+        int,
+        typer.Option("--mh-thin", help="Thin chain by this factor when retaining samples."),
+    ] = 1,
     proposal_scale: Annotated[
         float,
         typer.Option("--proposal-scale", help="Scale applied to proposal covariance."),
     ] = 1.0,
+    mh_burn_blocks: Annotated[
+        int,
+        typer.Option(
+            "--mh-burn-blocks",
+            help="Number of initial blocks to discard during parameter-block updates.",
+        ),
+    ] = 0,
+    mh_adaptive_accept: Annotated[
+        bool,
+        typer.Option(
+            "--mh-adaptive-accept",
+            help="Enable adaptive acceptance scaling in blockwise Metropolis-Hastings.",
+        ),
+    ] = False,
+    mh_target_accept: Annotated[
+        float,
+        typer.Option(
+            "--mh-target-accept",
+            help="Target acceptance probability when adaptive acceptance is enabled.",
+        ),
+    ] = 0.25,
+    mh_alpha: Annotated[
+        float,
+        typer.Option(
+            "--mh-alpha",
+            help="Adaptive proposal mixture weight in mixed Gaussian component.",
+        ),
+    ] = 1.0,
+    mh_c: Annotated[
+        float,
+        typer.Option(
+            "--mh-c",
+            help="Adaptive proposal scale multiplier in mixed Gaussian component.",
+        ),
+    ] = 0.5,
     proposal_covariance_path: Annotated[
         Path | None,
         typer.Option(
@@ -892,17 +1089,18 @@ def estimate(
     ] = False,
 ) -> None:
     """Evaluate the translated Model1002 likelihood and posterior at current parameters."""
-    model = Model1002(
+    model_obj = _resolve_model(
+        model_name=model,
         subspec=subspec,
         runtime=RuntimeConfig(backend=_parse_backend(backend), device=_parse_device(device)),
     )
     try:
-        data_frame = load_data(model, path=data_path)
-        start_date = _sample_start_date(model, data_frame, in_sample=True)
-        data = df_to_matrix(model, data_frame)
+        data_frame = load_data(model_obj, path=data_path)
+        start_date = _sample_start_date(model_obj, data_frame, in_sample=True)
+        data = df_to_matrix(model_obj, data_frame)
         mode_result = None if mode_input is None else load_estimation_mode(mode_input)
         result = estimate_model(
-            model,
+            model_obj,
             data,
             start_date=start_date,
             optimize=optimize,
@@ -911,7 +1109,15 @@ def estimate(
             compute_hessian=hessian,
             mh_draws=mh_draws,
             mh_burnin=mh_burnin,
+            mh_blocks=mh_blocks,
+            mh_param_blocks=mh_param_blocks,
+            mh_thin=mh_thin,
             proposal_scale=proposal_scale,
+            mh_burn_blocks=mh_burn_blocks,
+            mh_adaptive_accept=mh_adaptive_accept,
+            mh_target_accept=mh_target_accept,
+            mh_alpha=mh_alpha,
+            mh_c=mh_c,
             proposal_covariance=_load_proposal_covariance(proposal_covariance_path),
             seed=seed,
             mode=mode_result,
@@ -938,6 +1144,7 @@ def estimate(
         raise _not_ported_exit(str(err)) from err
 
     payload = {
+        "model": model,
         "subspec": subspec,
         "log_likelihood": result.log_likelihood,
         "log_prior": result.log_prior,
@@ -972,6 +1179,15 @@ def estimate(
                 "acceptance_rate": result.sampler.acceptance_rate,
                 "seed": result.sampler.seed,
                 "burnin": result.sampler.burnin,
+                "mh_blocks": result.sampler.n_blocks,
+                "mh_param_blocks": result.sampler.n_param_blocks,
+                "mh_thin": result.sampler.mhthin,
+                "mh_burn_blocks": result.sampler.burnin_blocks,
+                "proposal_scale": result.sampler.proposal_scale,
+                "mh_adaptive_accept": result.sampler.adaptive_accept,
+                "mh_target_accept": result.sampler.target_accept,
+                "mh_alpha": result.sampler.alpha,
+                "mh_c": result.sampler.c,
             }
         ),
     }
@@ -979,7 +1195,7 @@ def estimate(
         typer.echo(json.dumps(payload, indent=2))
         return
 
-    table = Table(title=f"{model.description()} posterior evaluation")
+    table = Table(title=f"{model_obj.description()} posterior evaluation")
     table.add_column("Metric")
     table.add_column("Value")
     table.add_row("log_likelihood", f"{result.log_likelihood:.6f}")
@@ -993,12 +1209,21 @@ def estimate(
     if result.sampler is not None:
         table.add_row("mh_draws", str(result.sampler.parameter_draws.shape))
         table.add_row("mh_acceptance", f"{result.sampler.acceptance_rate:.4f}")
+        table.add_row("mh_blocks", str(result.sampler.n_blocks))
+        table.add_row("mh_param_blocks", str(result.sampler.n_param_blocks))
+        table.add_row("mh_thin", str(result.sampler.mhthin))
+        table.add_row("mh_burn_blocks", str(result.sampler.burnin_blocks))
+        table.add_row("proposal_scale", f"{result.sampler.proposal_scale:.4g}")
     console.print(table)
 
 
 @app.command()
 def forecast(
-    subspec: str = "ss10",
+    model: Annotated[
+        str,
+        typer.Option("--model", help="Model name from available model registry."),
+    ] = "m1002",
+    subspec: Annotated[str, typer.Option(help="Model1002 subspec to forecast.")] = "ss10",
     input_type: Annotated[str, typer.Option(help="Forecast input type.")] = "mode",
     cond_type: Annotated[str, typer.Option(help="Conditioning type.")] = "none",
     horizon: Annotated[int, typer.Option(help="Forecast horizon.")] = 40,
@@ -1067,7 +1292,8 @@ def forecast(
     ] = False,
 ) -> None:
     """Run the translated Model1002 unconditional forecast smoke path."""
-    model = Model1002(
+    model_obj = _resolve_model(
+        model_name=model,
         subspec=subspec,
         runtime=RuntimeConfig(backend=_parse_backend(backend), device=_parse_device(device)),
     )
@@ -1079,7 +1305,7 @@ def forecast(
             output_vars.append("forecastpseudo")
             if include_history:
                 output_vars.append("histpseudo")
-        data = _load_cli_data(model, data_path)
+        data = _load_cli_data(model_obj, data_path)
         effective_cond_type = cond_type
         conditional_periods = None
         if zlb_rates is not None:
@@ -1088,7 +1314,7 @@ def forecast(
                 raise ValueError(msg)
             zlb_rate_path = _parse_number_list(zlb_rates)
             data = build_zlb_conditional_observations(
-                model,
+                model_obj,
                 zlb_rate_path,
                 floor=zlb_floor,
                 rate_units=zlb_rate_units,
@@ -1097,7 +1323,7 @@ def forecast(
             conditional_periods = int(zlb_rate_path.size)
         shock_samples = _load_shock_samples(shock_samples_path)
         output = forecast_one(
-            model,
+            model_obj,
             input_type=input_type,
             cond_type=effective_cond_type,
             output_vars=output_vars,
@@ -1111,7 +1337,7 @@ def forecast(
             sampler=_load_sampler_draws(sampler_draws),
         )
         if transformed:
-            output = reverse_transform_forecast(model, output)
+            output = reverse_transform_forecast(model_obj, output)
     except (
         FileNotFoundError,
         KeyError,
@@ -1122,6 +1348,7 @@ def forecast(
         raise _not_ported_exit(str(err)) from err
 
     payload = {
+        "model": model,
         "subspec": subspec,
         "input_type": input_type,
         "cond_type": effective_cond_type,
@@ -1194,7 +1421,7 @@ def forecast(
     if json_output:
         typer.echo(json.dumps(payload, indent=2))
         return
-    table = Table(title=f"{model.description()} forecast")
+    table = Table(title=f"{model_obj.description()} forecast")
     table.add_column("Array")
     table.add_column("Shape")
     table.add_row("states", str(output.states.shape))
@@ -1223,7 +1450,11 @@ def forecast(
 
 @app.command()
 def meansbands(
-    subspec: str = "ss10",
+    model: Annotated[
+        str,
+        typer.Option("--model", help="Model name from available model registry."),
+    ] = "m1002",
+    subspec: Annotated[str, typer.Option(help="Model1002 subspec to compute bands.")] = "ss10",
     input_type: Annotated[str, typer.Option(help="Forecast input type.")] = "mode",
     cond_type: Annotated[str, typer.Option(help="Conditioning type.")] = "none",
     horizon: Annotated[int, typer.Option(help="Forecast horizon.")] = 40,
@@ -1275,18 +1506,18 @@ def meansbands(
     ] = False,
 ) -> None:
     """Compute translated Model1002 deterministic means/bands."""
-    model = Model1002(subspec=subspec)
+    model_obj = _resolve_model(model_name=model, subspec=subspec)
     try:
         output_vars = _forecast_output_vars_for_source(source)
         shock_samples = _load_shock_samples(shock_samples_path)
         bands = compute_meansbands(
-            model,
+            model_obj,
             input_type=input_type,
             cond_type=cond_type,
             output_vars=output_vars,
             horizon=horizon,
             source=source,
-            data=_load_cli_data(model, data_path),
+            data=_load_cli_data(model_obj, data_path),
             history_method=history_method,
             draws=draws,
             seed=seed,
@@ -1299,7 +1530,7 @@ def meansbands(
             if source not in _transformable_band_sources():
                 msg = "--transformed is only valid with observable or pseudo-observable sources."
                 raise ValueError(msg)
-            bands = reverse_transform_meansbands(model, bands, source=source)
+            bands = reverse_transform_meansbands(model_obj, bands, source=source)
     except (
         FileNotFoundError,
         KeyError,
@@ -1310,6 +1541,7 @@ def meansbands(
         raise _not_ported_exit(str(err)) from err
 
     payload = {
+        "model": model,
         "subspec": subspec,
         "input_type": input_type,
         "cond_type": cond_type,
@@ -1331,7 +1563,7 @@ def meansbands(
     if json_output:
         typer.echo(json.dumps(payload, indent=2))
         return
-    table = Table(title=f"{model.description()} means/bands")
+    table = Table(title=f"{model_obj.description()} means/bands")
     table.add_column("Array")
     table.add_column("Shape")
     table.add_row("mean", str(bands.mean.shape))
@@ -1907,6 +2139,10 @@ def vv_export_system(
         Path,
         typer.Option(help="Directory where Python system fixtures will be written."),
     ] = Path("tests/fixtures/candidate"),
+    model: Annotated[
+        str,
+        typer.Option("--model", help="Model name from available model registry."),
+    ] = "m1002",
     subspec: Annotated[str, typer.Option(help="Model1002 subspec to export.")] = "ss10",
     data_vintage: Annotated[
         str,
@@ -1925,7 +2161,8 @@ def vv_export_system(
     ] = False,
 ) -> None:
     """Export the Python Model1002 system fixture for oracle comparison."""
-    model = Model1002(
+    model_obj = _resolve_model(
+        model_name=model,
         subspec=subspec,
         runtime=RuntimeConfig(backend=_parse_backend(backend), device=_parse_device(device)),
         settings=_model1002_settings(
@@ -1934,12 +2171,12 @@ def vv_export_system(
         ),
     )
     try:
-        system = compute_system(model)
+        system = compute_system(model_obj)
         path = save_system_fixture(system, output_dir, filename=filename)
         manifest_path = save_fixture_manifest(
             output_dir,
             _system_manifest(
-                model,
+                model_obj,
                 backend=backend,
                 device=device,
             ),
@@ -1990,6 +2227,10 @@ def vv_export_parameters(
         Path,
         typer.Option(help="Directory where Python parameter fixtures will be written."),
     ] = Path("tests/fixtures/candidate"),
+    model: Annotated[
+        str,
+        typer.Option("--model", help="Model name from available model registry."),
+    ] = "m1002",
     subspec: Annotated[str, typer.Option(help="Model1002 subspec to export.")] = "ss10",
     data_vintage: Annotated[
         str,
@@ -2006,7 +2247,8 @@ def vv_export_parameters(
     ] = False,
 ) -> None:
     """Export Python Model1002 parameter fixtures for oracle comparison."""
-    model = Model1002(
+    model_obj = _resolve_model(
+        model_name=model,
         subspec=subspec,
         settings=_model1002_settings(
             data_vintage=data_vintage,
@@ -2014,10 +2256,10 @@ def vv_export_parameters(
         ),
     )
     try:
-        path = save_parameter_fixture(model.parameters, output_dir, filename=filename)
+        path = save_parameter_fixture(model_obj.parameters, output_dir, filename=filename)
         manifest_path = save_fixture_manifest(
             output_dir,
-            _parameter_manifest(model, parameter_path=path),
+            _parameter_manifest(model_obj, parameter_path=path),
         )
     except ValueError as err:
         console.print(f"[yellow]{err}[/yellow]")
@@ -2029,7 +2271,7 @@ def vv_export_parameters(
         "subspec": subspec,
         "data_vintage": data_vintage,
         "forecast_start": forecast_start,
-        "parameters": len(model.parameters),
+        "parameters": len(model_obj.parameters),
     }
     if json_output:
         typer.echo(json.dumps(payload, indent=2))
@@ -2039,7 +2281,7 @@ def vv_export_parameters(
     table.add_column("Output")
     table.add_column("Subspec")
     table.add_column("Parameters")
-    table.add_row(str(path), subspec, str(len(model.parameters)))
+    table.add_row(str(path), subspec, str(len(model_obj.parameters)))
     console.print(table)
 
 
@@ -2049,6 +2291,10 @@ def vv_export_steady_state(
         Path,
         typer.Option(help="Directory where Python steady-state fixtures will be written."),
     ] = Path("tests/fixtures/candidate"),
+    model: Annotated[
+        str,
+        typer.Option("--model", help="Model name from available model registry."),
+    ] = "m1002",
     subspec: Annotated[str, typer.Option(help="Model1002 subspec to export.")] = "ss10",
     data_vintage: Annotated[
         str,
@@ -2065,7 +2311,8 @@ def vv_export_steady_state(
     ] = False,
 ) -> None:
     """Export Python Model1002 steady-state fixtures for oracle comparison."""
-    model = Model1002(
+    model_obj = _resolve_model(
+        model_name=model,
         subspec=subspec,
         settings=_model1002_settings(
             data_vintage=data_vintage,
@@ -2073,11 +2320,11 @@ def vv_export_steady_state(
         ),
     )
     try:
-        steady_state = model.steadystate()
+        steady_state = model_obj.steadystate()
         path = save_steady_state_fixture(steady_state, output_dir, filename=filename)
         manifest_path = save_fixture_manifest(
             output_dir,
-            _steady_state_manifest(model, steady_state_path=path),
+            _steady_state_manifest(model_obj, steady_state_path=path),
         )
     except (NotPortedError, ValueError) as err:
         console.print(f"[yellow]{err}[/yellow]")
@@ -2109,6 +2356,10 @@ def vv_export_matrices(
         Path,
         typer.Option(help="Directory where Python matrix fixtures will be written."),
     ] = Path("tests/fixtures/candidate"),
+    model: Annotated[
+        str,
+        typer.Option("--model", help="Model name from available model registry."),
+    ] = "m1002",
     subspec: Annotated[str, typer.Option(help="Model1002 subspec to export.")] = "ss10",
     data_vintage: Annotated[
         str,
@@ -2132,7 +2383,8 @@ def vv_export_matrices(
     """Export Model1002 canonical, transition, and system fixtures for oracle comparison."""
     solve_method = _parse_canonical_solve_method(method)
     runtime = RuntimeConfig(backend=_parse_backend(backend), device=_parse_device(device))
-    model = Model1002(
+    model_obj = _resolve_model(
+        model_name=model,
         subspec=subspec,
         runtime=runtime,
         settings=_model1002_settings(
@@ -2141,18 +2393,18 @@ def vv_export_matrices(
         ),
     )
     try:
-        canonical = model.equilibrium_matrices()
+        canonical = model_obj.equilibrium_matrices()
         solved = solve_canonical(canonical, method=solve_method)
-        system = compute_system(model, method=solve_method)
-        parameter_path = save_parameter_fixture(model.parameters, output_dir)
-        steady_state_path = save_steady_state_fixture(model.steady_state, output_dir)
+        system = compute_system(model_obj, method=solve_method)
+        parameter_path = save_parameter_fixture(model_obj.parameters, output_dir)
+        steady_state_path = save_steady_state_fixture(model_obj.steady_state, output_dir)
         canonical_path = save_canonical_fixture(canonical, output_dir)
         transition_path = save_transition_fixture(solved, output_dir)
         system_path = save_system_fixture(system, output_dir)
         manifest_path = save_fixture_manifest(
             output_dir,
             _matrix_manifest(
-                model,
+                model_obj,
                 parameter_path=parameter_path,
                 steady_state_path=steady_state_path,
                 canonical_path=canonical_path,
@@ -2219,8 +2471,8 @@ def vv_export_matrices(
     table.add_column("System")
     table.add_row(
         str(output_dir),
-        str(len(model.parameters)),
-        str(len(model.steady_state)),
+        str(len(model_obj.parameters)),
+        str(len(model_obj.steady_state)),
         str(canonical.Gamma0.shape),
         str(solved.transition.TTT.shape),
         str(system.transition.TTT.shape),
@@ -2234,6 +2486,10 @@ def vv_export_forecast(
         Path,
         typer.Option(help="Directory where Python forecast fixtures will be written."),
     ] = Path("tests/fixtures/candidate"),
+    model: Annotated[
+        str,
+        typer.Option("--model", help="Model name from available model registry."),
+    ] = "m1002",
     subspec: Annotated[str, typer.Option(help="Model1002 subspec to export.")] = "ss10",
     data_vintage: Annotated[
         str,
@@ -2310,7 +2566,8 @@ def vv_export_forecast(
     ] = False,
 ) -> None:
     """Export the Python Model1002 forecast fixture for oracle comparison."""
-    model = Model1002(
+    model_obj = _resolve_model(
+        model_name=model,
         subspec=subspec,
         settings=_model1002_settings(
             data_vintage=data_vintage,
@@ -2325,7 +2582,7 @@ def vv_export_forecast(
             output_vars.append("forecastpseudo")
             if include_history:
                 output_vars.append("histpseudo")
-        data = _load_cli_data(model, data_path)
+        data = _load_cli_data(model_obj, data_path)
         effective_cond_type = cond_type
         conditional_periods = None
         if zlb_rates is not None:
@@ -2334,7 +2591,7 @@ def vv_export_forecast(
                 raise ValueError(msg)
             zlb_rate_path = _parse_number_list(zlb_rates)
             data = build_zlb_conditional_observations(
-                model,
+                model_obj,
                 zlb_rate_path,
                 floor=zlb_floor,
                 rate_units=zlb_rate_units,
@@ -2344,7 +2601,7 @@ def vv_export_forecast(
         sampler = _load_sampler_draws(sampler_draws)
         shock_samples = _load_shock_samples(shock_samples_path)
         forecast = forecast_one(
-            model,
+            model_obj,
             input_type=input_type,
             cond_type=effective_cond_type,
             output_vars=output_vars,
@@ -2358,12 +2615,12 @@ def vv_export_forecast(
             sampler=sampler,
         )
         if transformed:
-            forecast = reverse_transform_forecast(model, forecast)
+            forecast = reverse_transform_forecast(model_obj, forecast)
         path = save_forecast_fixture(forecast, output_dir, filename=filename)
         manifest_path = save_fixture_manifest(
             output_dir,
             _forecast_manifest(
-                model,
+                model_obj,
                 forecast,
                 input_type=input_type,
                 cond_type=effective_cond_type,
@@ -2482,6 +2739,10 @@ def vv_export_meansbands(
         Path,
         typer.Option(help="Directory where Python means/bands fixtures will be written."),
     ] = Path("tests/fixtures/candidate"),
+    model: Annotated[
+        str,
+        typer.Option("--model", help="Model name from available model registry."),
+    ] = "m1002",
     subspec: Annotated[str, typer.Option(help="Model1002 subspec to export.")] = "ss10",
     data_vintage: Annotated[
         str,
@@ -2543,7 +2804,8 @@ def vv_export_meansbands(
     ] = False,
 ) -> None:
     """Export the Python Model1002 means/bands fixture for oracle comparison."""
-    model = Model1002(
+    model_obj = _resolve_model(
+        model_name=model,
         subspec=subspec,
         settings=_model1002_settings(
             data_vintage=data_vintage,
@@ -2555,13 +2817,13 @@ def vv_export_meansbands(
         sampler = _load_sampler_draws(sampler_draws)
         shock_samples = _load_shock_samples(shock_samples_path)
         bands = compute_meansbands(
-            model,
+            model_obj,
             input_type=input_type,
             cond_type=cond_type,
             output_vars=output_vars,
             horizon=horizon,
             source=source,
-            data=_load_cli_data(model, data_path),
+            data=_load_cli_data(model_obj, data_path),
             history_method=history_method,
             draws=draws,
             seed=seed,
@@ -2574,12 +2836,12 @@ def vv_export_meansbands(
             if source not in _transformable_band_sources():
                 msg = "--transformed is only valid with observable or pseudo-observable sources."
                 raise ValueError(msg)
-            bands = reverse_transform_meansbands(model, bands, source=source)
+            bands = reverse_transform_meansbands(model_obj, bands, source=source)
         path = save_meansbands_fixture(bands, output_dir, filename=filename)
         manifest_path = save_fixture_manifest(
             output_dir,
             _meansbands_manifest(
-                model,
+                model_obj,
                 bands,
                 input_type=input_type,
                 cond_type=cond_type,
@@ -2647,6 +2909,10 @@ def vv_export_kalman(
         Path,
         typer.Option(help="Directory where Python Kalman fixtures will be written."),
     ] = Path("tests/fixtures/candidate"),
+    model: Annotated[
+        str,
+        typer.Option("--model", help="Model name from available model registry."),
+    ] = "m1002",
     subspec: Annotated[str, typer.Option(help="Model1002 subspec to export.")] = "ss10",
     data_vintage: Annotated[
         str,
@@ -2667,7 +2933,8 @@ def vv_export_kalman(
     ] = False,
 ) -> None:
     """Export Python Model1002 Kalman filter arrays for oracle comparison."""
-    model = Model1002(
+    model_obj = _resolve_model(
+        model_name=model,
         subspec=subspec,
         settings=_model1002_settings(
             data_vintage=data_vintage,
@@ -2675,18 +2942,18 @@ def vv_export_kalman(
         ),
     )
     try:
-        data = _load_cli_data(model, data_path)
+        data = _load_cli_data(model_obj, data_path)
         if data is None:
             msg = "--data is required for Kalman fixture export."
             raise ValueError(msg)
-        start_date = _sample_start_date(model, data, in_sample=True)
-        observations = df_to_matrix(model, cast(Any, data), in_sample=True)
-        system = compute_system(model)
+        start_date = _sample_start_date(model_obj, data, in_sample=True)
+        observations = df_to_matrix(model_obj, cast(Any, data), in_sample=True)
+        system = compute_system(model_obj)
         kalman = kalman_log_likelihood(
             system,
             observations,
             process_covariances=model_process_covariances(
-                model,
+                model_obj,
                 system,
                 observations.shape[0],
                 start_date=start_date,
@@ -2696,7 +2963,7 @@ def vv_export_kalman(
         manifest_path = save_fixture_manifest(
             output_dir,
             _kalman_manifest(
-                model,
+                model_obj,
                 kalman,
                 data_path=data_path,
                 array_prefix=Path(filename).stem,
@@ -2735,6 +3002,10 @@ def vv_export_posterior(
         Path,
         typer.Option(help="Directory where Python posterior fixtures will be written."),
     ] = Path("tests/fixtures/candidate"),
+    model: Annotated[
+        str,
+        typer.Option("--model", help="Model name from available model registry."),
+    ] = "m1002",
     subspec: Annotated[str, typer.Option(help="Model1002 subspec to export.")] = "ss10",
     data_vintage: Annotated[
         str,
@@ -2755,7 +3026,8 @@ def vv_export_posterior(
     ] = False,
 ) -> None:
     """Export Python Model1002 current-parameter posterior arrays for oracle comparison."""
-    model = Model1002(
+    model_obj = _resolve_model(
+        model_name=model,
         subspec=subspec,
         settings=_model1002_settings(
             data_vintage=data_vintage,
@@ -2763,18 +3035,18 @@ def vv_export_posterior(
         ),
     )
     try:
-        data = _load_cli_data(model, data_path)
+        data = _load_cli_data(model_obj, data_path)
         if data is None:
             msg = "--data is required for posterior fixture export."
             raise ValueError(msg)
-        start_date = _sample_start_date(model, data, in_sample=True)
-        observations = df_to_matrix(model, cast(Any, data), in_sample=True)
-        result = estimate_model(model, observations, start_date=start_date)
-        path = save_posterior_fixture(result, model.parameters, output_dir, filename=filename)
+        start_date = _sample_start_date(model_obj, data, in_sample=True)
+        observations = df_to_matrix(model_obj, cast(Any, data), in_sample=True)
+        result = estimate_model(model_obj, observations, start_date=start_date)
+        path = save_posterior_fixture(result, model_obj.parameters, output_dir, filename=filename)
         manifest_path = save_fixture_manifest(
             output_dir,
             _posterior_manifest(
-                model,
+                model_obj,
                 result,
                 data_path=data_path,
                 array_prefix=Path(filename).stem,
@@ -2821,6 +3093,10 @@ def vv_export_suite(
         Path,
         typer.Option(help="Directory where Python candidate suite fixtures will be written."),
     ] = Path("tests/fixtures/candidate"),
+    model: Annotated[
+        str,
+        typer.Option("--model", help="Model name from available model registry."),
+    ] = "m1002",
     oracle_dir: Annotated[
         Path | None,
         typer.Option("--oracle-dir", help="Optional Julia oracle directory to compare."),
@@ -2891,6 +3167,7 @@ def vv_export_suite(
     """Export the standard Model1002 Python candidate parity suite."""
     try:
         exported = _export_model1002_candidate_suite(
+            model_name=model,
             output_dir=output_dir,
             subspec=subspec,
             data_vintage=data_vintage,
@@ -2976,6 +3253,10 @@ def vv_raw_data_smoke(
         Path,
         typer.Option(help="Directory where observable CSV and candidate fixtures are written."),
     ] = Path("tests/fixtures/raw_data_smoke"),
+    model: Annotated[
+        str,
+        typer.Option("--model", help="Model name from available model registry."),
+    ] = "m1002",
     observables_output: Annotated[
         Path | None,
         typer.Option(
@@ -3087,13 +3368,14 @@ def vv_raw_data_smoke(
             "population_hpfilter_lambda": population_hpfilter_lambda,
         }
     )
-    model = Model1002(
+    model_obj = _resolve_model(
+        model_name=model,
         subspec=subspec,
         settings=settings,
     )
     try:
         transformed = build_data_csv_from_sources(
-            model,
+            model_obj,
             source_root=source_root,
             output_path=observables_path,
             vintage=data_vintage,
@@ -3102,6 +3384,7 @@ def vv_raw_data_smoke(
             population_forecast_path=population_forecast_path,
         )
         exported = _export_model1002_candidate_suite(
+            model_name=model,
             output_dir=output_dir,
             subspec=subspec,
             data_vintage=data_vintage,
@@ -3204,6 +3487,10 @@ def vv_export_hard_target_inputs(
         Path,
         typer.Option(help="Directory where deterministic hard-target smoke inputs are written."),
     ] = Path("tests/fixtures/hard_target_smoke"),
+    model: Annotated[
+        str,
+        typer.Option("--model", help="Model name from available model registry."),
+    ] = "m1002",
     subspec: Annotated[str, typer.Option(help="Model1002 subspec for the smoke inputs.")] = "ss10",
     data_vintage: Annotated[
         str,
@@ -3232,6 +3519,7 @@ def vv_export_hard_target_inputs(
     """Write deterministic CSV/NPZ inputs for the Julia/Python hard-target smoke."""
     try:
         payload = _export_hard_target_smoke_inputs(
+            model_name=model,
             output_dir=output_dir,
             subspec=subspec,
             data_vintage=data_vintage,
@@ -3259,6 +3547,21 @@ def vv_export_hard_target_inputs(
 def _not_ported_exit(message: str) -> NotPortedError:
     console.print(f"[yellow]{message}[/yellow]")
     raise typer.Exit(code=2)
+
+
+def _effective_fred_output_type(
+    output_type: int | None,
+    *,
+    uses_realtime: bool,
+    uses_vintage_dates: bool,
+) -> int | None:
+    if output_type is not None:
+        return output_type
+    if uses_vintage_dates:
+        return 2
+    if uses_realtime:
+        return 1
+    return None
 
 
 def _source_requirement(requirements: list[Any], source: str) -> Any:
@@ -3344,6 +3647,7 @@ def _financial_frictions_labels() -> dict[str, dict[str, list[str]]]:
 def _export_hard_target_smoke_inputs(
     *,
     output_dir: Path,
+    model_name: str,
     subspec: str,
     data_vintage: str,
     forecast_start: str,
@@ -3361,19 +3665,21 @@ def _export_hard_target_smoke_inputs(
         msg = "--draws must be positive."
         raise ValueError(msg)
 
-    model = Model1002(
+    model = _resolve_model(
+        model_name=model_name,
         subspec=subspec,
         settings=_model1002_settings(
             data_vintage=data_vintage,
             forecast_start=forecast_start,
         ),
     )
+    canonical_model_name = model.spec
     output_dir.mkdir(parents=True, exist_ok=True)
     dates = _quarters_before(forecast_start, periods)
     observables_path = output_dir / "observables.csv"
     shock_samples_path = output_dir / "zero_shocks.npz"
     manifest_path = output_dir / "hard_target_smoke_manifest.json"
-    oracle_path = output_dir / "oracle" / f"m1002_{subspec}_hardtarget.h5"
+    oracle_path = output_dir / "oracle" / f"{canonical_model_name}_{subspec}_hardtarget.h5"
     candidate_dir = output_dir / "candidate"
     observable_names = list(model.observables)
     shock_names = list(model.indexes.exogenous_shocks)
@@ -3415,6 +3721,8 @@ def _export_hard_target_smoke_inputs(
         "nydsge",
         "vv",
         "export-suite",
+        "--model",
+        canonical_model_name,
         "--output-dir",
         str(candidate_dir),
         "--data",
@@ -3492,6 +3800,7 @@ def _quarter_label_from_index(value: int) -> str:
 
 def _export_model1002_candidate_suite(
     *,
+    model_name: str,
     output_dir: Path,
     subspec: str,
     data_vintage: str,
@@ -3511,7 +3820,8 @@ def _export_model1002_candidate_suite(
     if full_draws < 0:
         msg = "--full-draws must be nonnegative."
         raise ValueError(msg)
-    model = Model1002(
+    model = _resolve_model(
+        model_name=model_name,
         subspec=subspec,
         settings=_model1002_settings(
             data_vintage=data_vintage,
@@ -4515,6 +4825,15 @@ def _sampler_manifest(
         "log_posterior_shape": list(sampler.log_posterior.shape),
         "accepted_shape": list(sampler.accepted.shape),
         "proposal_covariance_shape": list(sampler.proposal_covariance.shape),
+        "n_blocks": int(sampler.n_blocks),
+        "n_param_blocks": int(sampler.n_param_blocks),
+        "mhthin": int(sampler.mhthin),
+        "burnin_blocks": int(sampler.burnin_blocks),
+        "proposal_scale": float(sampler.proposal_scale),
+        "adaptive_accept": bool(sampler.adaptive_accept),
+        "target_accept": float(sampler.target_accept),
+        "alpha": float(sampler.alpha),
+        "c": float(sampler.c),
         "draws": int(sampler.parameter_draws.shape[0]),
         "parameter_count": int(sampler.parameter_draws.shape[1]),
         "acceptance_rate": float(sampler.acceptance_rate),
@@ -4804,3 +5123,7 @@ def _parse_number_list(value: str) -> np.ndarray:
 
 app.add_typer(data_app, name="data")
 app.add_typer(vv_app, name="vv")
+
+
+if __name__ == "__main__":
+    app()
