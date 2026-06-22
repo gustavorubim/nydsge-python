@@ -128,6 +128,7 @@ src/nydsge/
   solve.py                    Gensys and state-space solve helpers.
   vv.py                       Fixture export, coverage, and comparison tools.
   models/
+    registry.py               Discoverable model constructor registry.
     m1002*.py                 Model1002 translation surfaces.
 
 tools/oracle_julia/
@@ -153,6 +154,28 @@ tests/
 - CPU parity uses NumPy/SciPy float64 and remains the release-blocking oracle.
 - PyTorch MPS is an accelerator path for float32; float64 uses CPU parity paths.
 
+### Acceleration install
+
+Core package install:
+
+```powershell
+uv sync
+```
+
+Optional accelerator dependencies:
+
+```powershell
+# PyTorch (CPU-only by default; use PyTorch selectors for CUDA/MPS).
+uv sync --extra torch
+
+# JAX (CPU + Linux CUDA in compatible environments).
+uv sync --extra jax
+```
+
+For Windows CUDA, install a PyTorch CUDA wheel matching your toolkit before using
+`--extra torch` (or let your preferred CUDA-enabled PyTorch distribution resolve
+it).
+
 ## Development Setup
 
 ```powershell
@@ -167,6 +190,7 @@ Useful smoke checks:
 
 ```powershell
 uv run nydsge doctor
+uv run nydsge models --json
 uv run nydsge solve
 uv run nydsge bench --kernel all --horizon 40 --periods 40 --batches 8 --draws 2 --repeats 3
 uv run nydsge bench --kernel all --horizon 40 --periods 40 --batches 8 --draws 2 --repeats 3 --output reports\benchmarks\local.json
@@ -183,12 +207,32 @@ zero-shock forecast/history, and means/bands path.
 Use `--baseline` with externally generated oracle/Julia benchmark JSON to attach
 baseline elapsed times and speedup ratios without making Python call Julia.
 Use `--output` to persist a versioned benchmark reference report with command
-parameters, platform metadata, and result rows for cross-machine timing curation.
+parameters, platform metadata, runtime availability rows, and result rows for
+cross-machine timing curation.
 Generate a Julia forecast baseline with:
 
 ```powershell
 julia +1.8 --project=tools/oracle_julia tools/oracle_julia/benchmark_model1002.jl --out tests/fixtures/oracle/julia_benchmark_model1002.json --kernel forecast --horizon 40 --repeats 3
 uv run nydsge bench --kernel forecast --horizon 40 --repeats 3 --baseline tests/fixtures/oracle/julia_benchmark_model1002.json --json
+```
+
+You can capture a full local + optional baseline bundle in one command for
+cross-machine curation:
+
+```powershell
+uv run python scripts/capture_benchmarks.py --kernel all --output-dir reports\benchmarks --capture-julia-baseline --label windows-cuda --julia-version 1.8
+```
+
+For a cross-machine capture workflow with explicit labels and baseline attachment,
+see [`docs/benchmark_references.md`](docs/benchmark_references.md).
+
+To compare reports across captures:
+
+```powershell
+uv run python scripts/compare_benchmark_reports.py `
+  --report reports\benchmarks\windows-cuda_all_2026-06-22_local.json `
+  --report reports\benchmarks\linux-cuda_all_2026-06-22_local.json `
+  --baseline-machine windows-cuda --baseline-backend numpy
 ```
 
 ## Common CLI Flows
@@ -200,7 +244,7 @@ uv run nydsge data build --input path\to\raw_levels.csv --output path\to\observa
 uv run nydsge data build --input path\to\raw_levels.csv --output path\to\observables.csv --population-forecast path\to\population_forecast.csv
 uv run nydsge data build --input path\to\raw_levels.csv --output path\to\observables.csv --no-hpfilter-population
 uv run nydsge data sources --source-root path\to\raw --vintage 181115 --json
-uv run nydsge data prepare-sources --source-root path\to\raw --vintage 181115 --realtime-start 181115 --realtime-end 181115 --start-date 1959-Q3 --end-date 2018-Q3 --json
+uv run nydsge data prepare-sources --source-root path\to\raw --vintage 181115 --start-date 1959-Q3 --end-date 2018-Q3 --json
 uv run nydsge data fetch-fred --output path\to\raw\fred_current.csv --start-date 1959-Q3 --end-date 2018-Q3
 uv run nydsge data fetch-fred-api --output path\to\raw\fred_181115.csv --realtime-start 181115 --realtime-end 181115 --start-date 1959-Q3 --end-date 2018-Q3
 uv run nydsge data build-sources --source-root path\to\raw --output path\to\observables.csv --start-date 1959-Q3 --end-date 2018-Q3
@@ -211,7 +255,8 @@ mnemonics, candidate local file paths, and whether a source file is currently
 available under `--source-root`.
 `data prepare-sources` creates the source root if needed, fetches the canonical
 FRED vintage file, and reports the remaining local source files required before
-`data build-sources` can run.
+`data build-sources` can run. When `--realtime-start` or `--realtime-end` is
+omitted, `prepare-sources` uses `--vintage` as the point-in-time realtime window.
 `data fetch-fred-api` resolves the FRED API key from `--api-key`, then the
 `FRED_API_KEY` environment variable, then a local `.env` file.
 For Model1002 vintage requests, FRED series known to be optional and unavailable
@@ -219,7 +264,12 @@ in ALFRED are written as all-missing source columns so the rest of the source
 bundle can still be built and compared. FRED JSON error payloads are surfaced as
 data-fetch failures for required series. Required source series must have at
 least one numeric observation in every requested quarter; all-missing required
-quarters fail during source preparation.
+quarters fail during source preparation. When a real-time range returns multiple
+revisions for the same observation date, `data fetch-fred-api` keeps the latest
+realtime row before quarterly aggregation and rejects duplicate dates that lack
+realtime metadata. `data fetch-fred-api --vintage-dates ...` uses FRED's
+vintage-date mode instead of realtime bounds and defaults that request to output
+type 2.
 
 ### Estimation
 
