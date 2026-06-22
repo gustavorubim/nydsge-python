@@ -4,6 +4,7 @@ import io
 import json
 import os
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
@@ -24,6 +25,24 @@ FredFetcher = Callable[[str], bytes]
 
 class DataNotAvailableError(FileNotFoundError):
     """Raised when no local data fixture or input dataset is available."""
+
+
+class FredApiError(ValueError):
+    """Raised when the FRED API returns a JSON error payload."""
+
+    def __init__(self, message: str, *, code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+@dataclass(frozen=True)
+class DataSourceRequirement:
+    source: str
+    mnemonics: tuple[str, ...]
+    optional_mnemonics: tuple[str, ...]
+    candidate_paths: tuple[Path, ...]
+    existing_path: Path | None
 
 
 def annual_to_quarter(values: Any) -> np.ndarray:
@@ -261,12 +280,19 @@ def load_fred_api_source(
                 aggregation=aggregation,
                 fetcher=fetcher,
             )
-        except HTTPError as err:
+        except (HTTPError, FredApiError) as err:
             if required_dates is None or not _is_optional_alfred_missing(mnemonic, err):
                 raise
             series = _missing_source_series(mnemonic, required_dates)
         if required_dates is not None:
             _validate_source_date_coverage(f"FRED:{mnemonic}", series["date"], required_dates)
+            if mnemonic not in OPTIONAL_SOURCE_MNEMONICS:
+                _validate_source_value_coverage(
+                    f"FRED:{mnemonic}",
+                    series["date"],
+                    series[mnemonic],
+                    required_dates,
+                )
             date_index = _quarter_index(series["date"])
             required_set = set(required_dates.tolist())
             series = series.loc[[date in required_set for date in date_index]].reset_index(
@@ -299,6 +325,11 @@ def load_fred_api_series(
     )
     raw = _default_fetcher(url) if fetcher is None else fetcher(url)
     payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        msg = f"FRED API response for {mnemonic} was not a JSON object."
+        raise ValueError(msg)
+    if error_message := _fred_api_error_message(payload):
+        raise FredApiError(error_message, code=_fred_api_error_code(payload))
     observations = payload.get("observations", [])
     if not isinstance(observations, list):
         msg = f"FRED API response for {mnemonic} did not include observations."
@@ -342,6 +373,13 @@ def load_current_fred_source(
         )
         if required_dates is not None:
             _validate_source_date_coverage(f"FRED:{mnemonic}", series["date"], required_dates)
+            if mnemonic not in OPTIONAL_SOURCE_MNEMONICS:
+                _validate_source_value_coverage(
+                    f"FRED:{mnemonic}",
+                    series["date"],
+                    series[mnemonic],
+                    required_dates,
+                )
             date_index = _quarter_index(series["date"])
             required_set = set(required_dates.tolist())
             series = series.loc[[date in required_set for date in date_index]].reset_index(
@@ -436,6 +474,41 @@ def parse_data_sources(model: DSGEModel) -> dict[str, list[str]]:
             if mnemonic not in data_sources[source]:
                 data_sources[source].append(mnemonic)
     return data_sources
+
+
+def data_source_requirements(
+    model: DSGEModel,
+    *,
+    source_root: Path | str | None = None,
+    vintage: str | None = None,
+) -> list[DataSourceRequirement]:
+    """Return local source files needed to build the model's raw level table."""
+
+    selected_vintage = str(
+        vintage if vintage is not None else model.get_setting("data_vintage", "")
+    )
+    root = None if source_root is None else Path(source_root)
+    requirements: list[DataSourceRequirement] = []
+    for source, mnemonics in parse_data_sources(model).items():
+        optional = tuple(name for name in mnemonics if name in OPTIONAL_SOURCE_MNEMONICS)
+        candidates = (
+            () if root is None else tuple(_candidate_source_paths(root, source, selected_vintage))
+        )
+        existing = (
+            None
+            if root is None
+            else _find_source_file(root, source=source, vintage=selected_vintage)
+        )
+        requirements.append(
+            DataSourceRequirement(
+                source=source,
+                mnemonics=tuple(mnemonics),
+                optional_mnemonics=optional,
+                candidate_paths=candidates,
+                existing_path=existing,
+            )
+        )
+    return requirements
 
 
 def prepare_population_data(
@@ -787,14 +860,39 @@ def _strip_dotenv_comment(value: str) -> str:
     return value
 
 
-def _is_optional_alfred_missing(mnemonic: str, err: HTTPError) -> bool:
-    if mnemonic not in OPTIONAL_SOURCE_MNEMONICS or err.code != 400:
-        return False
+def _fred_api_error_message(payload: dict[str, Any]) -> str | None:
+    message = payload.get("error_message", payload.get("message"))
+    if message is None:
+        return None
+    text = str(message).strip()
+    return text or None
+
+
+def _fred_api_error_code(payload: dict[str, Any]) -> int | None:
+    raw_code = payload.get("error_code", payload.get("code"))
+    if raw_code is None:
+        return None
     try:
-        body = err.read().decode("utf-8", errors="replace")
-    except OSError:
+        return int(raw_code)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_optional_alfred_missing(mnemonic: str, err: HTTPError | FredApiError) -> bool:
+    if mnemonic not in OPTIONAL_SOURCE_MNEMONICS:
         return False
-    return "does not exist in ALFRED" in body
+    if isinstance(err, FredApiError):
+        if err.code not in (None, 400):
+            return False
+        body = err.message
+    else:
+        if err.code != 400:
+            return False
+        try:
+            body = err.read().decode("utf-8", errors="replace")
+        except OSError:
+            return False
+    return "does not exist in alfred" in body.lower()
 
 
 def _missing_source_series(mnemonic: str, required_dates: np.ndarray) -> pd.DataFrame:
@@ -877,6 +975,13 @@ def _select_source_columns(
                 continue
             missing.append(mnemonic)
             continue
+        if required_dates is not None and mnemonic not in OPTIONAL_SOURCE_MNEMONICS:
+            _validate_source_value_coverage(
+                f"{source}:{mnemonic}",
+                df["date"],
+                df[column],
+                required_dates,
+            )
         selected[mnemonic] = df[column]
     if missing:
         msg = f"{source} source file is missing required columns: {', '.join(missing)}"
@@ -912,6 +1017,25 @@ def _validate_source_date_coverage(
     if missing:
         labels = ", ".join(_quarter_label_from_index(date) for date in missing)
         msg = f"{source} source file is missing required quarterly dates: {labels}"
+        raise ValueError(msg)
+
+
+def _validate_source_value_coverage(
+    source: str,
+    dates: pd.Series[Any],
+    values: pd.Series[Any],
+    required_dates: np.ndarray,
+) -> None:
+    source_dates = _quarter_index(dates)
+    numeric_values = pd.to_numeric(values, errors="coerce").to_numpy(dtype=np.float64)
+    missing = [
+        date
+        for date in required_dates.tolist()
+        if not np.isfinite(numeric_values[source_dates == date]).any()
+    ]
+    if missing:
+        labels = ", ".join(_quarter_label_from_index(date) for date in missing)
+        msg = f"{source} source file has missing values for required quarterly dates: {labels}"
         raise ValueError(msg)
 
 

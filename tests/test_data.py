@@ -10,9 +10,11 @@ import pytest
 
 from nydsge.data import (
     DataNotAvailableError,
+    FredApiError,
     annual_to_quarter,
     build_data_csv,
     build_data_csv_from_sources,
+    data_source_requirements,
     df_to_matrix,
     download_current_fred_source_csv,
     download_fred_api_source_csv,
@@ -151,6 +153,19 @@ def test_parse_data_sources_groups_observable_mnemonics_by_source() -> None:
     assert sources["ANTGDP"] == ["antgdp1"]
 
 
+def test_data_source_requirements_reports_candidate_paths_and_optional_columns(tmp_path) -> None:
+    model = Model1002(settings={"n_mon_anticipated_shocks": 0})
+    (tmp_path / "fred_181115.csv").write_text("date,GDP\n2016-Q3,1.0\n", encoding="utf-8")
+
+    requirements = data_source_requirements(model, source_root=tmp_path, vintage="181115")
+    by_source = {requirement.source: requirement for requirement in requirements}
+
+    assert by_source["FRED"].existing_path == tmp_path / "fred_181115.csv"
+    assert "BAMLC8A0C15PYEY" in by_source["FRED"].optional_mnemonics
+    assert by_source["DLX"].existing_path is None
+    assert tmp_path / "dlx_181115.csv" in by_source["DLX"].candidate_paths
+
+
 def test_load_data_levels_from_sources_merges_local_source_files(tmp_path) -> None:
     model = Model1002(
         settings={
@@ -219,6 +234,22 @@ def test_load_data_levels_from_sources_reports_missing_required_dates(tmp_path) 
             model,
             source_root=tmp_path,
             start_date="2016-Q2",
+            end_date="2016-Q4",
+        )
+
+
+def test_load_data_levels_from_sources_reports_missing_required_values(tmp_path) -> None:
+    model = Model1002(settings={"n_mon_anticipated_shocks": 0})
+    raw = _raw_levels_fixture()
+    raw.loc[raw["date"] == "2016-Q3", "GDP"] = np.nan
+    raw.to_csv(tmp_path / "fred_181115.csv", index=False)
+    raw.to_csv(tmp_path / "dlx_181115.csv", index=False)
+
+    with pytest.raises(ValueError, match="FRED:GDP.*2016-Q3"):
+        load_data_levels_from_sources(
+            model,
+            source_root=tmp_path,
+            start_date="2016-Q3",
             end_date="2016-Q4",
         )
 
@@ -307,6 +338,23 @@ def test_download_current_fred_source_csv_validates_required_quarter_coverage(tm
         )
 
 
+def test_download_current_fred_source_csv_validates_required_quarter_values(tmp_path) -> None:
+    model = Model1002(settings={"n_mon_anticipated_shocks": 0})
+
+    def fetcher(url: str) -> bytes:
+        series_id = url.rsplit("id=", 1)[1]
+        return (f"observation_date,{series_id}\n2016-07-01,.\n2016-10-01,2.0\n").encode()
+
+    with pytest.raises(ValueError, match="FRED:GDP.*2016-Q3"):
+        download_current_fred_source_csv(
+            model,
+            output_path=tmp_path / "fred.csv",
+            start_date="2016-Q3",
+            end_date="2016-Q4",
+            fetcher=fetcher,
+        )
+
+
 def test_load_fred_api_series_uses_realtime_and_observation_parameters() -> None:
     captured_url = ""
 
@@ -369,6 +417,27 @@ def test_download_fred_api_source_csv_uses_env_api_key(tmp_path, monkeypatch) ->
     assert "GDP" in levels.columns
 
 
+def test_load_fred_api_source_reports_missing_required_quarter_values(monkeypatch) -> None:
+    monkeypatch.setenv("FRED_API_KEY", "from-env")
+
+    def fetcher(url: str) -> bytes:
+        assert "series_id=GDP" in url
+        return (
+            b'{"observations": ['
+            b'{"date": "2016-07-01", "value": "."},'
+            b'{"date": "2016-10-01", "value": "2.0"}'
+            b"]}"
+        )
+
+    with pytest.raises(ValueError, match="FRED:GDP.*2016-Q3"):
+        load_fred_api_source(
+            ["GDP"],
+            start_date="2016-Q3",
+            end_date="2016-Q4",
+            fetcher=fetcher,
+        )
+
+
 def test_load_fred_api_source_fills_optional_alfred_missing_series(monkeypatch) -> None:
     monkeypatch.setenv("FRED_API_KEY", "from-env")
 
@@ -402,6 +471,49 @@ def test_load_fred_api_source_fills_optional_alfred_missing_series(monkeypatch) 
     assert list(levels["date"]) == ["2016-Q3", "2016-Q4"]
     assert levels["GDP"].tolist() == [1.0, 2.0]
     assert levels["BAMLC8A0C15PYEY"].isna().all()
+
+
+def test_load_fred_api_source_fills_optional_alfred_missing_json_error(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("FRED_API_KEY", "from-env")
+
+    def fetcher(url: str) -> bytes:
+        if "series_id=BAMLC8A0C15PYEY" in url:
+            return (
+                b'{"error_code":400,'
+                b'"error_message":"Bad Request. The series does not exist in ALFRED."}'
+            )
+        return (
+            b'{"observations": ['
+            b'{"date": "2016-07-01", "value": "1.0"},'
+            b'{"date": "2016-10-01", "value": "2.0"}'
+            b"]}"
+        )
+
+    levels = load_fred_api_source(
+        ["GDP", "BAMLC8A0C15PYEY"],
+        realtime_start="181115",
+        realtime_end="181115",
+        start_date="2016-Q3",
+        end_date="2016-Q4",
+        fetcher=fetcher,
+    )
+
+    assert list(levels["date"]) == ["2016-Q3", "2016-Q4"]
+    assert levels["GDP"].tolist() == [1.0, 2.0]
+    assert levels["BAMLC8A0C15PYEY"].isna().all()
+
+
+def test_load_fred_api_series_raises_json_error_for_required_series() -> None:
+    def fetcher(url: str) -> bytes:
+        assert "api_key=secret" in url
+        return b'{"error_code":400,"error_message":"Bad Request. Invalid realtime range."}'
+
+    with pytest.raises(FredApiError, match="Invalid realtime range") as exc_info:
+        load_fred_api_series("GDP", api_key="secret", fetcher=fetcher)
+
+    assert exc_info.value.code == 400
 
 
 def test_download_fred_api_source_csv_uses_dotenv_api_key(tmp_path, monkeypatch) -> None:
