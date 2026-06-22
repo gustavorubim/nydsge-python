@@ -1,13 +1,24 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+import json
+import platform
+import sys
+from dataclasses import asdict, dataclass, replace
+from datetime import UTC, datetime
+from pathlib import Path
 from time import perf_counter
 from typing import Any, Literal, cast
 
 import numpy as np
 
 from nydsge.backends import get_backend
-from nydsge.forecast import ForecastOutput, forecast_linear_system
+from nydsge.estimate import estimate as estimate_model
+from nydsge.forecast import (
+    ForecastOutput,
+    compute_meansbands,
+    forecast_linear_system,
+    forecast_one,
+)
 from nydsge.kalman import KalmanResult, kalman_log_likelihood
 from nydsge.models import Model1002
 from nydsge.runtime import (
@@ -36,9 +47,15 @@ class BenchmarkResult:
     dtype: str
     kernel: str = "forecast"
     elapsed_seconds: float | None = None
-    states_shape: tuple[int, int] | None = None
-    observables_shape: tuple[int, int] | None = None
-    pseudo_observables_shape: tuple[int, int] | None = None
+    states_shape: tuple[int, ...] | None = None
+    observables_shape: tuple[int, ...] | None = None
+    pseudo_observables_shape: tuple[int, ...] | None = None
+    batches: int = 1
+    draws: int = 0
+    artifacts: int | None = None
+    baseline_name: str | None = None
+    baseline_elapsed_seconds: float | None = None
+    speedup_vs_baseline: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -50,6 +67,17 @@ class BenchmarkResult:
             None if self.pseudo_observables_shape is None else list(self.pseudo_observables_shape)
         )
         return payload
+
+
+@dataclass(frozen=True)
+class BenchmarkBaseline:
+    name: str
+    kernel: str
+    elapsed_seconds: float
+    horizon: int | None = None
+    dtype: str | None = None
+    batches: int | None = None
+    draws: int | None = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +97,78 @@ class BackendParityResult:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def benchmark_reference_report(
+    results: list[BenchmarkResult],
+    *,
+    kernel: str,
+    horizon: int,
+    periods: int,
+    batches: int,
+    draws: int,
+    repeats: int,
+    dtype: str,
+    include_pseudo: bool,
+    baseline_path: Path | str | None = None,
+) -> dict[str, Any]:
+    """Build a durable benchmark report for local and cross-machine references."""
+
+    return {
+        "schema_version": 1,
+        "created_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "command": {
+            "kernel": kernel,
+            "horizon": horizon,
+            "periods": periods,
+            "batches": batches,
+            "draws": draws,
+            "repeats": repeats,
+            "dtype": dtype,
+            "include_pseudo": include_pseudo,
+            "baseline_path": None if baseline_path is None else str(baseline_path),
+        },
+        "platform": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+            "processor": platform.processor(),
+            "python_version": sys.version.split()[0],
+        },
+        "results": [result.to_dict() for result in results],
+    }
+
+
+def write_benchmark_reference_report(
+    path: Path | str,
+    results: list[BenchmarkResult],
+    *,
+    kernel: str,
+    horizon: int,
+    periods: int,
+    batches: int,
+    draws: int,
+    repeats: int,
+    dtype: str,
+    include_pseudo: bool,
+    baseline_path: Path | str | None = None,
+) -> dict[str, Any]:
+    report = benchmark_reference_report(
+        results,
+        kernel=kernel,
+        horizon=horizon,
+        periods=periods,
+        batches=batches,
+        draws=draws,
+        repeats=repeats,
+        dtype=dtype,
+        include_pseudo=include_pseudo,
+        baseline_path=baseline_path,
+    )
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    return report
 
 
 def benchmark_forecast_targets(
@@ -182,6 +282,82 @@ def benchmark_forecast_targets(
             )
 
     return results
+
+
+def load_benchmark_baselines(path: Path | str) -> tuple[BenchmarkBaseline, ...]:
+    source = Path(path)
+    payload = json.loads(source.read_text(encoding="utf-8-sig"))
+    default_name = source.stem
+    if isinstance(payload, list):
+        entries = payload
+    elif isinstance(payload, dict):
+        default_name = str(payload.get("name", payload.get("source", default_name)))
+        if isinstance(payload.get("results"), list):
+            entries = payload["results"]
+        elif isinstance(payload.get("baselines"), list):
+            entries = payload["baselines"]
+        else:
+            entries = [payload]
+    else:
+        msg = "Benchmark baseline must be a JSON object or list."
+        raise ValueError(msg)
+
+    baselines: list[BenchmarkBaseline] = []
+    for index, item in enumerate(entries):
+        if not isinstance(item, dict):
+            msg = f"Benchmark baseline entry {index} must be an object."
+            raise ValueError(msg)
+        kernel = str(item.get("kernel", "")).strip()
+        if not kernel:
+            msg = f"Benchmark baseline entry {index} is missing kernel."
+            raise ValueError(msg)
+        if "elapsed_seconds" not in item:
+            msg = f"Benchmark baseline entry {index} is missing elapsed_seconds."
+            raise ValueError(msg)
+        elapsed_seconds = float(item["elapsed_seconds"])
+        if not np.isfinite(elapsed_seconds) or elapsed_seconds <= 0.0:
+            msg = f"Benchmark baseline entry {index} elapsed_seconds must be positive."
+            raise ValueError(msg)
+        baselines.append(
+            BenchmarkBaseline(
+                name=str(
+                    item.get("baseline_name", item.get("name", item.get("backend", default_name)))
+                ),
+                kernel=kernel,
+                elapsed_seconds=elapsed_seconds,
+                horizon=_optional_int(item.get("horizon")),
+                dtype=None if item.get("dtype") is None else str(item["dtype"]),
+                batches=_optional_int(item.get("batches")),
+                draws=_optional_int(item.get("draws")),
+            )
+        )
+    return tuple(baselines)
+
+
+def apply_benchmark_baselines(
+    results: list[BenchmarkResult],
+    baselines: tuple[BenchmarkBaseline, ...],
+) -> list[BenchmarkResult]:
+    if not baselines:
+        return results
+    matched: list[BenchmarkResult] = []
+    for result in results:
+        baseline = _matching_baseline(result, baselines)
+        if baseline is None:
+            matched.append(result)
+            continue
+        speedup = None
+        if result.elapsed_seconds is not None and result.elapsed_seconds > 0.0:
+            speedup = float(baseline.elapsed_seconds / result.elapsed_seconds)
+        matched.append(
+            replace(
+                result,
+                baseline_name=baseline.name,
+                baseline_elapsed_seconds=baseline.elapsed_seconds,
+                speedup_vs_baseline=speedup,
+            )
+        )
+    return matched
 
 
 def compare_backend_parity_targets(
@@ -323,6 +499,230 @@ def benchmark_kalman_targets(
                     repeats=repeats,
                     dtype=dtype,
                     kernel="kalman",
+                )
+            )
+
+    return results
+
+
+def benchmark_batched_kalman_targets(
+    *,
+    periods: int = 40,
+    batches: int = 8,
+    repeats: int = 3,
+    dtype: DTypeName = "float64",
+    statuses: list[RuntimeStatus] | None = None,
+) -> list[BenchmarkResult]:
+    if periods <= 0:
+        msg = "Benchmark periods must be positive."
+        raise ValueError(msg)
+    if batches <= 0:
+        msg = "Benchmark batches must be positive."
+        raise ValueError(msg)
+    if repeats <= 0:
+        msg = "Benchmark repeats must be positive."
+        raise ValueError(msg)
+
+    target_statuses = _backend_statuses(statuses)
+    system = compute_system(Model1002())
+    data = np.zeros((batches, periods, system.measurement.ZZ.shape[0]), dtype=np.float64)
+    results: list[BenchmarkResult] = []
+
+    for status in target_statuses:
+        if not status.available:
+            results.append(
+                _skipped_result(
+                    status,
+                    horizon=periods,
+                    repeats=repeats,
+                    dtype=dtype,
+                    kernel="kalman-batch",
+                    batches=batches,
+                )
+            )
+            continue
+        try:
+            runtime = RuntimeConfig(
+                backend=cast(BackendName, status.backend),
+                device=cast(DeviceName, status.device),
+                dtype=dtype,
+            )
+            try:
+                resolved = runtime.resolve()
+            except UnsupportedRuntimeError as err:
+                results.append(
+                    _skipped_result(
+                        status,
+                        horizon=periods,
+                        repeats=repeats,
+                        dtype=dtype,
+                        kernel="kalman-batch",
+                        reason=str(err),
+                        batches=batches,
+                    )
+                )
+                continue
+            backend = get_backend(resolved)
+            _run_batched_kalman(system, data[:1, :1], backend)
+            started = perf_counter()
+            output: tuple[KalmanResult, ...] | None = None
+            for _ in range(repeats):
+                output = _run_batched_kalman(system, data, backend)
+            elapsed = perf_counter() - started
+            if output is None or not output:
+                msg = "Benchmark did not produce output."
+                raise RuntimeError(msg)
+            results.append(
+                BenchmarkResult(
+                    backend=status.backend,
+                    device=status.device,
+                    available=True,
+                    skipped=False,
+                    reason=status.reason,
+                    horizon=periods,
+                    repeats=repeats,
+                    dtype=dtype,
+                    kernel="kalman-batch",
+                    elapsed_seconds=elapsed,
+                    states_shape=(batches, *output[0].filtered_states.shape),
+                    observables_shape=data.shape,
+                    batches=batches,
+                )
+            )
+        except Exception as err:  # pragma: no cover - depends on optional native runtimes.
+            results.append(
+                BenchmarkResult(
+                    backend=status.backend,
+                    device=status.device,
+                    available=False,
+                    skipped=False,
+                    reason=f"benchmark failed: {err}",
+                    horizon=periods,
+                    repeats=repeats,
+                    dtype=dtype,
+                    kernel="kalman-batch",
+                    batches=batches,
+                )
+            )
+
+    return results
+
+
+def benchmark_hard_target_replay_targets(
+    *,
+    horizon: int = 2,
+    periods: int = 2,
+    draws: int = 2,
+    repeats: int = 1,
+    dtype: DTypeName = "float64",
+    statuses: list[RuntimeStatus] | None = None,
+) -> list[BenchmarkResult]:
+    if horizon < 0:
+        msg = "Benchmark horizon must be nonnegative."
+        raise ValueError(msg)
+    if periods <= 0:
+        msg = "Benchmark periods must be positive."
+        raise ValueError(msg)
+    if draws <= 0:
+        msg = "Benchmark draws must be positive."
+        raise ValueError(msg)
+    if repeats <= 0:
+        msg = "Benchmark repeats must be positive."
+        raise ValueError(msg)
+
+    target_statuses = _backend_statuses(statuses)
+    results: list[BenchmarkResult] = []
+
+    for status in target_statuses:
+        if not status.available:
+            results.append(
+                _skipped_result(
+                    status,
+                    horizon=horizon,
+                    repeats=repeats,
+                    dtype=dtype,
+                    kernel="hard-target",
+                    draws=draws,
+                )
+            )
+            continue
+        try:
+            runtime = RuntimeConfig(
+                backend=cast(BackendName, status.backend),
+                device=cast(DeviceName, status.device),
+                dtype=dtype,
+            )
+            try:
+                resolved = runtime.resolve()
+            except UnsupportedRuntimeError as err:
+                results.append(
+                    _skipped_result(
+                        status,
+                        horizon=horizon,
+                        repeats=repeats,
+                        dtype=dtype,
+                        kernel="hard-target",
+                        reason=str(err),
+                        draws=draws,
+                    )
+                )
+                continue
+            resolved_runtime = RuntimeConfig(
+                backend=cast(BackendName, resolved.backend),
+                device=cast(DeviceName, resolved.device),
+                dtype=resolved.dtype,
+            )
+            _run_hard_target_replay(
+                resolved_runtime,
+                periods=periods,
+                horizon=min(1, horizon),
+                draws=1,
+            )
+            started = perf_counter()
+            output = None
+            for _ in range(repeats):
+                output = _run_hard_target_replay(
+                    resolved_runtime,
+                    periods=periods,
+                    horizon=horizon,
+                    draws=draws,
+                )
+            elapsed = perf_counter() - started
+            if output is None:
+                msg = "Benchmark did not produce output."
+                raise RuntimeError(msg)
+            results.append(
+                BenchmarkResult(
+                    backend=status.backend,
+                    device=status.device,
+                    available=True,
+                    skipped=False,
+                    reason=status.reason,
+                    horizon=horizon,
+                    repeats=repeats,
+                    dtype=dtype,
+                    kernel="hard-target",
+                    elapsed_seconds=elapsed,
+                    states_shape=output["states_shape"],
+                    observables_shape=output["observables_shape"],
+                    batches=1,
+                    draws=draws,
+                    artifacts=output["artifacts"],
+                )
+            )
+        except Exception as err:  # pragma: no cover - depends on optional native runtimes.
+            results.append(
+                BenchmarkResult(
+                    backend=status.backend,
+                    device=status.device,
+                    available=False,
+                    skipped=False,
+                    reason=f"benchmark failed: {err}",
+                    horizon=horizon,
+                    repeats=repeats,
+                    dtype=dtype,
+                    kernel="hard-target",
+                    draws=draws,
                 )
             )
 
@@ -485,6 +885,121 @@ def _kalman_arrays(kalman: KalmanResult) -> tuple[np.ndarray, ...]:
     )
 
 
+def _run_batched_kalman(
+    system: Any,
+    data: np.ndarray,
+    backend: Any,
+) -> tuple[KalmanResult, ...]:
+    return tuple(
+        kalman_log_likelihood(system, data[batch_index], backend=backend)
+        for batch_index in range(data.shape[0])
+    )
+
+
+def _run_hard_target_replay(
+    runtime: RuntimeConfig,
+    *,
+    periods: int,
+    horizon: int,
+    draws: int,
+) -> dict[str, Any]:
+    model = Model1002(runtime=runtime)
+    compute_system(model)
+    data = np.zeros((periods, len(model.observables)), dtype=np.float64)
+    shock_samples = np.zeros(
+        (draws, horizon, len(model.indexes.exogenous_shocks)),
+        dtype=np.float64,
+    )
+    mode_output_vars = ["forecastobs", "forecaststates", "histobs", "histstates"]
+    mode_forecast = forecast_one(
+        model,
+        input_type="mode",
+        cond_type="none",
+        output_vars=mode_output_vars,
+        horizon=horizon,
+        data=data,
+    )
+    compute_meansbands(
+        model,
+        "mode",
+        "none",
+        ["forecastobs"],
+        horizon=horizon,
+        source="forecastobs",
+        data=data,
+    )
+    compute_meansbands(
+        model,
+        "mode",
+        "none",
+        ["histobs"],
+        horizon=horizon,
+        source="histobs",
+        data=data,
+    )
+    estimate_model(model, data)
+    full_forecast = forecast_one(
+        model,
+        input_type="full",
+        cond_type="none",
+        output_vars=mode_output_vars,
+        horizon=horizon,
+        data=data,
+        shock_samples=shock_samples,
+    )
+    compute_meansbands(
+        model,
+        "full",
+        "none",
+        ["forecastobs"],
+        horizon=horizon,
+        source="forecastobs",
+        data=data,
+        shock_samples=shock_samples,
+    )
+    compute_meansbands(
+        model,
+        "full",
+        "none",
+        ["histobs"],
+        horizon=horizon,
+        source="histobs",
+        data=data,
+        shock_samples=shock_samples,
+    )
+    return {
+        "states_shape": full_forecast.states.shape,
+        "observables_shape": full_forecast.observables.shape,
+        "mode_states_shape": mode_forecast.states.shape,
+        "artifacts": 8,
+    }
+
+
+def _matching_baseline(
+    result: BenchmarkResult,
+    baselines: tuple[BenchmarkBaseline, ...],
+) -> BenchmarkBaseline | None:
+    for baseline in baselines:
+        if baseline.kernel != result.kernel:
+            continue
+        if baseline.horizon is not None and baseline.horizon != result.horizon:
+            continue
+        if baseline.dtype is not None and baseline.dtype != result.dtype:
+            continue
+        if baseline.batches is not None and baseline.batches != result.batches:
+            continue
+        if baseline.draws is not None and baseline.draws != result.draws:
+            continue
+        return baseline
+    return None
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
 def _compare_array_groups(
     reference_arrays: tuple[np.ndarray, ...],
     target_arrays: tuple[np.ndarray, ...],
@@ -542,6 +1057,8 @@ def _skipped_result(
     dtype: str,
     kernel: str,
     reason: str | None = None,
+    batches: int = 1,
+    draws: int = 0,
 ) -> BenchmarkResult:
     return BenchmarkResult(
         backend=status.backend,
@@ -553,4 +1070,6 @@ def _skipped_result(
         repeats=repeats,
         dtype=dtype,
         kernel=kernel,
+        batches=batches,
+        draws=draws,
     )
