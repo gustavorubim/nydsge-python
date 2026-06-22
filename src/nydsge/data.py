@@ -6,6 +6,7 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
@@ -17,6 +18,7 @@ from nydsge.core import DSGEModel, Observable
 FRED_GRAPH_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 FRED_OBSERVATIONS_URL = "https://api.stlouisfed.org/fred/series/observations"
 DOTENV_FILENAME = ".env"
+OPTIONAL_SOURCE_MNEMONICS = frozenset({"BAMLC8A0C15PYEY"})
 FredFetcher = Callable[[str], bytes]
 
 
@@ -248,16 +250,21 @@ def load_fred_api_source(
     merged: pd.DataFrame | None = None
     resolved_api_key = _resolve_fred_api_key(api_key)
     for mnemonic in mnemonics:
-        series = load_fred_api_series(
-            mnemonic,
-            api_key=resolved_api_key,
-            realtime_start=realtime_start,
-            realtime_end=realtime_end,
-            observation_start=start_date,
-            observation_end=end_date,
-            aggregation=aggregation,
-            fetcher=fetcher,
-        )
+        try:
+            series = load_fred_api_series(
+                mnemonic,
+                api_key=resolved_api_key,
+                realtime_start=realtime_start,
+                realtime_end=realtime_end,
+                observation_start=start_date,
+                observation_end=end_date,
+                aggregation=aggregation,
+                fetcher=fetcher,
+            )
+        except HTTPError as err:
+            if required_dates is None or not _is_optional_alfred_missing(mnemonic, err):
+                raise
+            series = _missing_source_series(mnemonic, required_dates)
         if required_dates is not None:
             _validate_source_date_coverage(f"FRED:{mnemonic}", series["date"], required_dates)
             date_index = _quarter_index(series["date"])
@@ -760,9 +767,7 @@ def _read_dotenv_value(path: Path, key: str) -> str | None:
     for raw_line in lines:
         line = raw_line.strip()
         if line.startswith(f"export {prefix}"):
-            value = _strip_dotenv_comment(
-                line.removeprefix("export ").split("=", 1)[1]
-            ).strip()
+            value = _strip_dotenv_comment(line.removeprefix("export ").split("=", 1)[1]).strip()
             if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
                 value = value[1:-1]
             return value
@@ -780,6 +785,25 @@ def _strip_dotenv_comment(value: str) -> str:
         if char == "#" and quote is None:
             return value[:index]
     return value
+
+
+def _is_optional_alfred_missing(mnemonic: str, err: HTTPError) -> bool:
+    if mnemonic not in OPTIONAL_SOURCE_MNEMONICS or err.code != 400:
+        return False
+    try:
+        body = err.read().decode("utf-8", errors="replace")
+    except OSError:
+        return False
+    return "does not exist in ALFRED" in body
+
+
+def _missing_source_series(mnemonic: str, required_dates: np.ndarray) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "date": [_quarter_label_from_index(index) for index in required_dates.tolist()],
+            mnemonic: np.full(required_dates.shape[0], np.nan, dtype=np.float64),
+        }
+    )
 
 
 def _fred_realtime_date(value: str) -> str:
@@ -848,6 +872,9 @@ def _select_source_columns(
         try:
             column = _resolve_column(df, mnemonic)
         except KeyError:
+            if mnemonic in OPTIONAL_SOURCE_MNEMONICS:
+                selected[mnemonic] = np.nan
+                continue
             missing.append(mnemonic)
             continue
         selected[mnemonic] = df[column]

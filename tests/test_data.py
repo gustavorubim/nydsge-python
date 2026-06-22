@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import io
+from email.message import Message
+from urllib.error import HTTPError
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -18,6 +22,7 @@ from nydsge.data import (
     load_data,
     load_data_levels_from_sources,
     load_fred_api_series,
+    load_fred_api_source,
     one_quarter_pct_change,
     parse_data_sources,
     prepare_population_data,
@@ -169,6 +174,18 @@ def test_load_data_levels_from_sources_merges_local_source_files(tmp_path) -> No
     assert "GDP" in levels.columns
     assert "antgdp1" in levels.columns
     assert np.isclose(levels.loc[0, "antgdp1"], 0.5)
+
+
+def test_load_data_levels_from_sources_fills_optional_missing_columns(tmp_path) -> None:
+    model = Model1002(settings={"n_mon_anticipated_shocks": 0})
+    raw = _raw_levels_fixture().drop(columns=["BAMLC8A0C15PYEY"])
+    raw.to_csv(tmp_path / "fred_181115.csv", index=False)
+    raw.to_csv(tmp_path / "dlx_181115.csv", index=False)
+
+    levels = load_data_levels_from_sources(model, source_root=tmp_path)
+
+    assert "BAMLC8A0C15PYEY" in levels.columns
+    assert levels["BAMLC8A0C15PYEY"].isna().all()
 
 
 def test_load_data_levels_from_sources_validates_and_filters_required_dates(tmp_path) -> None:
@@ -350,6 +367,41 @@ def test_download_fred_api_source_csv_uses_env_api_key(tmp_path, monkeypatch) ->
     assert output_path.exists()
     assert list(levels["date"]) == ["2016-Q3", "2016-Q4"]
     assert "GDP" in levels.columns
+
+
+def test_load_fred_api_source_fills_optional_alfred_missing_series(monkeypatch) -> None:
+    monkeypatch.setenv("FRED_API_KEY", "from-env")
+
+    def fetcher(url: str) -> bytes:
+        if "series_id=BAMLC8A0C15PYEY" in url:
+            raise HTTPError(
+                url=url,
+                code=400,
+                msg="Bad Request",
+                hdrs=Message(),
+                fp=io.BytesIO(
+                    b'{"error_message":"Bad Request. The series does not exist in ALFRED."}'
+                ),
+            )
+        return (
+            b'{"observations": ['
+            b'{"date": "2016-07-01", "value": "1.0"},'
+            b'{"date": "2016-10-01", "value": "2.0"}'
+            b"]}"
+        )
+
+    levels = load_fred_api_source(
+        ["GDP", "BAMLC8A0C15PYEY"],
+        realtime_start="181115",
+        realtime_end="181115",
+        start_date="2016-Q3",
+        end_date="2016-Q4",
+        fetcher=fetcher,
+    )
+
+    assert list(levels["date"]) == ["2016-Q3", "2016-Q4"]
+    assert levels["GDP"].tolist() == [1.0, 2.0]
+    assert levels["BAMLC8A0C15PYEY"].isna().all()
 
 
 def test_download_fred_api_source_csv_uses_dotenv_api_key(tmp_path, monkeypatch) -> None:

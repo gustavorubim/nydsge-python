@@ -187,6 +187,9 @@ uv run nydsge data build-sources --source-root path\to\raw --output path\to\obse
 
 `data fetch-fred-api` resolves the FRED API key from `--api-key`, then the
 `FRED_API_KEY` environment variable, then a local `.env` file.
+For Model1002 vintage requests, FRED series known to be optional and unavailable
+in ALFRED are written as all-missing source columns so the rest of the source
+bundle can still be built and compared.
 
 ### Estimation
 
