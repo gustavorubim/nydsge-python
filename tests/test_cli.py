@@ -100,6 +100,174 @@ def test_bench_json_can_run_kalman_kernel() -> None:
     assert '"states_shape": [' in result.stdout
 
 
+def test_bench_json_can_run_batched_kalman_kernel() -> None:
+    result = CliRunner().invoke(
+        app,
+        [
+            "bench",
+            "--kernel",
+            "kalman-batch",
+            "--periods",
+            "1",
+            "--batches",
+            "2",
+            "--repeats",
+            "1",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert '"kernel": "kalman-batch"' in result.stdout
+    assert '"batches": 2' in result.stdout
+    assert '"states_shape": [' in result.stdout
+
+
+def test_bench_json_can_run_hard_target_kernel() -> None:
+    result = CliRunner().invoke(
+        app,
+        [
+            "bench",
+            "--kernel",
+            "hard-target",
+            "--horizon",
+            "1",
+            "--periods",
+            "1",
+            "--draws",
+            "1",
+            "--repeats",
+            "1",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert '"kernel": "hard-target"' in result.stdout
+    assert '"draws": 1' in result.stdout
+    assert '"artifacts": 8' in result.stdout
+
+
+def test_bench_json_can_compare_oracle_baseline(tmp_path) -> None:
+    baseline_path = tmp_path / "oracle_benchmark.json"
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "name": "julia-oracle",
+                "results": [
+                    {
+                        "kernel": "forecast",
+                        "horizon": 1,
+                        "dtype": "float64",
+                        "elapsed_seconds": 10.0,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "bench",
+            "--horizon",
+            "1",
+            "--repeats",
+            "1",
+            "--baseline",
+            str(baseline_path),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    numpy = next(item for item in payload if item["backend"] == "numpy" and item["device"] == "cpu")
+    assert numpy["baseline_name"] == "julia-oracle"
+    assert numpy["baseline_elapsed_seconds"] == 10.0
+    assert numpy["speedup_vs_baseline"] > 0.0
+
+
+def test_bench_can_write_reference_report(tmp_path) -> None:
+    baseline_path = tmp_path / "oracle_benchmark.json"
+    output_path = tmp_path / "reports" / "local_benchmark.json"
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "name": "julia-oracle",
+                "results": [
+                    {
+                        "kernel": "forecast",
+                        "horizon": 1,
+                        "dtype": "float64",
+                        "elapsed_seconds": 10.0,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "bench",
+            "--horizon",
+            "1",
+            "--repeats",
+            "1",
+            "--baseline",
+            str(baseline_path),
+            "--output",
+            str(output_path),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert output_path.exists()
+    payload = json.loads(result.stdout)
+    report = json.loads(output_path.read_text(encoding="utf-8"))
+    assert isinstance(payload, list)
+    assert report["schema_version"] == 1
+    assert report["command"]["kernel"] == "forecast"
+    assert report["command"]["baseline_path"] == str(baseline_path)
+    assert report["platform"]["system"]
+    numpy = next(
+        item for item in report["results"] if item["backend"] == "numpy" and item["device"] == "cpu"
+    )
+    assert numpy["baseline_name"] == "julia-oracle"
+    assert numpy["speedup_vs_baseline"] > 0.0
+
+
+def test_bench_json_all_includes_batched_kalman_kernel() -> None:
+    result = CliRunner().invoke(
+        app,
+        [
+            "bench",
+            "--kernel",
+            "all",
+            "--horizon",
+            "1",
+            "--periods",
+            "1",
+            "--batches",
+            "2",
+            "--draws",
+            "1",
+            "--repeats",
+            "1",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    kernels = {item["kernel"] for item in payload}
+    assert {"forecast", "kalman", "kalman-batch", "hard-target"}.issubset(kernels)
+
+
 def test_bench_rejects_unknown_kernel() -> None:
     result = CliRunner().invoke(app, ["bench", "--kernel", "bad"])
 
@@ -232,6 +400,124 @@ def test_data_build_sources_command_writes_observable_csv(tmp_path) -> None:
     loaded = pd.read_csv(output_path)
     assert "obs_nominalrate6" in loaded.columns
     assert list(loaded["date"]) == ["2016-Q3", "2016-Q4"]
+
+
+def test_data_sources_command_reports_required_source_files(tmp_path) -> None:
+    source_root = tmp_path / "sources"
+    source_root.mkdir()
+    (source_root / "fred_181115.csv").write_text("date,GDP\n2016-Q3,1.0\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "data",
+            "sources",
+            "--source-root",
+            str(source_root),
+            "--vintage",
+            "181115",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    by_source = {source["source"]: source for source in payload["sources"]}
+    assert by_source["FRED"]["available"] is True
+    assert by_source["FRED"]["fetchable"] is True
+    assert "BAMLC8A0C15PYEY" in by_source["FRED"]["optional_mnemonics"]
+    assert by_source["DLX"]["available"] is False
+    assert "dlx_181115.csv" in " ".join(by_source["DLX"]["candidate_paths"])
+
+
+def test_data_prepare_sources_command_fetches_canonical_fred_and_reports_gaps(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    source_root = tmp_path / "sources"
+
+    def fake_download(*args, **kwargs) -> pd.DataFrame:
+        assert kwargs["output_path"] == source_root / "fred_181115.csv"
+        assert kwargs["realtime_start"] == "181115"
+        assert kwargs["realtime_end"] == "181115"
+        source_root.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            {
+                "date": ["2016-Q3", "2016-Q4"],
+                "GDP": [1.0, 2.0],
+            }
+        ).to_csv(kwargs["output_path"], index=False)
+        return pd.DataFrame(
+            {
+                "date": ["2016-Q3", "2016-Q4"],
+                "GDP": [1.0, 2.0],
+            }
+        )
+
+    monkeypatch.setattr("nydsge.cli.download_fred_api_source_csv", fake_download)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "data",
+            "prepare-sources",
+            "--source-root",
+            str(source_root),
+            "--vintage",
+            "181115",
+            "--realtime-start",
+            "181115",
+            "--realtime-end",
+            "181115",
+            "--start-date",
+            "2016-Q3",
+            "--end-date",
+            "2016-Q4",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["fred_action"] == "downloaded"
+    assert payload["fred_output"].endswith("fred_181115.csv")
+    assert payload["ready_for_build"] is False
+    assert {source["source"] for source in payload["missing_sources"]} == {"DLX", "OIS"}
+    assert (source_root / "fred_181115.csv").exists()
+
+
+def test_data_prepare_sources_command_reports_ready_when_all_sources_exist(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    source_root = tmp_path / "sources"
+    source_root.mkdir()
+    for name in ("fred_181115.csv", "dlx_181115.csv", "ois_181115.csv"):
+        (source_root / name).write_text("date,value\n2016-Q3,1.0\n", encoding="utf-8")
+
+    def fail_download(*args, **kwargs) -> pd.DataFrame:
+        raise AssertionError("existing FRED source should not be downloaded")
+
+    monkeypatch.setattr("nydsge.cli.download_fred_api_source_csv", fail_download)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "data",
+            "prepare-sources",
+            "--source-root",
+            str(source_root),
+            "--vintage",
+            "181115",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["fred_action"] == "existing"
+    assert payload["ready_for_build"] is True
+    assert payload["missing_sources"] == []
 
 
 def test_data_fetch_fred_command_writes_source_csv(tmp_path, monkeypatch) -> None:
@@ -538,6 +824,34 @@ def test_estimate_command_can_write_sampler_output(tmp_path) -> None:
     with np.load(sampler_path) as archive:
         assert archive["parameter_draws"].shape == (2, 1)
         assert archive["parameter_names"].tolist() == ["alpha"]
+
+
+def test_vv_sampler_diagnostics_reports_archive_metrics(tmp_path) -> None:
+    sampler_path = _write_sampler_archive(tmp_path)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "vv",
+            "sampler-diagnostics",
+            "--sampler",
+            str(sampler_path),
+            "--windows",
+            "2",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["sampler"] == str(sampler_path)
+    assert payload["parameter_names"] == ["alpha"]
+    assert payload["draws"] == 2
+    assert payload["acceptance_windows"] == [1.0, 1.0]
+    assert payload["proposal_covariance_shape"] == [1, 1]
+    assert payload["proposal_covariance_positive_semidefinite"] is True
+    assert payload["parameters"][0]["name"] == "alpha"
+    assert payload["parameters"][0]["effective_sample_size"] > 0.0
 
 
 def test_forecast_command_reports_model1002_forecast_shape() -> None:
@@ -982,6 +1296,69 @@ def test_vv_export_hard_target_inputs_writes_deterministic_bundle(tmp_path) -> N
     assert "--include-posterior" in payload["julia_oracle_command"]
     assert "--shock-samples" in payload["python_candidate_command"]
     assert "hard-target" in payload["compare_command"]
+
+
+def test_vv_raw_data_smoke_builds_observables_and_candidate_suite(tmp_path) -> None:
+    raw_path = _write_raw_levels_csv(tmp_path)
+    raw = pd.read_csv(raw_path)
+    source_root = tmp_path / "sources"
+    source_root.mkdir()
+    raw.drop(columns=[f"ant{index}" for index in range(1, 7)]).to_csv(
+        source_root / "fred_181115.csv",
+        index=False,
+    )
+    raw.drop(columns=[f"ant{index}" for index in range(1, 7)]).to_csv(
+        source_root / "dlx_181115.csv",
+        index=False,
+    )
+    raw[["date", *[f"ant{index}" for index in range(1, 7)]]].to_csv(
+        source_root / "ois_181115.csv",
+        index=False,
+    )
+    population_forecast_path = tmp_path / "population_forecast.csv"
+    pd.DataFrame(
+        {
+            "date": ["2017-Q1", "2017-Q2"],
+            "CNP16OV__FRED": [260.0, 260.5],
+        }
+    ).to_csv(population_forecast_path, index=False)
+    output_dir = tmp_path / "raw_data_smoke"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "vv",
+            "raw-data-smoke",
+            "--source-root",
+            str(source_root),
+            "--output-dir",
+            str(output_dir),
+            "--start-date",
+            "2016-Q3",
+            "--end-date",
+            "2016-Q4",
+            "--population-forecast",
+            str(population_forecast_path),
+            "--no-hpfilter-population",
+            "--population-hpfilter-lambda",
+            "10",
+            "--horizon",
+            "1",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["rows"] == 2
+    assert payload["columns"] == 20
+    assert payload["population_forecast"] == str(population_forecast_path)
+    assert payload["hpfilter_population"] is False
+    assert payload["population_hpfilter_lambda"] == 10.0
+    assert payload["comparison"]["status"] == "skipped"
+    assert (output_dir / "observables.csv").exists()
+    exported_kinds = {artifact["kind"] for artifact in payload["exported"]}
+    assert {"forecast_mode", "meansbands_mode_histobs", "posterior"}.issubset(exported_kinds)
 
 
 def _write_observable_csv(tmp_path: Path, *, periods: int) -> Path:

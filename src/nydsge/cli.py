@@ -13,14 +13,20 @@ from rich.table import Table
 from nydsge import __version__
 from nydsge.bench import (
     ParityKernel,
+    apply_benchmark_baselines,
+    benchmark_batched_kalman_targets,
     benchmark_forecast_targets,
+    benchmark_hard_target_replay_targets,
     benchmark_kalman_targets,
     compare_backend_parity_targets,
+    load_benchmark_baselines,
+    write_benchmark_reference_report,
 )
 from nydsge.core import NotPortedError
 from nydsge.data import (
     build_data_csv,
     build_data_csv_from_sources,
+    data_source_requirements,
     date_labels_for_sample,
     df_to_matrix,
     download_current_fred_source_csv,
@@ -34,6 +40,7 @@ from nydsge.estimate import (
     estimation_mode_from_result,
     load_estimation_mode,
     load_sampler_result,
+    sampler_diagnostics,
     save_estimation_mode,
     save_sampler_result,
 )
@@ -323,6 +330,78 @@ def data_build(
     console.print(table)
 
 
+@data_app.command("sources")
+def data_sources(
+    source_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--source-root",
+            help="Optional directory to check for local source CSV candidates.",
+        ),
+    ] = None,
+    vintage: Annotated[
+        str | None,
+        typer.Option("--vintage", help="Data vintage suffix for source files."),
+    ] = None,
+    subspec: Annotated[str, typer.Option(help="Model1002 subspec to inspect.")] = "ss10",
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit JSON instead of a table."),
+    ] = False,
+) -> None:
+    """List source files and mnemonics required for local observable data builds."""
+    model = Model1002(subspec=subspec)
+    selected_vintage = str(vintage if vintage is not None else model.get_setting("data_vintage"))
+    requirements = data_source_requirements(
+        model,
+        source_root=source_root,
+        vintage=vintage,
+    )
+    sources_payload = [
+        {
+            "source": requirement.source,
+            "mnemonics": list(requirement.mnemonics),
+            "required_mnemonics": [
+                name
+                for name in requirement.mnemonics
+                if name not in set(requirement.optional_mnemonics)
+            ],
+            "optional_mnemonics": list(requirement.optional_mnemonics),
+            "candidate_paths": [str(path) for path in requirement.candidate_paths],
+            "existing_path": (
+                None if requirement.existing_path is None else str(requirement.existing_path)
+            ),
+            "available": None if source_root is None else requirement.existing_path is not None,
+            "fetchable": requirement.source == "FRED",
+        }
+        for requirement in requirements
+    ]
+    payload = {
+        "subspec": subspec,
+        "vintage": selected_vintage,
+        "source_root": None if source_root is None else str(source_root),
+        "sources": sources_payload,
+    }
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+    table = Table(title=f"{model.description()} data source requirements")
+    table.add_column("Source")
+    table.add_column("Series")
+    table.add_column("Optional")
+    table.add_column("Available")
+    table.add_column("Existing path")
+    for source_payload in sources_payload:
+        table.add_row(
+            str(source_payload["source"]),
+            str(len(cast(list[str], source_payload["mnemonics"]))),
+            ", ".join(cast(list[str], source_payload["optional_mnemonics"])) or "-",
+            "n/a" if source_payload["available"] is None else str(source_payload["available"]),
+            str(source_payload["existing_path"] or "-"),
+        )
+    console.print(table)
+
+
 @data_app.command("fetch-fred")
 def data_fetch_fred(
     output_path: Annotated[
@@ -468,6 +547,139 @@ def data_fetch_fred_api(
     table.add_column("Metric")
     table.add_column("Value")
     for key, value in payload.items():
+        table.add_row(key, str(value))
+    console.print(table)
+
+
+@data_app.command("prepare-sources")
+def data_prepare_sources(
+    source_root: Annotated[
+        Path,
+        typer.Option("--source-root", help="Directory where source CSV files are stored."),
+    ],
+    vintage: Annotated[
+        str | None,
+        typer.Option("--vintage", help="Data vintage suffix for source files."),
+    ] = None,
+    api_key: Annotated[
+        str | None,
+        typer.Option("--api-key", help="FRED API key; defaults to FRED_API_KEY or .env."),
+    ] = None,
+    realtime_start: Annotated[
+        str | None,
+        typer.Option(
+            "--realtime-start",
+            help="FRED realtime_start date, e.g. 2018-11-15 or 181115.",
+        ),
+    ] = None,
+    realtime_end: Annotated[
+        str | None,
+        typer.Option(
+            "--realtime-end",
+            help="FRED realtime_end date, e.g. 2018-11-15 or 181115.",
+        ),
+    ] = None,
+    start_date: Annotated[
+        str | None,
+        typer.Option("--start-date", help="First required source quarter, e.g. 1959-Q3."),
+    ] = None,
+    end_date: Annotated[
+        str | None,
+        typer.Option("--end-date", help="Last required source quarter, e.g. 2018-Q3."),
+    ] = None,
+    aggregation: Annotated[
+        str,
+        typer.Option("--aggregation", help="Quarter aggregation for higher-frequency FRED series."),
+    ] = "mean",
+    overwrite: Annotated[
+        bool,
+        typer.Option("--overwrite", help="Refresh the FRED source file even if it exists."),
+    ] = False,
+    subspec: Annotated[str, typer.Option(help="Model1002 subspec to prepare.")] = "ss10",
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit JSON instead of a table."),
+    ] = False,
+) -> None:
+    """Fetch the canonical FRED source file and report remaining local source gaps."""
+    model = Model1002(subspec=subspec)
+    selected_vintage = str(vintage if vintage is not None else model.get_setting("data_vintage"))
+    source_root.mkdir(parents=True, exist_ok=True)
+    initial_requirements = data_source_requirements(
+        model,
+        source_root=source_root,
+        vintage=selected_vintage,
+    )
+    try:
+        fred_requirement = _source_requirement(initial_requirements, "FRED")
+    except KeyError as err:
+        raise _not_ported_exit(str(err)) from err
+    if not fred_requirement.candidate_paths:
+        msg = "FRED source preparation requires a source root with candidate paths."
+        raise _not_ported_exit(msg)
+    fred_output = fred_requirement.existing_path or fred_requirement.candidate_paths[0]
+    fred_action = "existing"
+    fred_rows = None
+    fred_columns = None
+    try:
+        if overwrite or fred_requirement.existing_path is None:
+            levels = download_fred_api_source_csv(
+                model,
+                output_path=fred_output,
+                api_key=api_key,
+                realtime_start=realtime_start,
+                realtime_end=realtime_end,
+                start_date=start_date,
+                end_date=end_date,
+                aggregation=aggregation,
+            )
+            fred_action = "downloaded"
+            fred_rows = int(levels.shape[0])
+            fred_columns = int(levels.shape[1])
+    except (OSError, ValueError) as err:
+        raise _not_ported_exit(str(err)) from err
+
+    requirements = data_source_requirements(
+        model,
+        source_root=source_root,
+        vintage=selected_vintage,
+    )
+    missing_sources = [
+        {
+            "source": requirement.source,
+            "mnemonics": list(requirement.mnemonics),
+            "optional_mnemonics": list(requirement.optional_mnemonics),
+            "candidate_paths": [str(path) for path in requirement.candidate_paths],
+            "fetchable": requirement.source == "FRED",
+        }
+        for requirement in requirements
+        if requirement.existing_path is None
+    ]
+    payload = {
+        "source_root": str(source_root),
+        "subspec": subspec,
+        "vintage": selected_vintage,
+        "realtime_start": realtime_start,
+        "realtime_end": realtime_end,
+        "start_date": start_date,
+        "end_date": end_date,
+        "aggregation": aggregation,
+        "fred_output": str(fred_output),
+        "fred_action": fred_action,
+        "fred_rows": fred_rows,
+        "fred_columns": fred_columns,
+        "missing_sources": missing_sources,
+        "ready_for_build": not missing_sources,
+    }
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+    table = Table(title=f"{model.description()} source preparation")
+    table.add_column("Metric")
+    table.add_column("Value")
+    for key, value in payload.items():
+        if key == "missing_sources":
+            value = ", ".join(str(source["source"]) for source in missing_sources) or "-"
         table.add_row(key, str(value))
     console.print(table)
 
@@ -1132,16 +1344,35 @@ def meansbands(
 def bench(
     kernel: Annotated[
         str,
-        typer.Option(help="Benchmark kernel: forecast, kalman, or all."),
+        typer.Option(help="Benchmark kernel: forecast, kalman, kalman-batch, hard-target, or all."),
     ] = "forecast",
     horizon: Annotated[int, typer.Option(help="Forecast horizon to benchmark.")] = 40,
     periods: Annotated[int, typer.Option(help="Kalman data periods to benchmark.")] = 40,
+    batches: Annotated[int, typer.Option(help="Independent Kalman batches to benchmark.")] = 8,
+    draws: Annotated[
+        int,
+        typer.Option(help="Zero-shock full-forecast draws for hard-target replay."),
+    ] = 2,
     repeats: Annotated[int, typer.Option(help="Number of timed repeats per target.")] = 3,
     dtype: Annotated[str, typer.Option(help="Array dtype: float64 or float32.")] = "float64",
     include_pseudo: Annotated[
         bool,
         typer.Option("--include-pseudo", help="Include pseudo-observable forecast outputs."),
     ] = False,
+    baseline_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--baseline",
+            help="Optional oracle/Julia benchmark JSON baseline to compare against.",
+        ),
+    ] = None,
+    output_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--output",
+            help="Optional path for a durable benchmark reference report JSON.",
+        ),
+    ] = None,
     json_output: Annotated[
         bool,
         typer.Option("--json", help="Emit JSON instead of a table."),
@@ -1149,8 +1380,8 @@ def bench(
 ) -> None:
     """Benchmark native kernels and explicitly report skipped targets."""
     try:
-        if kernel not in {"forecast", "kalman", "all"}:
-            msg = "Benchmark kernel must be forecast, kalman, or all."
+        if kernel not in {"forecast", "kalman", "kalman-batch", "hard-target", "all"}:
+            msg = "Benchmark kernel must be forecast, kalman, kalman-batch, hard-target, or all."
             raise ValueError(msg)
         parsed_dtype = _parse_dtype(dtype)
         results = []
@@ -1163,6 +1394,16 @@ def bench(
                     include_pseudo=include_pseudo,
                 )
             )
+        if kernel in {"hard-target", "all"}:
+            results.extend(
+                benchmark_hard_target_replay_targets(
+                    horizon=horizon,
+                    periods=periods,
+                    draws=draws,
+                    repeats=repeats,
+                    dtype=parsed_dtype,
+                )
+            )
         if kernel in {"kalman", "all"}:
             results.extend(
                 benchmark_kalman_targets(
@@ -1171,7 +1412,35 @@ def bench(
                     dtype=parsed_dtype,
                 )
             )
-    except ValueError as err:
+        if kernel in {"kalman-batch", "all"}:
+            results.extend(
+                benchmark_batched_kalman_targets(
+                    periods=periods,
+                    batches=batches,
+                    repeats=repeats,
+                    dtype=parsed_dtype,
+                )
+            )
+        if baseline_path is not None:
+            results = apply_benchmark_baselines(
+                results,
+                load_benchmark_baselines(baseline_path),
+            )
+        if output_path is not None:
+            write_benchmark_reference_report(
+                output_path,
+                results,
+                kernel=kernel,
+                horizon=horizon,
+                periods=periods,
+                batches=batches,
+                draws=draws,
+                repeats=repeats,
+                dtype=parsed_dtype,
+                include_pseudo=include_pseudo,
+                baseline_path=baseline_path,
+            )
+    except (OSError, ValueError) as err:
         raise _not_ported_exit(str(err)) from err
     if json_output:
         typer.echo(json.dumps([result.to_dict() for result in results], indent=2))
@@ -1181,8 +1450,12 @@ def bench(
     table.add_column("Kernel")
     table.add_column("Backend")
     table.add_column("Device")
+    table.add_column("Batches")
+    table.add_column("Draws")
     table.add_column("Status")
     table.add_column("Elapsed")
+    table.add_column("Baseline")
+    table.add_column("Speedup")
     table.add_column("Reason")
     for result in results:
         if result.skipped:
@@ -1192,7 +1465,24 @@ def bench(
         else:
             status = "failed"
         elapsed = "" if result.elapsed_seconds is None else f"{result.elapsed_seconds:.6f}s"
-        table.add_row(result.kernel, result.backend, result.device, status, elapsed, result.reason)
+        baseline = (
+            ""
+            if result.baseline_elapsed_seconds is None
+            else f"{result.baseline_name}:{result.baseline_elapsed_seconds:.6f}s"
+        )
+        speedup = "" if result.speedup_vs_baseline is None else f"{result.speedup_vs_baseline:.3f}x"
+        table.add_row(
+            result.kernel,
+            result.backend,
+            result.device,
+            str(result.batches),
+            str(result.draws),
+            status,
+            elapsed,
+            baseline,
+            speedup,
+            result.reason,
+        )
     console.print(table)
 
 
@@ -1322,6 +1612,69 @@ def vv_oracle_coverage(
         console.print(table)
     if not report.passed:
         raise typer.Exit(code=1)
+
+
+@vv_app.command("sampler-diagnostics")
+def vv_sampler_diagnostics(
+    sampler_path: Annotated[
+        Path,
+        typer.Option("--sampler", help="Metropolis-Hastings sampler .npz archive."),
+    ],
+    windows: Annotated[
+        int,
+        typer.Option("--windows", help="Number of acceptance-rate windows to report."),
+    ] = 4,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit JSON instead of a table."),
+    ] = False,
+) -> None:
+    """Report sampler chain diagnostics for V&V and DSGE.jl parity work."""
+    try:
+        sampler = load_sampler_result(sampler_path)
+        diagnostics = sampler_diagnostics(sampler, windows=windows)
+    except (FileNotFoundError, KeyError, ValueError) as err:
+        console.print(f"[yellow]{err}[/yellow]")
+        raise typer.Exit(code=2) from err
+    payload = {
+        "sampler": str(sampler_path),
+        **diagnostics.to_dict(),
+    }
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    table = Table(title="Sampler diagnostics")
+    table.add_column("Metric")
+    table.add_column("Value")
+    table.add_row("sampler", str(sampler_path))
+    table.add_row("parameters", ", ".join(diagnostics.parameter_names))
+    table.add_row("draws", str(diagnostics.draws))
+    table.add_row("burnin", str(diagnostics.burnin))
+    table.add_row("acceptance_rate", f"{diagnostics.acceptance_rate:.4f}")
+    table.add_row("realized_acceptance", f"{diagnostics.realized_acceptance_rate:.4f}")
+    table.add_row(
+        "acceptance_windows",
+        ", ".join(f"{value:.4f}" for value in diagnostics.acceptance_windows),
+    )
+    table.add_row(
+        "proposal_condition",
+        f"{diagnostics.proposal_covariance_condition_number:.4g}",
+    )
+    table.add_row(
+        "proposal_min_eigenvalue",
+        f"{diagnostics.proposal_covariance_min_eigenvalue:.4g}",
+    )
+    table.add_row(
+        "proposal_psd",
+        str(diagnostics.proposal_covariance_positive_semidefinite),
+    )
+    for parameter in diagnostics.parameters:
+        table.add_section()
+        table.add_row(f"{parameter.name} mean", f"{parameter.mean:.6g}")
+        table.add_row(f"{parameter.name} std", f"{parameter.std:.6g}")
+        table.add_row(f"{parameter.name} ess", f"{parameter.effective_sample_size:.6g}")
+    console.print(table)
 
 
 @vv_app.command("export-financial-frictions")
@@ -2605,6 +2958,238 @@ def vv_export_suite(
         raise typer.Exit(code=1)
 
 
+@vv_app.command("raw-data-smoke")
+def vv_raw_data_smoke(
+    source_root: Annotated[
+        Path,
+        typer.Option("--source-root", help="Directory containing raw source CSV files."),
+    ],
+    output_dir: Annotated[
+        Path,
+        typer.Option(help="Directory where observable CSV and candidate fixtures are written."),
+    ] = Path("tests/fixtures/raw_data_smoke"),
+    observables_output: Annotated[
+        Path | None,
+        typer.Option(
+            "--observables-output",
+            help="Observable CSV output path; defaults to <output-dir>/observables.csv.",
+        ),
+    ] = None,
+    oracle_dir: Annotated[
+        Path | None,
+        typer.Option("--oracle-dir", help="Optional Julia oracle directory to compare."),
+    ] = None,
+    subspec: Annotated[str, typer.Option(help="Model1002 subspec to export.")] = "ss10",
+    data_vintage: Annotated[
+        str,
+        typer.Option("--data-vintage", help="Model data vintage and source-file suffix."),
+    ] = "181115",
+    forecast_start: Annotated[
+        str,
+        typer.Option("--forecast-start", help="First forecast quarter, e.g. 2018-Q4."),
+    ] = "2018-Q4",
+    start_date: Annotated[
+        str | None,
+        typer.Option("--start-date", help="First required source quarter, e.g. 1959-Q3."),
+    ] = None,
+    end_date: Annotated[
+        str | None,
+        typer.Option("--end-date", help="Last required source quarter, e.g. 2018-Q3."),
+    ] = None,
+    population_forecast_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--population-forecast",
+            help="Optional population forecast CSV used to extend HP filtering.",
+        ),
+    ] = None,
+    hpfilter_population: Annotated[
+        bool,
+        typer.Option(
+            "--hpfilter-population/--no-hpfilter-population",
+            help="Use HP-filtered population levels for per-capita observables.",
+        ),
+    ] = True,
+    population_hpfilter_lambda: Annotated[
+        float,
+        typer.Option(
+            "--population-hpfilter-lambda",
+            help="HP filter smoothing parameter for quarterly population levels.",
+        ),
+    ] = 1600.0,
+    horizon: Annotated[int, typer.Option(help="Forecast horizon.")] = 40,
+    history_method: Annotated[
+        str,
+        typer.Option("--history-method", help="History method: filtered or smoothed."),
+    ] = "filtered",
+    full_draws: Annotated[
+        int,
+        typer.Option("--full-draws", help="Full forecast structural shock draws to export."),
+    ] = 0,
+    seed: Annotated[
+        int | None,
+        typer.Option("--seed", help="Full forecast random seed."),
+    ] = None,
+    sampler_draws: Annotated[
+        Path | None,
+        typer.Option("--sampler-draws", help="Sampler .npz archive for full parameter draws."),
+    ] = None,
+    shock_samples_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--shock-samples",
+            help="Shock sample .npy/.npz/.h5 archive for full structural-shock fixtures.",
+        ),
+    ] = None,
+    allow_empty_data_columns: Annotated[
+        bool,
+        typer.Option(
+            "--allow-empty-data-columns",
+            help="Allow all-empty observable columns in the built observable CSV.",
+        ),
+    ] = False,
+    tolerance_profile: Annotated[
+        str,
+        typer.Option(
+            "--tolerance-profile",
+            help="Named tolerance profile used when --oracle-dir is present.",
+        ),
+    ] = "forecast",
+    require_oracle: Annotated[
+        bool,
+        typer.Option("--require-oracle", help="Fail if --oracle-dir is missing or absent."),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit JSON instead of a table."),
+    ] = False,
+) -> None:
+    """Build observables from raw sources, then export the Python candidate suite."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    observables_path = observables_output or (output_dir / "observables.csv")
+    settings: dict[str, Any] = dict(
+        _model1002_settings(
+            data_vintage=data_vintage,
+            forecast_start=forecast_start,
+        )
+    )
+    settings.update(
+        {
+            "hpfilter_population": hpfilter_population,
+            "population_hpfilter_lambda": population_hpfilter_lambda,
+        }
+    )
+    model = Model1002(
+        subspec=subspec,
+        settings=settings,
+    )
+    try:
+        transformed = build_data_csv_from_sources(
+            model,
+            source_root=source_root,
+            output_path=observables_path,
+            vintage=data_vintage,
+            start_date=start_date,
+            end_date=end_date,
+            population_forecast_path=population_forecast_path,
+        )
+        exported = _export_model1002_candidate_suite(
+            output_dir=output_dir,
+            subspec=subspec,
+            data_vintage=data_vintage,
+            forecast_start=forecast_start,
+            horizon=horizon,
+            data_path=observables_path,
+            history_method=history_method,
+            full_draws=full_draws,
+            seed=seed,
+            sampler_draws=sampler_draws,
+            shock_samples_path=shock_samples_path,
+            allow_empty_data_columns=allow_empty_data_columns,
+        )
+        comparison: dict[str, object]
+        if oracle_dir is None or not oracle_dir.exists():
+            if require_oracle:
+                msg = f"Oracle directory is required but not available: {oracle_dir}"
+                raise FileNotFoundError(msg)
+            comparison = {
+                "status": "skipped",
+                "reason": "oracle directory was not provided or does not exist",
+            }
+        else:
+            profile = resolve_tolerance_profile(tolerance_profile)
+            report = compare_fixture_dirs(
+                oracle_dir,
+                output_dir,
+                atol=profile.atol,
+                rtol=profile.rtol,
+            )
+            comparison = {
+                "status": "passed" if report.passed else "failed",
+                "tolerance_profile": profile.to_dict(),
+                "report": report.to_dict(),
+            }
+    except (
+        FileNotFoundError,
+        KeyError,
+        NotPortedError,
+        UnsupportedRuntimeError,
+        ValueError,
+    ) as err:
+        console.print(f"[yellow]{err}[/yellow]")
+        raise typer.Exit(code=2) from err
+
+    payload = {
+        "source_root": str(source_root),
+        "observables_output": str(observables_path),
+        "output_dir": str(output_dir),
+        "subspec": subspec,
+        "data_vintage": data_vintage,
+        "forecast_start": forecast_start,
+        "start_date": start_date,
+        "end_date": end_date,
+        "population_forecast": (
+            None if population_forecast_path is None else str(population_forecast_path)
+        ),
+        "hpfilter_population": hpfilter_population,
+        "population_hpfilter_lambda": population_hpfilter_lambda,
+        "horizon": horizon,
+        "history_method": history_method,
+        "full_draws": full_draws,
+        "seed": seed,
+        "sampler_draws": None if sampler_draws is None else str(sampler_draws),
+        "shock_samples": None if shock_samples_path is None else str(shock_samples_path),
+        "allow_empty_data_columns": allow_empty_data_columns,
+        "rows": int(transformed.shape[0]),
+        "columns": int(transformed.shape[1]),
+        "first_date": (
+            None
+            if "date" not in transformed or transformed.empty
+            else str(transformed["date"].iloc[0])
+        ),
+        "last_date": (
+            None
+            if "date" not in transformed or transformed.empty
+            else str(transformed["date"].iloc[-1])
+        ),
+        "exported": exported,
+        "comparison": comparison,
+    }
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2))
+    else:
+        table = Table(title="Raw data to forecast smoke")
+        table.add_column("Metric")
+        table.add_column("Value")
+        for key, value in payload.items():
+            if key == "exported":
+                value = len(exported)
+            table.add_row(key, str(value))
+        console.print(table)
+    if comparison["status"] == "failed":
+        raise typer.Exit(code=1)
+
+
 @vv_app.command("export-hard-target-inputs")
 def vv_export_hard_target_inputs(
     output_dir: Annotated[
@@ -2666,6 +3251,14 @@ def vv_export_hard_target_inputs(
 def _not_ported_exit(message: str) -> NotPortedError:
     console.print(f"[yellow]{message}[/yellow]")
     raise typer.Exit(code=2)
+
+
+def _source_requirement(requirements: list[Any], source: str) -> Any:
+    for requirement in requirements:
+        if requirement.source == source:
+            return requirement
+    msg = f"Model data sources do not include {source}."
+    raise KeyError(msg)
 
 
 def _format_comparison_location(
