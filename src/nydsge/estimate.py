@@ -41,6 +41,15 @@ class MetropolisHastingsResult:
     proposal_covariance: np.ndarray
     seed: int | None
     burnin: int
+    n_blocks: int = 1
+    n_param_blocks: int = 1
+    mhthin: int = 1
+    burnin_blocks: int = 0
+    proposal_scale: float = 1.0
+    adaptive_accept: bool = False
+    target_accept: float = 0.25
+    alpha: float = 1.0
+    c: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -152,7 +161,15 @@ def estimate(
     hessian_step: float = 1.0e-4,
     mh_draws: int = 0,
     mh_burnin: int = 0,
+    mh_blocks: int = 1,
+    mh_param_blocks: int = 1,
+    mh_thin: int = 1,
     proposal_scale: float = 1.0,
+    mh_burn_blocks: int = 0,
+    mh_adaptive_accept: bool = False,
+    mh_target_accept: float = 0.25,
+    mh_alpha: float = 1.0,
+    mh_c: float = 0.5,
     seed: int | None = None,
     mode: EstimationModeResult | None = None,
 ) -> EstimateResult:
@@ -171,6 +188,30 @@ def estimate(
         raise ValueError(msg)
     if mh_burnin and mh_draws == 0:
         msg = "mh_draws must be positive when mh_burnin is provided."
+        raise ValueError(msg)
+    if mh_blocks < 1:
+        msg = "mh_blocks must be positive."
+        raise ValueError(msg)
+    if mh_param_blocks < 1:
+        msg = "mh_param_blocks must be positive."
+        raise ValueError(msg)
+    if mh_param_blocks > 0 and mh_param_blocks > len(parameter_names or model.parameters):
+        msg = "mh_param_blocks cannot exceed number of estimated parameters."
+        raise ValueError(msg)
+    if mh_thin < 1:
+        msg = "mh_thin must be positive."
+        raise ValueError(msg)
+    if mh_burn_blocks < 0:
+        msg = "mh_burn_blocks must be nonnegative."
+        raise ValueError(msg)
+    if mh_adaptive_accept and not 0.0 <= mh_target_accept <= 1.0:
+        msg = "mh_target_accept must be between 0 and 1."
+        raise ValueError(msg)
+    if mh_adaptive_accept and not 0.0 <= mh_alpha <= 1.0:
+        msg = "mh_alpha must be in [0, 1]."
+        raise ValueError(msg)
+    if mh_adaptive_accept and mh_c <= 0.0:
+        msg = "mh_c must be positive."
         raise ValueError(msg)
     if proposal_scale <= 0.0:
         msg = "proposal_scale must be positive."
@@ -243,8 +284,16 @@ def estimate(
                 parameter_names=selected_names,
                 draws=mh_draws,
                 burnin=mh_burnin,
+                n_blocks=mh_blocks,
+                n_param_blocks=mh_param_blocks,
+                mhthin=mh_thin,
                 proposal_covariance=sampler_proposal_covariance,
                 proposal_scale=proposal_scale,
+                burnin_blocks=mh_burn_blocks,
+                adaptive_accept=mh_adaptive_accept,
+                target_accept=mh_target_accept,
+                alpha=mh_alpha,
+                c=mh_c,
                 seed=seed,
                 start_date=start_date,
             )
@@ -503,6 +552,118 @@ def proposal_covariance_from_hessian(
     return covariance
 
 
+def _generate_free_blocks(
+    n_parameters: int,
+    n_blocks: int,
+    *,
+    rng: np.random.Generator,
+) -> list[list[int]]:
+    if n_parameters <= 0:
+        msg = "n_parameters must be positive."
+        raise ValueError(msg)
+    if n_blocks < 1:
+        msg = "n_param_blocks must be positive."
+        raise ValueError(msg)
+    if n_blocks > n_parameters:
+        msg = "n_param_blocks cannot exceed the number of parameters."
+        raise ValueError(msg)
+    shuffled = np.asarray(rng.permutation(np.arange(n_parameters, dtype=np.int64)), dtype=np.int64)
+    subset_length = int(np.ceil(n_parameters / n_blocks))
+    blocks = []
+    for block in range(n_blocks):
+        if block < n_blocks - 1:
+            block_indices = shuffled[(block * subset_length) : (block + 1) * subset_length]
+        else:
+            block_indices = shuffled[block * subset_length :]
+        block_sorted = sorted(int(index) for index in block_indices)
+        if block_sorted:
+            blocks.append(block_sorted)
+    return blocks
+
+
+def _logpdf_mvn(
+    point: np.ndarray,
+    mean: np.ndarray,
+    covariance: np.ndarray,
+) -> float:
+    point = np.asarray(point, dtype=np.float64)
+    mean = np.asarray(mean, dtype=np.float64)
+    covariance = np.asarray(covariance, dtype=np.float64)
+    if point.shape != mean.shape:
+        msg = "The point and mean must have the same shape."
+        raise ValueError(msg)
+    if covariance.shape[0] != covariance.shape[1]:
+        msg = "Covariance must be a square matrix."
+        raise ValueError(msg)
+    if point.size == 0:
+        return 0.0
+    try:
+        cholesky = np.linalg.cholesky(covariance)
+    except np.linalg.LinAlgError as err:
+        msg = "Covariance must be positive definite."
+        raise ValueError(msg) from err
+    delta = point - mean
+    solved = np.linalg.solve(cholesky, delta)
+    quadratic_form = float(np.dot(solved, solved))
+    logdet = float(2.0 * np.sum(np.log(np.diag(cholesky))))
+    if np.isinf(logdet):
+        return float("-inf")
+    return float(-0.5 * (point.size * np.log(2.0 * np.pi) + logdet + quadratic_form))
+
+
+def _proposal_correction_log_ratio(
+    proposal: np.ndarray,
+    current: np.ndarray,
+    covariance: np.ndarray,
+    *,
+    alpha: float,
+    c: float,
+) -> tuple[float, float]:
+    if not (0.0 <= alpha <= 1.0):
+        msg = "Adaptive alpha must be in [0, 1]."
+        raise ValueError(msg)
+    if c <= 0.0:
+        msg = "Adaptive proposal scaling c must be positive."
+        raise ValueError(msg)
+    scaled_covariance = covariance * (c * c)
+    mixed_mean = proposal
+    try:
+        log_q0_term = _logpdf_mvn(current, proposal, scaled_covariance)
+        log_q1_term = _logpdf_mvn(proposal, current, scaled_covariance)
+        log_mid_current = _logpdf_mvn(current, mixed_mean, scaled_covariance)
+        log_mid_proposal = _logpdf_mvn(proposal, mixed_mean, scaled_covariance)
+    except ValueError:
+        return float("-inf"), float("-inf")
+
+    diag_std = np.sqrt(np.clip(np.diag(scaled_covariance), 1.0e-16, None))
+    z = (current - proposal) / diag_std
+    log_diag = np.sum(-np.log(diag_std * np.sqrt(2.0 * np.pi)) - 0.5 * (z**2))
+
+    if alpha == 0.0:
+        q0 = np.exp(np.log((1.0 - alpha) / 2.0) + log_diag)
+        q1 = np.exp(np.log((1.0 - alpha) / 2.0) + log_diag)
+        return (
+            float(np.log(q0)) if q0 > 0 else float("-inf"),
+            float(np.log(q1)) if q1 > 0 else float("-inf"),
+        )
+
+    log_q0 = np.logaddexp.reduce(
+        [
+            np.log(alpha) + log_q0_term,
+            np.log((1.0 - alpha) / 2.0) + log_diag,
+            np.log((1.0 - alpha) / 2.0) + log_mid_current,
+        ]
+    )
+    log_q1 = np.logaddexp.reduce(
+        [
+            np.log(alpha) + log_q1_term,
+            np.log((1.0 - alpha) / 2.0) + log_diag,
+            np.log((1.0 - alpha) / 2.0) + log_mid_proposal,
+        ]
+    )
+    return log_q0, log_q1
+
+
 def metropolis_hastings(
     model: DSGEModel,
     observations: np.ndarray,
@@ -510,6 +671,14 @@ def metropolis_hastings(
     parameter_names: tuple[str, ...],
     draws: int,
     burnin: int = 0,
+    n_blocks: int = 1,
+    n_param_blocks: int = 1,
+    mhthin: int = 1,
+    burnin_blocks: int = 0,
+    adaptive_accept: bool = False,
+    target_accept: float = 0.25,
+    alpha: float = 1.0,
+    c: float = 0.5,
     proposal_covariance: np.ndarray | None = None,
     proposal_scale: float = 1.0,
     seed: int | None = None,
@@ -521,18 +690,38 @@ def metropolis_hastings(
     if burnin < 0:
         msg = "Metropolis-Hastings burn-in must be nonnegative."
         raise ValueError(msg)
+    if n_blocks < 1:
+        msg = "Metropolis-Hastings blocks must be positive."
+        raise ValueError(msg)
+    if n_param_blocks < 1:
+        msg = "Metropolis-Hastings parameter blocks must be positive."
+        raise ValueError(msg)
+    if burnin_blocks < 0 or burnin_blocks > n_blocks:
+        msg = "Metropolis-Hastings burn blocks must be between 0 and n_blocks."
+        raise ValueError(msg)
     if proposal_scale <= 0.0:
         msg = "proposal_scale must be positive."
         raise ValueError(msg)
+    if mhthin < 1:
+        msg = "Metropolis-Hastings thinning must be positive."
+        raise ValueError(msg)
+    if adaptive_accept and not 0.0 <= target_accept <= 1.0:
+        msg = "Metropolis-Hastings target_accept must be between 0 and 1."
+        raise ValueError(msg)
 
     original_parameters = dict(model.parameters)
+    n_parameters = len(parameter_names)
+    if n_param_blocks > n_parameters:
+        msg = "n_param_blocks cannot exceed number of estimated parameters."
+        raise ValueError(msg)
     current = parameter_estimation_vector(model, parameter_names)
     covariance = _proposal_covariance(
         proposal_covariance,
-        n_parameters=len(parameter_names),
+        n_parameters=n_parameters,
         scale=proposal_scale,
     )
-    proposal_cholesky = np.linalg.cholesky(covariance)
+    proposal_scale_adaptive = float(proposal_scale)
+
     current_log_posterior = _log_posterior_for_estimation_values(
         model,
         observations,
@@ -546,54 +735,144 @@ def metropolis_hastings(
         raise ValueError(msg)
 
     rng = np.random.default_rng(seed)
-    total_steps = burnin + draws
-    estimation_draws = np.zeros((draws, len(parameter_names)), dtype=np.float64)
-    parameter_draws = np.zeros_like(estimation_draws)
-    log_posterior = np.zeros(draws, dtype=np.float64)
-    accepted = np.zeros(draws, dtype=bool)
+    steps_per_block = draws * mhthin
+    if n_blocks == 1 and burnin_blocks == 0:
+        steps_per_block += burnin * mhthin
+    if n_param_blocks == 1:
+        parameter_blocks = [list(range(n_parameters))]
+        reblock = False
+    else:
+        parameter_blocks = []
+        reblock = True
+
+    target_draws = draws
+    estimation_draws: list[np.ndarray] = []
+    parameter_draws: list[np.ndarray] = []
+    log_posterior_draws: list[float] = []
+    accepted_draws: list[bool] = []
     accepted_total = 0
+    proposal_count = 0
+    block_acceptance_rate = target_accept
 
-    for step in range(total_steps):
-        proposal = current + proposal_cholesky @ rng.standard_normal(len(parameter_names))
-        proposal_log_posterior = _log_posterior_for_estimation_values(
-            model,
-            observations,
-            original_parameters,
-            parameter_names,
-            proposal,
-            start_date=start_date,
-        )
-        step_accepted = False
-        if np.isfinite(proposal_log_posterior):
-            log_acceptance = proposal_log_posterior - current_log_posterior
-            if log_acceptance >= 0.0 or np.log(rng.random()) < log_acceptance:
-                current = proposal
-                current_log_posterior = proposal_log_posterior
-                step_accepted = True
-                accepted_total += 1
-
-        if step >= burnin:
-            retained = step - burnin
-            estimation_draws[retained] = current
-            parameter_draws[retained] = _model_values_for_estimation_vector(
-                original_parameters,
-                parameter_names,
-                current,
+    for block in range(n_blocks):
+        if len(estimation_draws) >= target_draws:
+            break
+        if adaptive_accept:
+            proposal_scale_adaptive *= 0.95 + 0.10 * (
+                np.exp(16.0 * (block_acceptance_rate - target_accept))
+                / (1.0 + np.exp(16.0 * (block_acceptance_rate - target_accept)))
             )
-            log_posterior[retained] = current_log_posterior
-            accepted[retained] = step_accepted
+        block_rejections = 0
+        block_proposals = 0
+        for step in range(1, steps_per_block + 1):
+            if len(estimation_draws) >= target_draws:
+                break
+            if reblock:
+                parameter_blocks = _generate_free_blocks(
+                    n_parameters,
+                    n_param_blocks,
+                    rng=rng,
+                )
+            sweep_accepted = False
+            for block_indices in parameter_blocks:
+                proposal = current.copy()
+                block_indices_array = np.asarray(block_indices, dtype=np.int64)
+                block_covariance = covariance[np.ix_(block_indices_array, block_indices_array)]
+                block_scale = proposal_scale_adaptive
+                block_cholesky = np.linalg.cholesky(block_covariance * (block_scale * block_scale))
+                proposal[block_indices_array] = proposal[
+                    block_indices_array
+                ] + block_cholesky @ rng.standard_normal(block_indices_array.size)
+
+                proposal_log_posterior = _log_posterior_for_estimation_values(
+                    model,
+                    observations,
+                    original_parameters,
+                    parameter_names,
+                    proposal,
+                    start_date=start_date,
+                )
+
+                accepted_step = False
+                block_proposals += 1
+                proposal_count += 1
+                if np.isfinite(proposal_log_posterior):
+                    log_acceptance = proposal_log_posterior - current_log_posterior
+                    if adaptive_accept:
+                        log_q0, log_q1 = _proposal_correction_log_ratio(
+                            proposal=proposal[block_indices_array],
+                            current=current[block_indices_array],
+                            covariance=block_covariance,
+                            alpha=alpha,
+                            c=c,
+                        )
+                        if np.isfinite(log_q0) and np.isfinite(log_q1):
+                            log_acceptance += log_q0 - log_q1
+                    if log_acceptance >= 0.0 or np.log(rng.random()) < log_acceptance:
+                        current = proposal
+                        current_log_posterior = proposal_log_posterior
+                        accepted_step = True
+                        accepted_total += 1
+                        sweep_accepted = True
+                if not accepted_step:
+                    block_rejections += 1
+
+                if step % mhthin == 0 and block >= burnin_blocks and proposal_count > burnin:
+                    if len(estimation_draws) < target_draws:
+                        estimation_draws.append(current.copy())
+                        parameter_draws.append(
+                            _model_values_for_estimation_vector(
+                                original_parameters,
+                                parameter_names,
+                                current,
+                            )
+                        )
+                        log_posterior_draws.append(current_log_posterior)
+                        accepted_draws.append(sweep_accepted)
+                        if len(estimation_draws) >= target_draws:
+                            break
+
+        if adaptive_accept and block_proposals:
+            block_acceptance_rate = 1.0 - (block_rejections / block_proposals)
+
+    estimation_draw_array = (
+        np.asarray(estimation_draws, dtype=np.float64)
+        if estimation_draws
+        else np.zeros((0, n_parameters), dtype=np.float64)
+    )
+    parameter_draw_array = (
+        np.asarray(parameter_draws, dtype=np.float64)
+        if parameter_draws
+        else np.zeros((0, n_parameters), dtype=np.float64)
+    )
+    log_posterior_array = (
+        np.asarray(log_posterior_draws, dtype=np.float64)
+        if log_posterior_draws
+        else np.zeros(0, dtype=np.float64)
+    )
+    accepted_array = np.asarray(accepted_draws, dtype=bool)
+    acceptance_rate = float(accepted_total / proposal_count) if proposal_count else 0.0
 
     _set_parameter_estimation_vector(model, original_parameters, parameter_names, current)
     return MetropolisHastingsResult(
         parameter_names=parameter_names,
-        estimation_draws=estimation_draws,
-        parameter_draws=parameter_draws,
-        log_posterior=log_posterior,
-        accepted=accepted,
-        acceptance_rate=float(accepted_total / total_steps),
+        estimation_draws=estimation_draw_array,
+        parameter_draws=parameter_draw_array,
+        log_posterior=log_posterior_array,
+        accepted=accepted_array,
+        acceptance_rate=acceptance_rate,
         proposal_covariance=covariance,
         seed=seed,
         burnin=burnin,
+        n_blocks=n_blocks,
+        n_param_blocks=n_param_blocks,
+        mhthin=mhthin,
+        burnin_blocks=burnin_blocks,
+        proposal_scale=proposal_scale,
+        adaptive_accept=adaptive_accept,
+        target_accept=target_accept,
+        alpha=alpha,
+        c=c,
     )
 
 
@@ -616,6 +895,15 @@ def save_sampler_result(
         accepted=sampler.accepted,
         acceptance_rate=np.asarray([sampler.acceptance_rate], dtype=np.float64),
         proposal_covariance=sampler.proposal_covariance,
+        n_blocks=np.asarray([sampler.n_blocks], dtype=np.int64),
+        n_param_blocks=np.asarray([sampler.n_param_blocks], dtype=np.int64),
+        mhthin=np.asarray([sampler.mhthin], dtype=np.int64),
+        burnin_blocks=np.asarray([sampler.burnin_blocks], dtype=np.int64),
+        proposal_scale=np.asarray([sampler.proposal_scale], dtype=np.float64),
+        adaptive_accept=np.asarray([sampler.adaptive_accept], dtype=bool),
+        target_accept=np.asarray([sampler.target_accept], dtype=np.float64),
+        alpha=np.asarray([sampler.alpha], dtype=np.float64),
+        c=np.asarray([sampler.c], dtype=np.float64),
         seed=np.asarray([-1 if sampler.seed is None else sampler.seed], dtype=np.int64),
         burnin=np.asarray([sampler.burnin], dtype=np.int64),
     )
@@ -651,6 +939,25 @@ def load_sampler_result(path: Path | str) -> MetropolisHastingsResult:
             proposal_covariance=np.asarray(archive["proposal_covariance"], dtype=np.float64),
             seed=None if seed_value < 0 else seed_value,
             burnin=int(np.ravel(archive["burnin"])[0]),
+            n_blocks=int(np.ravel(archive["n_blocks"])[0]) if "n_blocks" in archive else 1,
+            n_param_blocks=int(np.ravel(archive["n_param_blocks"])[0])
+            if "n_param_blocks" in archive
+            else 1,
+            mhthin=int(np.ravel(archive["mhthin"])[0]) if "mhthin" in archive else 1,
+            burnin_blocks=int(np.ravel(archive["burnin_blocks"])[0])
+            if "burnin_blocks" in archive
+            else 0,
+            proposal_scale=float(np.ravel(archive["proposal_scale"])[0])
+            if "proposal_scale" in archive
+            else 1.0,
+            adaptive_accept=bool(np.ravel(archive["adaptive_accept"])[0])
+            if "adaptive_accept" in archive
+            else False,
+            target_accept=float(np.ravel(archive["target_accept"])[0])
+            if "target_accept" in archive
+            else 0.25,
+            alpha=float(np.ravel(archive["alpha"])[0]) if "alpha" in archive else 1.0,
+            c=float(np.ravel(archive["c"])[0]) if "c" in archive else 0.5,
         )
     validate_sampler_result(result)
     return result
@@ -682,6 +989,33 @@ def validate_sampler_result(sampler: MetropolisHastingsResult) -> None:
         raise ValueError(msg)
     if not np.allclose(sampler.proposal_covariance, sampler.proposal_covariance.T):
         msg = "Sampler proposal_covariance must be symmetric."
+        raise ValueError(msg)
+    if not np.isfinite(sampler.proposal_scale) or sampler.proposal_scale <= 0.0:
+        msg = "Sampler proposal_scale must be positive."
+        raise ValueError(msg)
+    if sampler.n_blocks < 1:
+        msg = "Sampler n_blocks must be positive."
+        raise ValueError(msg)
+    if sampler.n_param_blocks < 1:
+        msg = "Sampler n_param_blocks must be positive."
+        raise ValueError(msg)
+    if sampler.n_param_blocks > len(sampler.parameter_names):
+        msg = "Sampler n_param_blocks cannot exceed number of parameters."
+        raise ValueError(msg)
+    if sampler.mhthin < 1:
+        msg = "Sampler mhthin must be positive."
+        raise ValueError(msg)
+    if sampler.burnin_blocks < 0 or sampler.burnin_blocks > sampler.n_blocks:
+        msg = "Sampler burnin_blocks must be between 0 and n_blocks."
+        raise ValueError(msg)
+    if sampler.adaptive_accept and not 0.0 <= sampler.target_accept <= 1.0:
+        msg = "Sampler target_accept must be between 0 and 1."
+        raise ValueError(msg)
+    if not 0.0 <= sampler.alpha <= 1.0:
+        msg = "Sampler alpha must be in [0, 1]."
+        raise ValueError(msg)
+    if sampler.c <= 0.0:
+        msg = "Sampler c must be positive."
         raise ValueError(msg)
     if not np.isfinite(sampler.acceptance_rate) or not 0.0 <= sampler.acceptance_rate <= 1.0:
         msg = "Sampler acceptance_rate must be finite and between 0 and 1."

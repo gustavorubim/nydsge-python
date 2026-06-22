@@ -86,6 +86,15 @@ def test_sampler_result_can_round_trip_npz_archive(tmp_path) -> None:
     np.testing.assert_array_equal(loaded.accepted, result.sampler.accepted)
     np.testing.assert_allclose(loaded.proposal_covariance, result.sampler.proposal_covariance)
     assert loaded.acceptance_rate == result.sampler.acceptance_rate
+    assert loaded.n_blocks == result.sampler.n_blocks == 1
+    assert loaded.n_param_blocks == result.sampler.n_param_blocks == 1
+    assert loaded.mhthin == result.sampler.mhthin == 1
+    assert loaded.burnin_blocks == result.sampler.burnin_blocks == 0
+    assert loaded.proposal_scale == result.sampler.proposal_scale == 1.0
+    assert loaded.adaptive_accept == result.sampler.adaptive_accept is False
+    assert loaded.target_accept == result.sampler.target_accept == 0.25
+    assert loaded.alpha == result.sampler.alpha == 1.0
+    assert loaded.c == result.sampler.c == 0.5
     assert loaded.seed == 99
     assert loaded.burnin == 0
 
@@ -287,6 +296,33 @@ def test_estimate_validates_metropolis_hastings_inputs() -> None:
             proposal_covariance=np.eye(2),
         )
 
+    with pytest.raises(ValueError, match="mh_blocks"):
+        estimate(
+            model,
+            data,
+            parameter_names=["alpha"],
+            mh_draws=1,
+            mh_blocks=0,
+        )
+
+    with pytest.raises(ValueError, match="mh_param_blocks"):
+        estimate(
+            model,
+            data,
+            parameter_names=["alpha"],
+            mh_draws=1,
+            mh_param_blocks=2,
+        )
+
+    with pytest.raises(ValueError, match="mh_thin"):
+        estimate(
+            model,
+            data,
+            parameter_names=["alpha"],
+            mh_draws=1,
+            mh_thin=0,
+        )
+
 
 def test_estimate_can_optimize_selected_parameter_and_compute_hessian() -> None:
     model = Model1002()
@@ -322,6 +358,29 @@ def test_estimate_rejects_hessian_without_optimization() -> None:
 
     with pytest.raises(ValueError, match="optimize=True"):
         estimate(model, data, compute_hessian=True)
+
+
+def test_estimate_runs_blocked_sampler_controls() -> None:
+    model = Model1002()
+    data = np.zeros((1, len(model.observables)))
+
+    result = estimate(
+        model,
+        data,
+        parameter_names=["alpha"],
+        mh_draws=4,
+        mh_blocks=2,
+        mh_param_blocks=1,
+        mh_thin=2,
+        proposal_scale=1.0e-8,
+        seed=33,
+    )
+
+    assert result.sampler is not None
+    assert result.sampler.n_blocks == 2
+    assert result.sampler.n_param_blocks == 1
+    assert result.sampler.mhthin == 2
+    assert result.sampler.estimation_draws.shape == (4, 1)
 
 
 def test_estimation_parameter_names_default_uses_prior_backed_free_parameters() -> None:
