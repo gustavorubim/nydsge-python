@@ -44,6 +44,72 @@ class MetropolisHastingsResult:
 
 
 @dataclass(frozen=True)
+class SamplerParameterDiagnostics:
+    name: str
+    mean: float
+    std: float
+    minimum: float
+    maximum: float
+    effective_sample_size: float
+    integrated_autocorrelation_time: float
+
+    def to_dict(self) -> dict[str, float | str]:
+        return {
+            "name": self.name,
+            "mean": self.mean,
+            "std": self.std,
+            "minimum": self.minimum,
+            "maximum": self.maximum,
+            "effective_sample_size": self.effective_sample_size,
+            "integrated_autocorrelation_time": self.integrated_autocorrelation_time,
+        }
+
+
+@dataclass(frozen=True)
+class SamplerDiagnostics:
+    parameter_names: tuple[str, ...]
+    draws: int
+    burnin: int
+    seed: int | None
+    accepted_draws: int
+    acceptance_rate: float
+    realized_acceptance_rate: float
+    acceptance_windows: tuple[float, ...]
+    proposal_covariance_shape: tuple[int, int]
+    proposal_covariance_min_eigenvalue: float
+    proposal_covariance_max_eigenvalue: float
+    proposal_covariance_condition_number: float
+    proposal_covariance_positive_semidefinite: bool
+    log_posterior_mean: float
+    log_posterior_minimum: float
+    log_posterior_maximum: float
+    parameters: tuple[SamplerParameterDiagnostics, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "parameter_names": list(self.parameter_names),
+            "draws": self.draws,
+            "burnin": self.burnin,
+            "seed": self.seed,
+            "accepted_draws": self.accepted_draws,
+            "acceptance_rate": self.acceptance_rate,
+            "realized_acceptance_rate": self.realized_acceptance_rate,
+            "acceptance_windows": list(self.acceptance_windows),
+            "proposal_covariance_shape": list(self.proposal_covariance_shape),
+            "proposal_covariance_min_eigenvalue": self.proposal_covariance_min_eigenvalue,
+            "proposal_covariance_max_eigenvalue": self.proposal_covariance_max_eigenvalue,
+            "proposal_covariance_condition_number": (self.proposal_covariance_condition_number),
+            "proposal_covariance_positive_semidefinite": (
+                self.proposal_covariance_positive_semidefinite
+            ),
+            "log_posterior_mean": self.log_posterior_mean,
+            "log_posterior_minimum": self.log_posterior_minimum,
+            "log_posterior_maximum": self.log_posterior_maximum,
+            "parameters": [parameter.to_dict() for parameter in self.parameters],
+        }
+
+
+@dataclass(frozen=True)
 class EstimationModeResult:
     parameter_names: tuple[str, ...]
     estimation_values: np.ndarray
@@ -619,6 +685,99 @@ def validate_sampler_result(sampler: MetropolisHastingsResult) -> None:
     if sampler.burnin < 0:
         msg = "Sampler burnin must be nonnegative."
         raise ValueError(msg)
+
+
+def sampler_diagnostics(
+    sampler: MetropolisHastingsResult,
+    *,
+    windows: int = 4,
+) -> SamplerDiagnostics:
+    validate_sampler_result(sampler)
+    if windows <= 0:
+        msg = "Sampler diagnostics windows must be positive."
+        raise ValueError(msg)
+    draws = int(sampler.estimation_draws.shape[0])
+    if draws <= 0:
+        msg = "Sampler diagnostics require at least one retained draw."
+        raise ValueError(msg)
+    accepted_draws = int(np.count_nonzero(sampler.accepted))
+    eigenvalues = np.linalg.eigvalsh(sampler.proposal_covariance)
+    min_eigenvalue = float(np.min(eigenvalues))
+    max_eigenvalue = float(np.max(eigenvalues))
+    if min_eigenvalue <= 0.0:
+        condition_number = float("inf")
+    else:
+        condition_number = float(max_eigenvalue / min_eigenvalue)
+    return SamplerDiagnostics(
+        parameter_names=sampler.parameter_names,
+        draws=draws,
+        burnin=sampler.burnin,
+        seed=sampler.seed,
+        accepted_draws=accepted_draws,
+        acceptance_rate=float(sampler.acceptance_rate),
+        realized_acceptance_rate=float(accepted_draws / draws) if draws else 0.0,
+        acceptance_windows=_acceptance_windows(sampler.accepted, windows=windows),
+        proposal_covariance_shape=sampler.proposal_covariance.shape,
+        proposal_covariance_min_eigenvalue=min_eigenvalue,
+        proposal_covariance_max_eigenvalue=max_eigenvalue,
+        proposal_covariance_condition_number=condition_number,
+        proposal_covariance_positive_semidefinite=bool(min_eigenvalue >= -1.0e-12),
+        log_posterior_mean=float(np.mean(sampler.log_posterior)),
+        log_posterior_minimum=float(np.min(sampler.log_posterior)),
+        log_posterior_maximum=float(np.max(sampler.log_posterior)),
+        parameters=tuple(
+            _sampler_parameter_diagnostics(
+                name,
+                sampler.parameter_draws[:, parameter_index],
+            )
+            for parameter_index, name in enumerate(sampler.parameter_names)
+        ),
+    )
+
+
+def _acceptance_windows(accepted: np.ndarray, *, windows: int) -> tuple[float, ...]:
+    if accepted.size == 0:
+        return ()
+    chunks = np.array_split(np.asarray(accepted, dtype=bool), min(windows, accepted.size))
+    return tuple(float(np.mean(chunk)) for chunk in chunks if chunk.size)
+
+
+def _sampler_parameter_diagnostics(
+    name: str,
+    draws: np.ndarray,
+) -> SamplerParameterDiagnostics:
+    values = np.asarray(draws, dtype=np.float64)
+    ess, iat = _effective_sample_size(values)
+    return SamplerParameterDiagnostics(
+        name=name,
+        mean=float(np.mean(values)),
+        std=float(np.std(values, ddof=1)) if values.size > 1 else 0.0,
+        minimum=float(np.min(values)),
+        maximum=float(np.max(values)),
+        effective_sample_size=ess,
+        integrated_autocorrelation_time=iat,
+    )
+
+
+def _effective_sample_size(values: np.ndarray) -> tuple[float, float]:
+    sample = np.asarray(values, dtype=np.float64)
+    n_draws = int(sample.size)
+    if n_draws <= 1:
+        return float(n_draws), 1.0
+    centered = sample - float(np.mean(sample))
+    variance = float(np.dot(centered, centered) / n_draws)
+    if not np.isfinite(variance) or variance <= np.finfo(np.float64).eps:
+        return float(n_draws), 1.0
+    autocorrelation_sum = 0.0
+    for lag in range(1, n_draws):
+        autocorrelation = float(
+            np.dot(centered[:-lag], centered[lag:]) / ((n_draws - lag) * variance)
+        )
+        if not np.isfinite(autocorrelation) or autocorrelation <= 0.0:
+            break
+        autocorrelation_sum += autocorrelation
+    iat = max(1.0, 1.0 + 2.0 * autocorrelation_sum)
+    return float(min(n_draws, n_draws / iat)), float(iat)
 
 
 def _evaluate_log_posterior(

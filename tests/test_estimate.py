@@ -14,6 +14,7 @@ from nydsge.estimate import (
     load_sampler_result,
     parameter_estimation_vector,
     proposal_covariance_from_hessian,
+    sampler_diagnostics,
     save_estimation_mode,
     save_sampler_result,
     validate_estimation_mode,
@@ -87,6 +88,75 @@ def test_sampler_result_can_round_trip_npz_archive(tmp_path) -> None:
     assert loaded.acceptance_rate == result.sampler.acceptance_rate
     assert loaded.seed == 99
     assert loaded.burnin == 0
+
+
+def test_sampler_diagnostics_reports_chain_health_metrics() -> None:
+    sampler = MetropolisHastingsResult(
+        parameter_names=("alpha", "rho"),
+        estimation_draws=np.array(
+            [
+                [0.1, 0.2],
+                [0.2, 0.1],
+                [0.3, 0.4],
+                [0.4, 0.3],
+            ],
+            dtype=np.float64,
+        ),
+        parameter_draws=np.array(
+            [
+                [1.1, 2.2],
+                [1.2, 2.1],
+                [1.3, 2.4],
+                [1.4, 2.3],
+            ],
+            dtype=np.float64,
+        ),
+        log_posterior=np.array([-4.0, -3.5, -3.0, -2.5], dtype=np.float64),
+        accepted=np.array([True, False, True, True]),
+        acceptance_rate=0.75,
+        proposal_covariance=np.array([[4.0, 0.0], [0.0, 1.0]], dtype=np.float64),
+        seed=11,
+        burnin=2,
+    )
+
+    diagnostics = sampler_diagnostics(sampler, windows=2)
+
+    assert diagnostics.parameter_names == ("alpha", "rho")
+    assert diagnostics.draws == 4
+    assert diagnostics.burnin == 2
+    assert diagnostics.seed == 11
+    assert diagnostics.accepted_draws == 3
+    assert diagnostics.acceptance_rate == 0.75
+    assert diagnostics.realized_acceptance_rate == 0.75
+    assert diagnostics.acceptance_windows == (0.5, 1.0)
+    assert diagnostics.proposal_covariance_shape == (2, 2)
+    assert diagnostics.proposal_covariance_min_eigenvalue == 1.0
+    assert diagnostics.proposal_covariance_max_eigenvalue == 4.0
+    assert diagnostics.proposal_covariance_condition_number == 4.0
+    assert diagnostics.proposal_covariance_positive_semidefinite is True
+    assert diagnostics.log_posterior_mean == -3.25
+    assert diagnostics.parameters[0].name == "alpha"
+    assert diagnostics.parameters[0].effective_sample_size <= 4.0
+    payload = diagnostics.to_dict()
+    assert payload["parameter_names"] == ["alpha", "rho"]
+    assert payload["parameters"][0]["name"] == "alpha"
+
+
+def test_sampler_diagnostics_validates_windows() -> None:
+    sampler = MetropolisHastingsResult(
+        parameter_names=("alpha",),
+        estimation_draws=np.ones((1, 1), dtype=np.float64),
+        parameter_draws=np.ones((1, 1), dtype=np.float64),
+        log_posterior=np.zeros(1, dtype=np.float64),
+        accepted=np.ones(1, dtype=bool),
+        acceptance_rate=1.0,
+        proposal_covariance=np.ones((1, 1), dtype=np.float64),
+        seed=None,
+        burnin=0,
+    )
+
+    with pytest.raises(ValueError, match="windows"):
+        sampler_diagnostics(sampler, windows=0)
 
 
 def test_estimation_mode_can_round_trip_npz_archive(tmp_path) -> None:
