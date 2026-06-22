@@ -30,3 +30,86 @@ Report schema:
 Reference timing files should be collected separately for native Windows CPU,
 Windows CUDA, macOS CPU/MPS, Linux CPU, and Linux CUDA/JAX machines. Unsupported
 targets should remain in the report as explicit skipped rows.
+
+### Cross-Machine Capture Protocol
+
+For each native machine, capture:
+
+1. A local Python timing report using the same CLI parameters.
+2. Optionally, a Julia forecast baseline and second Python timing report with
+   `--baseline` to compute speedups.
+
+Use the repository script for the full capture flow:
+
+```powershell
+uv run python scripts/capture_benchmarks.py `
+  --kernel all `
+  --horizon 40 `
+  --periods 40 `
+  --batches 8 `
+  --draws 2 `
+  --repeats 3 `
+  --capture-julia-baseline `
+  --label windows-cpu `
+  --output-dir reports\benchmarks
+```
+
+```powershell
+uv run python scripts/capture_benchmarks.py `
+  --kernel all `
+  --horizon 40 `
+  --periods 40 `
+  --batches 8 `
+  --draws 2 `
+  --repeats 3 `
+  --label linux-cuda `
+  --julia-script tools\oracle_julia\benchmark_model1002.jl `
+  --julia-version 1.8 `
+  --output-dir reports\benchmarks
+```
+
+The script writes three JSON files per pass:
+
+- `<label>_<kernel>_<date>_local.json` with native outputs.
+- `<label>_julia_forecast_<date>.json` for the captured Julia baseline (if requested).
+- `<label>_<kernel>_vs_julia_<date>.json` with baseline speedup fields when a
+  baseline is available.
+
+Both files include:
+
+- `platform` metadata (OS, machine, processor, Python).
+- `runtime_statuses` for all runtime backends/devices probed on that machine.
+- `results` with ran/skipped/failed states and optional baseline speedup.
+
+### Cross-Machine Comparison
+
+After captures are collected, compare them with:
+
+```powershell
+uv run python scripts/compare_benchmark_reports.py `
+  --report reports\benchmarks\windows-cpu_forecast_2026-06-22_local.json `
+  --report reports\benchmarks\linux-cpu_forecast_2026-06-22_local.json `
+  --baseline-machine linux-cpu `
+  --baseline-backend numpy `
+  --output reports\benchmarks\cross_machine_summary.json
+```
+
+Use `--kernel` to narrow to `forecast`, `kalman`, `kalman-batch`, or
+`hard-target`, and `--no-strict` when signatures legitimately differ (for example,
+different repeat counts during warmup sweeps).
+
+The output payload is JSON with:
+
+- `summary.signature`: canonical command signature used for comparison.
+- `summary.rows`: flattened rows across machines.
+- `speedups`: per `(kernel,backend,device,horizon,repeats,dtype)` entries with machine
+  elapsed times and speedup ratios.
+
+Check the same matrix on:
+
+- `macos-cpu`, `macos-mps`
+- `linux-cpu`, `linux-cuda`
+- `windows-cpu`, `windows-cuda`
+
+and retain these files under versioned `reports/benchmarks/` locations for
+cross-machine comparisons.

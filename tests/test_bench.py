@@ -316,6 +316,8 @@ def test_benchmark_reference_report_records_command_platform_and_results() -> No
     assert report["command"]["baseline_path"] == "oracle.json"
     assert report["command"]["include_pseudo"] is True
     assert report["platform"]["system"]
+    assert report["runtime_statuses"]
+    assert report["runtime_statuses"][0]["backend"] == "platform"
     assert report["results"][0]["backend"] == "numpy"
     assert report["results"][0]["elapsed_seconds"] == 0.01
 

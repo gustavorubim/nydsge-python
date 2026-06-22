@@ -111,9 +111,11 @@ def benchmark_reference_report(
     dtype: str,
     include_pseudo: bool,
     baseline_path: Path | str | None = None,
+    runtime_statuses: list[RuntimeStatus] | None = None,
 ) -> dict[str, Any]:
     """Build a durable benchmark report for local and cross-machine references."""
 
+    statuses = runtime_report() if runtime_statuses is None else runtime_statuses
     return {
         "schema_version": 1,
         "created_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
@@ -135,6 +137,7 @@ def benchmark_reference_report(
             "processor": platform.processor(),
             "python_version": sys.version.split()[0],
         },
+        "runtime_statuses": [asdict(status) for status in statuses],
         "results": [result.to_dict() for result in results],
     }
 
@@ -152,6 +155,7 @@ def write_benchmark_reference_report(
     dtype: str,
     include_pseudo: bool,
     baseline_path: Path | str | None = None,
+    runtime_statuses: list[RuntimeStatus] | None = None,
 ) -> dict[str, Any]:
     report = benchmark_reference_report(
         results,
@@ -164,6 +168,7 @@ def write_benchmark_reference_report(
         dtype=dtype,
         include_pseudo=include_pseudo,
         baseline_path=baseline_path,
+        runtime_statuses=runtime_statuses,
     )
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
