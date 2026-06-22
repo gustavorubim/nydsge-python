@@ -852,6 +852,8 @@ def test_vv_sampler_diagnostics_reports_archive_metrics(tmp_path) -> None:
     assert payload["proposal_covariance_positive_semidefinite"] is True
     assert payload["parameters"][0]["name"] == "alpha"
     assert payload["parameters"][0]["effective_sample_size"] > 0.0
+    assert payload["parameters"][0]["monte_carlo_standard_error"] >= 0.0
+    assert payload["parameters"][0]["split_rhat"] is None
 
 
 def test_forecast_command_reports_model1002_forecast_shape() -> None:

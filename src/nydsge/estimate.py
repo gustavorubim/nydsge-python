@@ -52,8 +52,10 @@ class SamplerParameterDiagnostics:
     maximum: float
     effective_sample_size: float
     integrated_autocorrelation_time: float
+    monte_carlo_standard_error: float
+    split_rhat: float | None
 
-    def to_dict(self) -> dict[str, float | str]:
+    def to_dict(self) -> dict[str, float | str | None]:
         return {
             "name": self.name,
             "mean": self.mean,
@@ -62,6 +64,8 @@ class SamplerParameterDiagnostics:
             "maximum": self.maximum,
             "effective_sample_size": self.effective_sample_size,
             "integrated_autocorrelation_time": self.integrated_autocorrelation_time,
+            "monte_carlo_standard_error": self.monte_carlo_standard_error,
+            "split_rhat": self.split_rhat,
         }
 
 
@@ -748,14 +752,21 @@ def _sampler_parameter_diagnostics(
 ) -> SamplerParameterDiagnostics:
     values = np.asarray(draws, dtype=np.float64)
     ess, iat = _effective_sample_size(values)
+    std = float(np.std(values, ddof=1)) if values.size > 1 else 0.0
+    if ess <= 0.0 or not np.isfinite(ess):
+        mcse = float("inf")
+    else:
+        mcse = float(std / np.sqrt(ess))
     return SamplerParameterDiagnostics(
         name=name,
         mean=float(np.mean(values)),
-        std=float(np.std(values, ddof=1)) if values.size > 1 else 0.0,
+        std=std,
         minimum=float(np.min(values)),
         maximum=float(np.max(values)),
         effective_sample_size=ess,
         integrated_autocorrelation_time=iat,
+        monte_carlo_standard_error=mcse,
+        split_rhat=_split_rhat(values),
     )
 
 
@@ -778,6 +789,27 @@ def _effective_sample_size(values: np.ndarray) -> tuple[float, float]:
         autocorrelation_sum += autocorrelation
     iat = max(1.0, 1.0 + 2.0 * autocorrelation_sum)
     return float(min(n_draws, n_draws / iat)), float(iat)
+
+
+def _split_rhat(values: np.ndarray) -> float | None:
+    sample = np.asarray(values, dtype=np.float64)
+    n_draws = int(sample.size)
+    if n_draws < 4:
+        return None
+    half = n_draws // 2
+    chains = np.vstack([sample[:half], sample[-half:]])
+    chain_variances = np.var(chains, axis=1, ddof=1)
+    within_variance = float(np.mean(chain_variances))
+    chain_means = np.mean(chains, axis=1)
+    between_variance = float(half * np.var(chain_means, ddof=1))
+    if not np.isfinite(within_variance) or not np.isfinite(between_variance):
+        return None
+    if within_variance <= np.finfo(np.float64).eps:
+        return 1.0 if between_variance <= np.finfo(np.float64).eps else None
+    variance_estimate = ((half - 1.0) / half) * within_variance + between_variance / half
+    if variance_estimate < 0.0:
+        return None
+    return float(np.sqrt(variance_estimate / within_variance))
 
 
 def _evaluate_log_posterior(

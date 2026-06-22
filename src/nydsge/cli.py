@@ -1674,6 +1674,14 @@ def vv_sampler_diagnostics(
         table.add_row(f"{parameter.name} mean", f"{parameter.mean:.6g}")
         table.add_row(f"{parameter.name} std", f"{parameter.std:.6g}")
         table.add_row(f"{parameter.name} ess", f"{parameter.effective_sample_size:.6g}")
+        table.add_row(
+            f"{parameter.name} mcse",
+            f"{parameter.monte_carlo_standard_error:.6g}",
+        )
+        table.add_row(
+            f"{parameter.name} split_rhat",
+            "-" if parameter.split_rhat is None else f"{parameter.split_rhat:.6g}",
+        )
     console.print(table)
 
 

@@ -137,9 +137,14 @@ def test_sampler_diagnostics_reports_chain_health_metrics() -> None:
     assert diagnostics.log_posterior_mean == -3.25
     assert diagnostics.parameters[0].name == "alpha"
     assert diagnostics.parameters[0].effective_sample_size <= 4.0
+    assert diagnostics.parameters[0].monte_carlo_standard_error > 0.0
+    assert diagnostics.parameters[0].split_rhat is not None
+    assert diagnostics.parameters[0].split_rhat > 1.0
     payload = diagnostics.to_dict()
     assert payload["parameter_names"] == ["alpha", "rho"]
     assert payload["parameters"][0]["name"] == "alpha"
+    assert payload["parameters"][0]["monte_carlo_standard_error"] > 0.0
+    assert payload["parameters"][0]["split_rhat"] == diagnostics.parameters[0].split_rhat
 
 
 def test_sampler_diagnostics_validates_windows() -> None:
