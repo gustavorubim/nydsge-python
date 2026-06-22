@@ -13,6 +13,7 @@ using DataFrames
 using DSGE
 using HDF5
 using ModelConstructors
+using Random
 using Statistics
 
 function parse_args(args)
@@ -30,6 +31,20 @@ function parse_args(args)
         "include-posterior" => "false",
         "include-history" => "false",
         "include-financial-frictions" => "false",
+        "include-sampler" => "false",
+        "sampler-seed" => "",
+        "sampler-draws" => "5000",
+        "sampler-burnin" => "2",
+        "sampler-blocks" => "22",
+        "sampler-param-blocks" => "1",
+        "sampler-thin" => "5",
+        "sampler-adaptive-accept" => "false",
+        "sampler-target-accept" => "0.25",
+        "sampler-cc" => "0.09",
+        "sampler-alpha" => "1.0",
+        "sampler-c" => "0.5",
+        "sampler-cc0" => "0.01",
+        "sampler-calculate-hessian" => "true",
         "data-in" => "",
         "data-out" => "",
     )
@@ -58,6 +73,29 @@ function parse_bool(value::String)
         return false
     end
     error("Expected boolean value, got $(value)")
+end
+
+function parse_int(value::String)
+    return parse(Int, strip(value))
+end
+
+function parse_float(value::String)
+    return parse(Float64, strip(value))
+end
+
+function parse_optional_int(value::String)
+    text = strip(value)
+    if isempty(text)
+        return nothing
+    end
+    return parse(Int, text)
+end
+
+function write_sampler_dataset(file, name, value)
+    if haskey(file, name)
+        delete_object(file, name)
+    end
+    file[name] = Array(value)
 end
 
 function write_dataset(file, name, value)
@@ -710,6 +748,84 @@ function export_financial_frictions(file)
     write_dataset(file, "financial_frictions/values", values)
 end
 
+function export_sampler(
+    file,
+    model;
+    data_in::String = "",
+    draws::Int = 5000,
+    burnin::Int = 2,
+    blocks::Int = 22,
+    param_blocks::Int = 1,
+    thin::Int = 5,
+    adaptive_accept::Bool = false,
+    target_accept::Float64 = 0.25,
+    c::Float64 = 0.5,
+    cc::Float64 = 0.09,
+    cc0::Float64 = 0.01,
+    alpha::Float64 = 1.0,
+    calculate_hessian::Bool = true,
+    seed::Union{Int,Nothing} = nothing,
+)
+    history_data = load_or_read_history_data(model; data_in = data_in)
+    model <= Setting(:sampling_method, :MH)
+    model <= Setting(:calculate_hessian, calculate_hessian)
+    model <= Setting(:n_mh_simulations, draws, "Metropolis-Hastings draws")
+    model <= Setting(:n_mh_blocks, blocks, "Metropolis-Hastings block count")
+    model <= Setting(:n_mh_param_blocks, param_blocks, "Metropolis-Hastings parameter blocks")
+    model <= Setting(:n_mh_burn, burnin, "Metropolis-Hastings burn-in blocks")
+    model <= Setting(:mh_thin, thin, "Metropolis-Hastings thinning")
+    model <= Setting(:mh_adaptive_accept, adaptive_accept, "Adaptive MH proposal acceptance")
+    model <= Setting(:mh_target_accept, target_accept, "Target MH acceptance rate")
+    model <= Setting(:mh_cc, cc, "Metropolis-Hastings cc parameter")
+    model <= Setting(:mh_α, alpha, "Metropolis-Hastings alpha parameter")
+    model <= Setting(:mh_c, c, "Metropolis-Hastings c parameter")
+    model <= Setting(:mh_cc0, cc0, "Metropolis-Hastings cc0 parameter")
+    if seed !== nothing
+        model.rng = MersenneTwister(seed)
+    end
+
+    estimate(
+        model,
+        history_data;
+        old_data = Matrix{Float64}(undef, size(history_data, 1), 0),
+        sampling = true,
+        verbose = :none,
+    )
+
+    mhparams = h5open(rawpath(model, "estimate", "mhsave.h5"), "r") do handle
+        read(handle["mhparams"])
+    end
+    proposal_covariance = h5open(
+        workpath(model, "estimate", "parameter_covariance.h5"),
+        "r",
+    ) do handle
+        read(handle["mhcov"])
+    end
+
+    write_file_attribute(
+        file,
+        "sampler_parameter_names",
+        join(ordered_mapping_names(model.parameters), ","),
+    )
+    write_file_attribute(file, "sampler_sampling_method", "MH")
+    write_file_attribute(file, "sampler_draws", string(draws))
+    write_file_attribute(file, "sampler_burnin", string(burnin))
+    write_file_attribute(file, "sampler_blocks", string(blocks))
+    write_file_attribute(file, "sampler_param_blocks", string(param_blocks))
+    write_file_attribute(file, "sampler_thin", string(thin))
+    write_file_attribute(file, "sampler_adaptive_accept", string(adaptive_accept))
+    write_file_attribute(file, "sampler_target_accept", string(target_accept))
+    write_file_attribute(file, "sampler_cc", string(cc))
+    write_file_attribute(file, "sampler_alpha", string(alpha))
+    write_file_attribute(file, "sampler_c", string(c))
+    write_file_attribute(file, "sampler_cc0", string(cc0))
+    write_file_attribute(file, "sampler_calculate_hessian", string(calculate_hessian))
+    write_file_attribute(file, "sampler_seed", seed === nothing ? "" : string(seed))
+
+    write_sampler_dataset(file, "sampler/mhparams", mhparams)
+    write_sampler_dataset(file, "sampler/proposal_covariance", proposal_covariance)
+end
+
 function export_model1002(;
     out,
     subspec,
@@ -724,6 +840,20 @@ function export_model1002(;
     include_posterior,
     include_history,
     include_financial_frictions,
+    include_sampler,
+    sampler_seed,
+    sampler_draws,
+    sampler_burnin,
+    sampler_blocks,
+    sampler_param_blocks,
+    sampler_thin,
+    sampler_adaptive_accept,
+    sampler_target_accept,
+    sampler_cc,
+    sampler_alpha,
+    sampler_c,
+    sampler_cc0,
+    sampler_calculate_hessian,
     data_in,
     data_out,
 )
@@ -758,6 +888,26 @@ function export_model1002(;
         export_steady_state(file, model)
         if include_financial_frictions
             export_financial_frictions(file)
+        end
+        if include_sampler
+            export_sampler(
+                file,
+                model;
+                data_in = data_in,
+                draws = sampler_draws,
+                burnin = sampler_burnin,
+                blocks = sampler_blocks,
+                param_blocks = sampler_param_blocks,
+                thin = sampler_thin,
+                adaptive_accept = sampler_adaptive_accept,
+                target_accept = sampler_target_accept,
+                c = sampler_c,
+                cc = sampler_cc,
+                cc0 = sampler_cc0,
+                alpha = sampler_alpha,
+                calculate_hessian = sampler_calculate_hessian,
+                seed = sampler_seed,
+            )
         end
 
         write_dataset(file, "canonical/Gamma0", gamma0)
@@ -849,6 +999,20 @@ function export_model1002_main(args = ARGS)
         include_posterior = parse_bool(options["include-posterior"]),
         include_history = parse_bool(options["include-history"]),
         include_financial_frictions = parse_bool(options["include-financial-frictions"]),
+        include_sampler = parse_bool(options["include-sampler"]),
+        sampler_seed = parse_optional_int(options["sampler-seed"]),
+        sampler_draws = parse_int(options["sampler-draws"]),
+        sampler_burnin = parse_int(options["sampler-burnin"]),
+        sampler_blocks = parse_int(options["sampler-blocks"]),
+        sampler_param_blocks = parse_int(options["sampler-param-blocks"]),
+        sampler_thin = parse_int(options["sampler-thin"]),
+        sampler_adaptive_accept = parse_bool(options["sampler-adaptive-accept"]),
+        sampler_target_accept = parse_float(options["sampler-target-accept"]),
+        sampler_cc = parse_float(options["sampler-cc"]),
+        sampler_alpha = parse_float(options["sampler-alpha"]),
+        sampler_c = parse_float(options["sampler-c"]),
+        sampler_cc0 = parse_float(options["sampler-cc0"]),
+        sampler_calculate_hessian = parse_bool(options["sampler-calculate-hessian"]),
         data_in = options["data-in"],
         data_out = options["data-out"],
     )
