@@ -131,6 +131,7 @@ src/nydsge/
     m1002*.py                 Model1002 translation surfaces.
 
 tools/oracle_julia/
+  benchmark_model1002.jl      Migration-only Julia benchmark baseline writer.
   export_model1002.jl         Migration-only Julia fixture exporter.
   setup_env.jl                Julia oracle environment bootstrap.
 
@@ -167,9 +168,27 @@ Useful smoke checks:
 ```powershell
 uv run nydsge doctor
 uv run nydsge solve
-uv run nydsge bench --kernel all --horizon 40 --periods 40 --repeats 3
+uv run nydsge bench --kernel all --horizon 40 --periods 40 --batches 8 --draws 2 --repeats 3
+uv run nydsge bench --kernel all --horizon 40 --periods 40 --batches 8 --draws 2 --repeats 3 --output reports\benchmarks\local.json
+uv run nydsge bench --kernel all --baseline path\to\julia_benchmark.json --json
 uv run nydsge vv runtime-purity --json
 uv run nydsge vv backend-parity --kernel all --horizon 40 --periods 40
+```
+
+`nydsge bench` includes forecast, single Kalman, batched Kalman, and hard-target
+replay kernels. The batched kernel reports a three-dimensional state shape and
+the independent batch count for each native backend target; the hard-target
+kernel replays the Python matrix, posterior, mode forecast/history, full
+zero-shock forecast/history, and means/bands path.
+Use `--baseline` with externally generated oracle/Julia benchmark JSON to attach
+baseline elapsed times and speedup ratios without making Python call Julia.
+Use `--output` to persist a versioned benchmark reference report with command
+parameters, platform metadata, and result rows for cross-machine timing curation.
+Generate a Julia forecast baseline with:
+
+```powershell
+julia +1.8 --project=tools/oracle_julia tools/oracle_julia/benchmark_model1002.jl --out tests/fixtures/oracle/julia_benchmark_model1002.json --kernel forecast --horizon 40 --repeats 3
+uv run nydsge bench --kernel forecast --horizon 40 --repeats 3 --baseline tests/fixtures/oracle/julia_benchmark_model1002.json --json
 ```
 
 ## Common CLI Flows
@@ -180,16 +199,27 @@ uv run nydsge vv backend-parity --kernel all --horizon 40 --periods 40
 uv run nydsge data build --input path\to\raw_levels.csv --output path\to\observables.csv
 uv run nydsge data build --input path\to\raw_levels.csv --output path\to\observables.csv --population-forecast path\to\population_forecast.csv
 uv run nydsge data build --input path\to\raw_levels.csv --output path\to\observables.csv --no-hpfilter-population
+uv run nydsge data sources --source-root path\to\raw --vintage 181115 --json
+uv run nydsge data prepare-sources --source-root path\to\raw --vintage 181115 --realtime-start 181115 --realtime-end 181115 --start-date 1959-Q3 --end-date 2018-Q3 --json
 uv run nydsge data fetch-fred --output path\to\raw\fred_current.csv --start-date 1959-Q3 --end-date 2018-Q3
 uv run nydsge data fetch-fred-api --output path\to\raw\fred_181115.csv --realtime-start 181115 --realtime-end 181115 --start-date 1959-Q3 --end-date 2018-Q3
 uv run nydsge data build-sources --source-root path\to\raw --output path\to\observables.csv --start-date 1959-Q3 --end-date 2018-Q3
 ```
 
+`data sources` lists the source namespaces, required mnemonics, optional
+mnemonics, candidate local file paths, and whether a source file is currently
+available under `--source-root`.
+`data prepare-sources` creates the source root if needed, fetches the canonical
+FRED vintage file, and reports the remaining local source files required before
+`data build-sources` can run.
 `data fetch-fred-api` resolves the FRED API key from `--api-key`, then the
 `FRED_API_KEY` environment variable, then a local `.env` file.
 For Model1002 vintage requests, FRED series known to be optional and unavailable
 in ALFRED are written as all-missing source columns so the rest of the source
-bundle can still be built and compared.
+bundle can still be built and compared. FRED JSON error payloads are surfaced as
+data-fetch failures for required series. Required source series must have at
+least one numeric observation in every requested quarter; all-missing required
+quarters fail during source preparation.
 
 ### Estimation
 
@@ -199,7 +229,12 @@ uv run nydsge estimate --data path\to\observables.csv --backend numpy --device c
 uv run nydsge estimate --data path\to\observables.csv --optimize --parameters alpha,rho --maxiter 25 --hessian --mode-output outputs\mode.npz
 uv run nydsge estimate --data path\to\observables.csv --mode-input outputs\mode.npz --mh-draws 1000 --mh-burnin 100 --sampler-output outputs\sampler.npz
 uv run nydsge estimate --data path\to\observables.csv --parameters alpha,rho --mh-draws 1000 --mh-burnin 100 --proposal-scale 0.1 --seed 123
+uv run nydsge vv sampler-diagnostics --sampler outputs\sampler.npz --windows 4 --json
 ```
+
+`vv sampler-diagnostics` reports retained draws, acceptance windows, proposal
+covariance eigen/condition checks, log-posterior range, and per-parameter
+effective sample size for sampler parity work.
 
 ### Forecasts
 
@@ -245,9 +280,14 @@ Generate the Python candidate bundle:
 ```powershell
 uv run nydsge vv export-suite --output-dir tests/fixtures/candidate --data path\to\observables.csv --full-draws 1000 --seed 123 --horizon 40 --json
 uv run nydsge vv export-suite --output-dir tests/fixtures/candidate --shock-samples path\to\shock_samples.npz --horizon 40 --json
+uv run nydsge vv raw-data-smoke --source-root path\to\raw --output-dir tests\fixtures\raw_data_smoke --start-date 1959-Q3 --end-date 2018-Q3 --horizon 40 --json
 uv run nydsge vv oracle-coverage --oracle-dir tests/fixtures/oracle --profile hard-target --json
 uv run nydsge vv compare --oracle-dir tests/fixtures/oracle --candidate-dir tests/fixtures/candidate --profile hard-target --tolerance-profile strict --json
 ```
+
+`vv raw-data-smoke` accepts the same population preprocessing controls as the
+source data builder, including `--population-forecast`,
+`--no-hpfilter-population`, and `--population-hpfilter-lambda`.
 
 Focused profiles are available when debugging one surface at a time:
 
@@ -280,6 +320,7 @@ The Julia tooling lives under `tools/oracle_julia/` and is migration-only:
 juliaup add 1.8
 julia +1.8 tools/oracle_julia/setup_env.jl
 julia +1.8 --project=tools/oracle_julia tools/oracle_julia/export_model1002.jl --out tests/fixtures/oracle/m1002_ss10.h5
+julia +1.8 --project=tools/oracle_julia tools/oracle_julia/benchmark_model1002.jl --out tests/fixtures/oracle/julia_benchmark_model1002.json --kernel forecast --horizon 40 --repeats 3
 ```
 
 Example hard-target replay:
