@@ -36,6 +36,22 @@ uv run nydsge vv compare --oracle-dir tests/fixtures/oracle --candidate-dir test
 uv run nydsge vv compare --oracle-dir tests/fixtures/oracle --candidate-dir tests/fixtures/candidate --tolerance-profile strict --json
 ```
 
+## Model1002 Benchmark Baselines
+
+`benchmark_model1002.jl` writes a Julia oracle JSON report that can be attached
+to Python benchmark output with `nydsge bench --baseline`. It is still
+migration-only: Python never calls this script at runtime.
+
+```powershell
+julia +1.8 --project=tools/oracle_julia tools/oracle_julia/benchmark_model1002.jl --out tests/fixtures/oracle/julia_benchmark_model1002.json --kernel forecast --horizon 40 --repeats 3
+uv run nydsge bench --kernel forecast --horizon 40 --repeats 3 --baseline tests/fixtures/oracle/julia_benchmark_model1002.json --json
+```
+
+The current baseline producer times Julia's native deterministic forecast call
+after one untimed warmup. The JSON report includes Julia version metadata,
+elapsed samples, and a `results` array with `kernel`, `horizon`, `dtype`, and
+`elapsed_seconds`, matching the Python baseline loader contract.
+
 Pass `--include-financial-frictions true` to export the upstream BGG helper
 formula surface used by the Model1002 steady-state calculation:
 

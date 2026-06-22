@@ -833,21 +833,34 @@ function export_model1002(;
     println("Exported Model1002 oracle fixture to $(out)")
 end
 
-options = parse_args(ARGS)
-export_model1002(
-    out = options["out"],
-    subspec = options["subspec"],
-    data_vintage = options["data-vintage"],
-    forecast_start = options["forecast-start"],
-    horizon = parse(Int, options["horizon"]),
-    include_forecast = parse_bool(options["include-forecast"]),
-    include_full_forecast = parse_bool(options["include-full-forecast"]),
-    full_draws = parse(Int, options["full-draws"]),
-    shock_samples_in = options["shock-samples-in"],
-    include_kalman = parse_bool(options["include-kalman"]),
-    include_posterior = parse_bool(options["include-posterior"]),
-    include_history = parse_bool(options["include-history"]),
-    include_financial_frictions = parse_bool(options["include-financial-frictions"]),
-    data_in = options["data-in"],
-    data_out = options["data-out"],
-)
+function export_model1002_main(args = ARGS)
+    options = parse_args(args)
+    export_model1002(
+        out = options["out"],
+        subspec = options["subspec"],
+        data_vintage = options["data-vintage"],
+        forecast_start = options["forecast-start"],
+        horizon = parse(Int, options["horizon"]),
+        include_forecast = parse_bool(options["include-forecast"]),
+        include_full_forecast = parse_bool(options["include-full-forecast"]),
+        full_draws = parse(Int, options["full-draws"]),
+        shock_samples_in = options["shock-samples-in"],
+        include_kalman = parse_bool(options["include-kalman"]),
+        include_posterior = parse_bool(options["include-posterior"]),
+        include_history = parse_bool(options["include-history"]),
+        include_financial_frictions = parse_bool(options["include-financial-frictions"]),
+        data_in = options["data-in"],
+        data_out = options["data-out"],
+    )
+end
+
+function is_main_script()
+    if isempty(PROGRAM_FILE)
+        return false
+    end
+    return lowercase(normpath(abspath(PROGRAM_FILE))) == lowercase(normpath(abspath(@__FILE__)))
+end
+
+if is_main_script()
+    export_model1002_main()
+end
