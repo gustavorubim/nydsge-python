@@ -383,10 +383,191 @@ def test_load_fred_api_series_uses_realtime_and_observation_parameters() -> None
     assert "api_key=secret" in captured_url
     assert "realtime_start=2018-11-15" in captured_url
     assert "realtime_end=2018-11-15" in captured_url
+    assert "output_type=1" in captured_url
     assert "observation_start=2016-07-01" in captured_url
     assert "observation_end=2016-12-31" in captured_url
     assert list(series["date"]) == ["2016-Q3", "2016-Q4"]
     assert np.isclose(series.loc[0, "GDP"], 2.0)
+
+
+def test_load_fred_api_series_uses_latest_revision_in_realtime_range() -> None:
+    captured_url = ""
+
+    def fetcher(url: str) -> bytes:
+        nonlocal captured_url
+        captured_url = url
+        return (
+            b'{"observations": ['
+            b'{"realtime_start": "2018-01-01", "realtime_end": "2018-01-31",'
+            b'"date": "2016-07-01", "value": "1.0"},'
+            b'{"realtime_start": "2018-02-01", "realtime_end": "2018-02-28",'
+            b'"date": "2016-07-01", "value": "3.0"},'
+            b'{"realtime_start": "2018-02-01", "realtime_end": "2018-02-28",'
+            b'"date": "2016-10-01", "value": "5.0"}'
+            b"]}"
+        )
+
+    series = load_fred_api_series(
+        "GDP",
+        api_key="secret",
+        realtime_start="2018-01-01",
+        realtime_end="2018-02-28",
+        observation_start="2016-Q3",
+        observation_end="2016-Q4",
+        fetcher=fetcher,
+    )
+
+    assert "output_type=1" in captured_url
+    assert list(series["date"]) == ["2016-Q3", "2016-Q4"]
+    assert series["GDP"].tolist() == [3.0, 5.0]
+
+
+def test_load_fred_api_series_uses_vintage_dates_mode() -> None:
+    captured_url = ""
+
+    def fetcher(url: str) -> bytes:
+        nonlocal captured_url
+        captured_url = url
+        return (
+            b'{"observations": ['
+            b'{"date": "2016-07-01", "GDP_20181115": "1.0", "GDP_20181116": "3.0"},'
+            b'{"date": "2016-10-01", "GDP_20181115": "4.0", "GDP_20181116": "5.0"}'
+            b"]}"
+        )
+
+    series = load_fred_api_series(
+        "GDP",
+        api_key="secret",
+        vintage_dates="181115,181116",
+        observation_start="2016-Q3",
+        observation_end="2016-Q4",
+        fetcher=fetcher,
+    )
+
+    assert "vintage_dates=2018-11-15%2C2018-11-16" in captured_url
+    assert "output_type=2" in captured_url
+    assert "realtime_start=" not in captured_url
+    assert series["GDP"].tolist() == [3.0, 5.0]
+
+
+def test_load_fred_api_series_output_type3_uses_rowwise_latest_vintage_values() -> None:
+    captured_url = ""
+
+    def fetcher(url: str) -> bytes:
+        nonlocal captured_url
+        captured_url = url
+        return (
+            b'{"observations": ['
+            b'{"date": "2016-07-01", "GDP_20190101": "1.0", "GDP_20190301": "2.0"},'
+            b'{"date": "2016-10-01", "GDP_20190101": "3.0"}'
+            b"]}"
+        )
+
+    series = load_fred_api_series(
+        "GDP",
+        api_key="secret",
+        output_type=3,
+        vintage_dates="20190101,20190301",
+        observation_start="2016-Q3",
+        observation_end="2016-Q4",
+        fetcher=fetcher,
+    )
+
+    assert "output_type=3" in captured_url
+    assert "vintage_dates=2019-01-01%2C2019-03-01" in captured_url
+    assert series["GDP"].tolist() == [2.0, 3.0]
+
+
+def test_load_fred_api_series_output_type2_parses_underscore_prefixed_vintage_keys() -> None:
+    captured_url = ""
+
+    def fetcher(url: str) -> bytes:
+        nonlocal captured_url
+        captured_url = url
+        return (
+            b'{"observations": ['
+            b'{"date": "2016-07-01", "_1234_20190101": "1.0"},'
+            b'{"date": "2016-10-01", "_1234_20190101": "2.0"}'
+            b"]}"
+        )
+
+    series = load_fred_api_series(
+        "1234",
+        api_key="secret",
+        output_type=2,
+        vintage_dates="20190101",
+        observation_start="2016-Q3",
+        observation_end="2016-Q4",
+        fetcher=fetcher,
+    )
+
+    assert "output_type=2" in captured_url
+    assert series["1234"].tolist() == [1.0, 2.0]
+
+
+def test_load_fred_api_series_output_type4_uses_scalar_output_type() -> None:
+    captured_url = ""
+
+    def fetcher(url: str) -> bytes:
+        nonlocal captured_url
+        captured_url = url
+        return (
+            b'{"observations": ['
+            b'{"realtime_start": "2018-01-01", "realtime_end": "2018-01-31",'
+            b'"date": "2016-07-01", "value": "1.0"},'
+            b'{"realtime_start": "2018-01-01", "realtime_end": "2018-01-31",'
+            b'"date": "2016-10-01", "value": "2.0"}'
+            b"]}"
+        )
+
+    series = load_fred_api_series(
+        "GDP",
+        api_key="secret",
+        output_type=4,
+        realtime_start="20180101",
+        realtime_end="20181231",
+        observation_start="2016-Q3",
+        observation_end="2016-Q4",
+        fetcher=fetcher,
+    )
+
+    assert "output_type=4" in captured_url
+    assert list(series["date"]) == ["2016-Q3", "2016-Q4"]
+    assert series["GDP"].tolist() == [1.0, 2.0]
+
+
+def test_load_fred_api_series_rejects_mixed_vintage_and_realtime_modes() -> None:
+    with pytest.raises(ValueError, match="vintage_dates"):
+        load_fred_api_series(
+            "GDP",
+            api_key="secret",
+            realtime_start="181115",
+            vintage_dates="181116",
+        )
+
+
+def test_load_fred_api_series_rejects_invalid_output_type() -> None:
+    with pytest.raises(ValueError, match="output_type"):
+        load_fred_api_series("GDP", api_key="secret", output_type=9)
+
+
+def test_load_fred_api_series_rejects_duplicate_dates_without_realtime_metadata() -> None:
+    def fetcher(url: str) -> bytes:
+        return (
+            b'{"observations": ['
+            b'{"date": "2016-07-01", "value": "1.0"},'
+            b'{"date": "2016-07-01", "value": "3.0"}'
+            b"]}"
+        )
+
+    with pytest.raises(ValueError, match="duplicate observation dates"):
+        load_fred_api_series(
+            "GDP",
+            api_key="secret",
+            realtime_start="2018-01-01",
+            realtime_end="2018-02-28",
+            fetcher=fetcher,
+        )
 
 
 def test_download_fred_api_source_csv_uses_env_api_key(tmp_path, monkeypatch) -> None:
@@ -497,6 +678,68 @@ def test_load_fred_api_source_fills_optional_alfred_missing_json_error(
         realtime_end="181115",
         start_date="2016-Q3",
         end_date="2016-Q4",
+        fetcher=fetcher,
+    )
+
+    assert list(levels["date"]) == ["2016-Q3", "2016-Q4"]
+    assert levels["GDP"].tolist() == [1.0, 2.0]
+    assert levels["BAMLC8A0C15PYEY"].isna().all()
+
+
+def test_load_fred_api_source_fills_optional_alfred_empty_payload(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("FRED_API_KEY", "from-env")
+
+    def fetcher(url: str) -> bytes:
+        if "series_id=BAMLC8A0C15PYEY" in url:
+            return b'{"observations": []}'
+        return (
+            b'{"observations": ['
+            b'{"date": "2016-07-01", "value": "1.0"},'
+            b'{"date": "2016-10-01", "value": "2.0"}'
+            b"]}"
+        )
+
+    levels = load_fred_api_source(
+        ["GDP", "BAMLC8A0C15PYEY"],
+        start_date="2016-Q3",
+        end_date="2016-Q4",
+        fetcher=fetcher,
+    )
+
+    assert list(levels["date"]) == ["2016-Q3", "2016-Q4"]
+    assert levels["GDP"].tolist() == [1.0, 2.0]
+    assert levels["BAMLC8A0C15PYEY"].isna().all()
+
+
+def test_load_fred_api_source_fills_optional_alfred_missing_without_required_dates(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("FRED_API_KEY", "from-env")
+
+    def fetcher(url: str) -> bytes:
+        if "series_id=BAMLC8A0C15PYEY" in url:
+            raise HTTPError(
+                url=url,
+                code=400,
+                msg="Bad Request",
+                hdrs=Message(),
+                fp=io.BytesIO(
+                    b'{"error_message":"Bad Request. The series does not exist in ALFRED."}'
+                ),
+            )
+        return (
+            b'{"observations": '
+            b'[{"date": "2016-07-01", "value": "1.0"},'
+            b'{"date": "2016-10-01", "value": "2.0"}]'
+            b"}"
+        )
+
+    levels = load_fred_api_source(
+        ["GDP", "BAMLC8A0C15PYEY"],
+        realtime_start="181115",
+        realtime_end="181115",
         fetcher=fetcher,
     )
 

@@ -82,6 +82,7 @@ def test_required_fixture_arrays_profiles() -> None:
     forecast_full = required_fixture_arrays("forecast-full")
     forecast_full_history = required_fixture_arrays("forecast-full-history")
     hard_target = required_fixture_arrays("hard-target")
+    sampler = required_fixture_arrays("sampler")
 
     assert parameters == (
         "parameters/values",
@@ -138,6 +139,8 @@ def test_required_fixture_arrays_profiles() -> None:
     assert "forecast_full/history_observables" in hard_target
     assert "forecast_full/observable_samples" in hard_target
     assert "forecast_full/history_observable_samples" in hard_target
+    assert sampler == ("sampler/mhparams", "sampler/proposal_covariance")
+    assert set(sampler).issubset(set(hard_target)) is False
 
     with pytest.raises(ValueError, match="Unknown fixture coverage profile"):
         required_fixture_arrays("small")
@@ -275,6 +278,28 @@ def test_load_fixture_labels_reads_julia_hdf5_metadata(tmp_path) -> None:
     assert labels["transition/eu"] == {0: ("existence", "uniqueness")}
 
 
+def test_load_fixture_labels_reads_sampler_dimensions_from_julia_hdf5_attributes(tmp_path) -> None:
+    h5py = pytest.importorskip("h5py")
+    oracle = tmp_path / "oracle"
+    oracle.mkdir()
+    path = oracle / "m1002_ss10.h5"
+    with h5py.File(path, "w") as handle:
+        handle["sampler/mhparams"] = np.zeros((2, 3))
+        handle["sampler/proposal_covariance"] = np.eye(3)
+        handle.attrs["sampler_parameter_names"] = "alpha,beta,gamma"
+
+    labels = load_fixture_labels(oracle)
+
+    assert labels["sampler/mhparams"] == {
+        0: ("draw_0", "draw_1"),
+        1: ("alpha", "beta", "gamma"),
+    }
+    assert labels["sampler/proposal_covariance"] == {
+        0: ("alpha", "beta", "gamma"),
+        1: ("alpha", "beta", "gamma"),
+    }
+
+
 def test_check_fixture_coverage_reports_missing_required_arrays(tmp_path) -> None:
     oracle = tmp_path / "oracle"
     oracle.mkdir()
@@ -293,6 +318,17 @@ def test_check_fixture_coverage_passes_complete_matrix_profile(tmp_path) -> None
     _write_required_arrays(oracle, required_fixture_arrays("matrix"))
 
     report = check_fixture_coverage(oracle, profile="matrix")
+
+    assert report.passed
+    assert report.missing == ()
+
+
+def test_check_fixture_coverage_passes_complete_sampler_profile(tmp_path) -> None:
+    oracle = tmp_path / "oracle"
+    oracle.mkdir()
+    _write_required_arrays(oracle, required_fixture_arrays("sampler"))
+
+    report = check_fixture_coverage(oracle, profile="sampler")
 
     assert report.passed
     assert report.missing == ()
@@ -1235,6 +1271,21 @@ def test_julia_oracle_export_script_writes_financial_frictions_fixture() -> None
     assert '"include-financial-frictions" => "false"' in script
     assert '"financial_frictions/inputs"' in script
     assert '"financial_frictions/values"' in script
+
+
+def test_julia_oracle_export_script_includes_sampler_flags() -> None:
+    script = Path("tools/oracle_julia/export_model1002.jl").read_text(encoding="utf-8")
+
+    assert '"include-sampler" => "false"' in script
+    assert '"sampler-seed"' in script
+    assert '"sampler-draws"' in script
+    assert '"sampler-blocks"' in script
+    assert '"sampler-param-blocks"' in script
+    assert '"sampler-thin"' in script
+    assert '"sampler-adaptive-accept"' in script
+    assert '"sampler-target-accept"' in script
+    assert '"sampler-cc"' in script
+    assert '"sampler-alpha"' in script
 
 
 def test_vv_export_matrices_cli_records_oracle_matching_settings(tmp_path) -> None:

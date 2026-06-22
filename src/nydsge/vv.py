@@ -237,6 +237,11 @@ HARD_TARGET_FIXTURE_REQUIREMENTS: tuple[str, ...] = (
     "meansbands_full_histobs/upper",
 )
 
+SAMPLER_FIXTURE_REQUIREMENTS: tuple[str, ...] = (
+    "sampler/mhparams",
+    "sampler/proposal_covariance",
+)
+
 FIXTURE_REQUIREMENT_PROFILES: dict[str, tuple[str, ...]] = {
     "parameters": PARAMETER_FIXTURE_REQUIREMENTS,
     "steady-state": STEADY_STATE_FIXTURE_REQUIREMENTS,
@@ -250,6 +255,7 @@ FIXTURE_REQUIREMENT_PROFILES: dict[str, tuple[str, ...]] = {
     "forecast-full": FORECAST_FULL_FIXTURE_REQUIREMENTS,
     "forecast-full-history": FORECAST_FULL_HISTORY_FIXTURE_REQUIREMENTS,
     "hard-target": HARD_TARGET_FIXTURE_REQUIREMENTS,
+    "sampler": SAMPLER_FIXTURE_REQUIREMENTS,
 }
 
 
@@ -1325,6 +1331,30 @@ def _load_hdf5_labels(path: Path) -> FixtureLabels:
                 "posterior/log_prior_by_parameter",
                 (len(parameter_names),),
                 {0: parameter_names},
+            )
+        sampler_parameter_names = _parse_hdf5_name_attr(handle.attrs.get("sampler_parameter_names"))
+        if not sampler_parameter_names:
+            sampler_parameter_names = parameter_names
+        if sampler_parameter_names:
+            mhparams_shape = _hdf5_dataset_shape(
+                handle,
+                "sampler/mhparams",
+                h5py.Dataset,
+            )
+            if mhparams_shape is not None and len(mhparams_shape) == 2:
+                if mhparams_shape[1] == len(sampler_parameter_names):
+                    draw_labels = tuple(f"draw_{index}" for index in range(mhparams_shape[0]))
+                    labels["sampler/mhparams"] = {
+                        0: draw_labels,
+                        1: sampler_parameter_names,
+                    }
+            _add_hdf5_dataset_labels(
+                labels,
+                handle,
+                h5py.Dataset,
+                "sampler/proposal_covariance",
+                (len(sampler_parameter_names), len(sampler_parameter_names)),
+                {0: sampler_parameter_names, 1: sampler_parameter_names},
             )
         for name in (
             "posterior/log_posterior",

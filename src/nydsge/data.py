@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,6 +13,7 @@ from urllib.request import urlopen
 
 import numpy as np
 import pandas as pd
+from pandas._libs.tslibs.nattype import NaTType
 
 from nydsge.core import DSGEModel, Observable
 
@@ -232,6 +233,8 @@ def download_fred_api_source_csv(
     api_key: str | None = None,
     realtime_start: str | None = None,
     realtime_end: str | None = None,
+    vintage_dates: str | Sequence[str] | None = None,
+    output_type: int | None = None,
     start_date: Any | None = None,
     end_date: Any | None = None,
     aggregation: str = "mean",
@@ -243,6 +246,8 @@ def download_fred_api_source_csv(
         api_key=api_key,
         realtime_start=realtime_start,
         realtime_end=realtime_end,
+        vintage_dates=vintage_dates,
+        output_type=output_type,
         start_date=start_date,
         end_date=end_date,
         aggregation=aggregation,
@@ -260,6 +265,8 @@ def load_fred_api_source(
     api_key: str | None = None,
     realtime_start: str | None = None,
     realtime_end: str | None = None,
+    vintage_dates: str | Sequence[str] | None = None,
+    output_type: int | None = None,
     start_date: Any | None = None,
     end_date: Any | None = None,
     aggregation: str = "mean",
@@ -275,15 +282,41 @@ def load_fred_api_source(
                 api_key=resolved_api_key,
                 realtime_start=realtime_start,
                 realtime_end=realtime_end,
+                vintage_dates=vintage_dates,
+                output_type=output_type,
                 observation_start=start_date,
                 observation_end=end_date,
                 aggregation=aggregation,
                 fetcher=fetcher,
             )
-        except (HTTPError, FredApiError) as err:
-            if required_dates is None or not _is_optional_alfred_missing(mnemonic, err):
+        except ValueError as err:
+            if mnemonic not in OPTIONAL_SOURCE_MNEMONICS:
                 raise
-            series = _missing_source_series(mnemonic, required_dates)
+            if merged is None:
+                if required_dates is None:
+                    msg = (
+                        f"Optional FRED source {mnemonic!r} is missing, and no date grid "
+                        "is available to infer missing values."
+                    )
+                    raise ValueError(msg) from err
+                series = _missing_source_series(mnemonic, required_dates)
+            else:
+                available_dates = _quarter_index(merged["date"])
+                series = _missing_source_series(mnemonic, available_dates)
+        except (HTTPError, FredApiError) as err:
+            if not _is_optional_alfred_missing(mnemonic, err):
+                raise
+            if merged is None:
+                if required_dates is None:
+                    msg = (
+                        f"Optional FRED source {mnemonic!r} is missing, and no date grid "
+                        "is available to infer missing values."
+                    )
+                    raise ValueError(msg) from err
+                series = _missing_source_series(mnemonic, required_dates)
+            else:
+                available_dates = _quarter_index(merged["date"])
+                series = _missing_source_series(mnemonic, available_dates)
         if required_dates is not None:
             _validate_source_date_coverage(f"FRED:{mnemonic}", series["date"], required_dates)
             if mnemonic not in OPTIONAL_SOURCE_MNEMONICS:
@@ -310,6 +343,8 @@ def load_fred_api_series(
     api_key: str,
     realtime_start: str | None = None,
     realtime_end: str | None = None,
+    vintage_dates: str | Sequence[str] | None = None,
+    output_type: int | None = None,
     observation_start: Any | None = None,
     observation_end: Any | None = None,
     aggregation: str = "mean",
@@ -320,6 +355,8 @@ def load_fred_api_series(
         api_key=api_key,
         realtime_start=realtime_start,
         realtime_end=realtime_end,
+        vintage_dates=vintage_dates,
+        output_type=output_type,
         observation_start=observation_start,
         observation_end=observation_end,
     )
@@ -334,21 +371,11 @@ def load_fred_api_series(
     if not isinstance(observations, list):
         msg = f"FRED API response for {mnemonic} did not include observations."
         raise ValueError(msg)
-    values = pd.DataFrame(
-        {
-            "date": pd.to_datetime(
-                [item.get("date") for item in observations],
-                errors="coerce",
-            ),
-            mnemonic: pd.to_numeric(
-                [item.get("value") for item in observations],
-                errors="coerce",
-            ),
-        }
-    ).dropna(subset=["date"])
+    values = _fred_observations_frame(observations, mnemonic)
     if values.empty:
         msg = f"FRED API response for {mnemonic} did not include usable dated observations."
         raise ValueError(msg)
+    values = _select_latest_realtime_observations(values, mnemonic)
     values["date"] = [quarter_label(value) for value in values["date"]]
     return _aggregate_quarterly_series(values, mnemonic, aggregation=aggregation)
 
@@ -780,9 +807,19 @@ def _fred_observations_url(
     api_key: str,
     realtime_start: str | None,
     realtime_end: str | None,
+    vintage_dates: str | Sequence[str] | None,
+    output_type: int | None,
     observation_start: Any | None,
     observation_end: Any | None,
 ) -> str:
+    if vintage_dates is not None and (realtime_start is not None or realtime_end is not None):
+        msg = "FRED vintage_dates cannot be combined with realtime_start or realtime_end."
+        raise ValueError(msg)
+    resolved_output_type = _fred_output_type(
+        output_type,
+        uses_realtime=realtime_start is not None or realtime_end is not None,
+        uses_vintage_dates=vintage_dates is not None,
+    )
     params = {
         "series_id": mnemonic,
         "api_key": api_key,
@@ -793,6 +830,10 @@ def _fred_observations_url(
         params["realtime_start"] = _fred_realtime_date(realtime_start)
     if realtime_end is not None:
         params["realtime_end"] = _fred_realtime_date(realtime_end)
+    if vintage_dates is not None:
+        params["vintage_dates"] = _fred_vintage_dates(vintage_dates)
+    if resolved_output_type is not None:
+        params["output_type"] = str(resolved_output_type)
     if observation_start is not None:
         params["observation_start"] = _quarter_boundary_date(observation_start, start=True)
     if observation_end is not None:
@@ -911,6 +952,33 @@ def _fred_realtime_date(value: str) -> str:
     return str(pd.Timestamp(text).date())
 
 
+def _fred_vintage_dates(value: str | Sequence[str]) -> str:
+    values = value.split(",") if isinstance(value, str) else list(value)
+    dates = [_fred_realtime_date(str(item).strip()) for item in values if str(item).strip()]
+    if not dates:
+        msg = "FRED vintage_dates cannot be empty."
+        raise ValueError(msg)
+    return ",".join(dates)
+
+
+def _fred_output_type(
+    value: int | None,
+    *,
+    uses_realtime: bool,
+    uses_vintage_dates: bool,
+) -> int | None:
+    if value is None:
+        if uses_vintage_dates:
+            return 2
+        if uses_realtime:
+            return 1
+        return None
+    if value not in {1, 2, 3, 4}:
+        msg = "FRED output_type must be 1, 2, 3, or 4."
+        raise ValueError(msg)
+    return value
+
+
 def _quarter_boundary_date(value: Any, *, start: bool) -> str:
     if hasattr(value, "year") and hasattr(value, "month"):
         timestamp = pd.Timestamp(value)
@@ -933,6 +1001,159 @@ def _quarter_boundary_date(value: Any, *, start: bool) -> str:
 def _default_fetcher(url: str) -> bytes:
     with urlopen(url, timeout=30.0) as response:
         return response.read()
+
+
+def _select_latest_realtime_observations(values: pd.DataFrame, mnemonic: str) -> pd.DataFrame:
+    duplicated_dates = values["date"].duplicated(keep=False)
+    if not bool(duplicated_dates.any()):
+        return values[["date", mnemonic]].reset_index(drop=True)
+
+    duplicate_rows = values.loc[duplicated_dates]
+    if duplicate_rows[["realtime_start", "realtime_end"]].isna().any(axis=None):
+        labels = ", ".join(
+            sorted({str(pd.Timestamp(value).date()) for value in duplicate_rows["date"]})
+        )
+        msg = (
+            f"FRED API response for {mnemonic} has duplicate observation dates without "
+            f"realtime metadata: {labels}"
+        )
+        raise ValueError(msg)
+
+    selected = (
+        values.sort_values(
+            ["date", "realtime_start", "realtime_end"],
+            kind="mergesort",
+        )
+        .drop_duplicates(subset=["date"], keep="last")
+        .sort_values("date", kind="mergesort")
+    )
+    return selected[["date", mnemonic]].reset_index(drop=True)
+
+
+def _fred_observations_frame(
+    observations: list[Any],
+    mnemonic: str,
+) -> pd.DataFrame:
+    if _has_scalar_fred_values(observations):
+        return pd.DataFrame(
+            {
+                "date": pd.to_datetime(
+                    [item.get("date") for item in observations],
+                    errors="coerce",
+                ),
+                mnemonic: pd.to_numeric(
+                    [item.get("value") for item in observations],
+                    errors="coerce",
+                ),
+                "realtime_start": pd.to_datetime(
+                    [item.get("realtime_start") for item in observations],
+                    errors="coerce",
+                ),
+                "realtime_end": pd.to_datetime(
+                    [item.get("realtime_end") for item in observations],
+                    errors="coerce",
+                ),
+            }
+        ).dropna(subset=["date"])
+
+    if not _fred_vintage_value_keys(observations, mnemonic):
+        msg = f"FRED API response for {mnemonic} did not include value columns."
+        raise ValueError(msg)
+
+    rows = []
+    for item in observations:
+        if not isinstance(item, dict):
+            continue
+        date = pd.to_datetime(item.get("date"), errors="coerce")
+        latest_key = _latest_fred_vintage_value_key(item, mnemonic)
+        rows.append(
+            {
+                "date": date,
+                mnemonic: _to_numeric_fred_vintage_value(item, latest_key),
+                "realtime_start": _to_realtime_from_fred_vintage_key(latest_key, mnemonic),
+                "realtime_end": _to_realtime_from_fred_vintage_key(latest_key, mnemonic),
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(columns=["date", mnemonic, "realtime_start", "realtime_end"])
+
+    return pd.DataFrame(
+        rows,
+        columns=["date", mnemonic, "realtime_start", "realtime_end"],
+    ).dropna(subset=["date"])
+
+
+def _has_scalar_fred_values(observations: list[Any]) -> bool:
+    return any(isinstance(item, dict) and "value" in item for item in observations)
+
+
+def _fred_vintage_value_keys(observations: list[Any], mnemonic: str) -> list[str]:
+    keys = set()
+    for item in observations:
+        if not isinstance(item, dict):
+            continue
+        keys.update(_fred_vintage_value_keys_for_observation(item, mnemonic))
+    return sorted(keys, key=lambda key: _vintage_key_suffix(key, mnemonic))
+
+
+def _latest_fred_vintage_value_key(item: dict[str, Any], mnemonic: str) -> str | None:
+    vintage_keys = _fred_vintage_value_keys_for_observation(item, mnemonic)
+    if not vintage_keys:
+        return None
+    return max(vintage_keys, key=lambda key: _vintage_key_suffix(key, mnemonic))
+
+
+def _is_date_suffix(value: str) -> bool:
+    return len(value) == 8 and value.isdigit()
+
+
+def _vintage_key_suffix(key: str, mnemonic: str) -> str:
+    if key.startswith(f"{mnemonic}_"):
+        return key.removeprefix(f"{mnemonic}_")
+    if key.startswith(f"_{mnemonic}_"):
+        return key.removeprefix(f"_{mnemonic}_")
+    msg = f"FRED vintage value key {key} does not match series prefix for {mnemonic}."
+    raise ValueError(msg)
+
+
+def _to_realtime_from_fred_vintage_key(
+    key: str | None,
+    mnemonic: str,
+) -> pd.Timestamp | NaTType:
+    if key is None:
+        return pd.NaT
+    suffix = _vintage_key_suffix(key, mnemonic)
+    return pd.Timestamp(_date_suffix_to_date(suffix))
+
+
+def _to_numeric_fred_vintage_value(item: dict[str, Any], key: str | None) -> float:
+    if key is None:
+        return np.nan
+    return pd.to_numeric(item.get(key), errors="coerce")
+
+
+def _fred_vintage_value_keys_for_observation(
+    item: dict[str, Any],
+    mnemonic: str,
+) -> list[str]:
+    standard_prefix = f"{mnemonic}_"
+    xml_prefix = f"_{mnemonic}_"
+    return [
+        key
+        for key in item
+        if (key.startswith(standard_prefix) and _is_date_suffix(key.removeprefix(standard_prefix)))
+        or (
+            key.startswith(xml_prefix)
+            and _is_date_suffix(key.removeprefix(xml_prefix))
+            and key.removeprefix(xml_prefix) != ""
+        )
+    ]
+
+
+def _date_suffix_to_date(value: str) -> str:
+    suffix = value.rsplit("_", 1)[-1]
+    return f"{suffix[:4]}-{suffix[4:6]}-{suffix[6:8]}"
 
 
 def _aggregate_quarterly_series(
