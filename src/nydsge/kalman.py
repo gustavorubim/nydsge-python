@@ -397,10 +397,28 @@ def _smoother_gain(
     predicted_covariance_next: np.ndarray,
 ) -> np.ndarray:
     cross_covariance = filtered_covariance @ transition.T
-    try:
-        return np.linalg.solve(predicted_covariance_next.T, cross_covariance.T).T
-    except np.linalg.LinAlgError:
-        return cross_covariance @ np.linalg.pinv(predicted_covariance_next, hermitian=True)
+    symmetric = 0.5 * (predicted_covariance_next + predicted_covariance_next.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(symmetric)
+    max_eigenvalue = float(eigenvalues[-1]) if eigenvalues.size else 0.0
+    cutoff = max(max_eigenvalue, 0.0) * 1.0e-10
+    if max_eigenvalue > 0.0 and float(eigenvalues[0]) > cutoff:
+        # Well-conditioned predicted covariance: the direct solve preserves the
+        # existing smoother behavior exactly.
+        try:
+            gain = np.linalg.solve(symmetric.T, cross_covariance.T).T
+            if np.all(np.isfinite(gain)):
+                return gain
+        except np.linalg.LinAlgError:
+            pass
+    # Deterministic states (e.g. lag/augmented identities) give zero-variance
+    # directions that make the predicted covariance singular and the direct solve
+    # numerically explosive. Use a regularized symmetric pseudo-inverse that zeros
+    # the near-null directions (no smoothing information) for a stable gain.
+    inverse_eigenvalues = np.zeros_like(eigenvalues)
+    retained = eigenvalues > cutoff
+    inverse_eigenvalues[retained] = 1.0 / eigenvalues[retained]
+    pseudo_inverse = (eigenvectors * inverse_eigenvalues) @ eigenvectors.T
+    return cross_covariance @ pseudo_inverse
 
 
 def _validate_smoother_shapes(
