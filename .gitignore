@@ -20,3 +20,4 @@ build/
 *.hdf5
 *.jld
 *.jld2
+tests/fixtures/oracle/*.csv
