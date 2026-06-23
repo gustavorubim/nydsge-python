@@ -168,11 +168,13 @@ uv run nydsge vv sampler-compare --oracle-sampler tests/fixtures/oracle --candid
 ```
 
 The fixture summary command reports the HDF5 draw orientation, parameter labels,
-retained-draw covariance health, sampler attributes, and retained-draw
+the `sampler/fixed` mask in sampler parameter order, retained-draw covariance
+health, sampler attributes, and retained-draw
 `accepted`/`log_posterior` traces when the exporter runs through its traced
-proposal-scale path. The base `sampler` coverage profile stays compatible with
-older `mhsave.h5` exports; `sampler-trace` is the stricter sampler-reward gate.
-The `sampler-proposal-trace` profile additionally requires retained proposal
+proposal-scale path. The base `sampler` coverage profile now requires
+`sampler/fixed` alongside `sampler/mhparams` and `sampler/proposal_covariance`;
+`sampler-trace` is the stricter sampler-reward gate. The
+`sampler-proposal-trace` profile additionally requires retained proposal
 vectors, previous-state vectors, proposal/previous log-posterior values, uniform
 acceptance draws, and log-acceptance ratios. Those arrays, plus the sampler CSV
 written by `--data-out`, are the deterministic inputs for Python posterior
@@ -184,6 +186,9 @@ traces, acceptance decisions, retained log posterior values, and retained
 The sampler posterior replay diagnostic evaluates those model-space Julia
 proposal and previous vectors through the Python posterior path:
 `uv run nydsge vv sampler-posterior-replay --sampler tests/fixtures/oracle --data tests/fixtures/oracle/sampler_observables.csv --allow-empty-data-columns --json`.
+Replay masks `sampler/fixed` coordinates back to the Python model values before
+evaluating posterior components, then compares log posterior, log likelihood,
+and log prior traces separately.
 The real sampler smoke currently reaches finite replay and reports the measured
 posterior offset in JSON; exact absolute sampler-likelihood normalization and
 full mode/Hessian/adaptation sampler parity remain pending.

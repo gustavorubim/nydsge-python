@@ -165,6 +165,8 @@ class SamplerPosteriorReplayReport:
 class SamplerFixtureSummary:
     fixture_path: Path
     parameter_names: tuple[str, ...]
+    fixed_mask: tuple[bool, ...] | None
+    fixed_count: int | None
     mhparams_shape: tuple[int, int]
     parameter_axis: int
     draw_axis: int
@@ -204,6 +206,10 @@ class SamplerFixtureSummary:
         return {
             "fixture_path": str(self.fixture_path),
             "parameter_names": list(self.parameter_names),
+            "fixed_mask": None
+            if self.fixed_mask is None
+            else [bool(value) for value in self.fixed_mask],
+            "fixed_count": self.fixed_count,
             "mhparams_shape": list(self.mhparams_shape),
             "parameter_axis": self.parameter_axis,
             "draw_axis": self.draw_axis,
@@ -400,6 +406,7 @@ HARD_TARGET_FIXTURE_REQUIREMENTS: tuple[str, ...] = (
 
 SAMPLER_FIXTURE_REQUIREMENTS: tuple[str, ...] = (
     "sampler/mhparams",
+    "sampler/fixed",
     "sampler/proposal_covariance",
 )
 
@@ -517,6 +524,8 @@ def summarize_sampler_fixture(path: Path | str) -> SamplerFixtureSummary:
             parameter_names = tuple(f"parameter_{index}" for index in range(covariance_shape[0]))
         parameter_count = len(parameter_names)
         metadata = _sampler_hdf5_metadata(handle)
+        fixed_mask = _optional_sampler_fixed_mask(handle, parameter_count)
+        fixed_count = None if fixed_mask is None else int(sum(fixed_mask))
         metadata_draws = _metadata_optional_int(metadata.get("draws"))
         parameter_axis, draw_axis, draws = _infer_sampler_mhparams_axes(
             mhparams_shape,
@@ -663,6 +672,8 @@ def summarize_sampler_fixture(path: Path | str) -> SamplerFixtureSummary:
         return SamplerFixtureSummary(
             fixture_path=fixture_path,
             parameter_names=parameter_names,
+            fixed_mask=fixed_mask,
+            fixed_count=fixed_count,
             mhparams_shape=mhparams_shape,
             parameter_axis=parameter_axis,
             draw_axis=draw_axis,
@@ -925,6 +936,7 @@ def replay_sampler_proposal_posteriors(
         model,
         summary.parameter_names,
     )
+    fixed_mask = _sampler_replay_fixed_mask(model, model_parameter_names, summary)
     proposal_components = np.asarray(
         [
             _safe_model_value_posterior_components(
@@ -932,6 +944,7 @@ def replay_sampler_proposal_posteriors(
                 observations,
                 model_parameter_names,
                 draw,
+                fixed_mask,
                 start_date=start_date,
                 log_likelihood_start=log_likelihood_start,
             )
@@ -946,6 +959,7 @@ def replay_sampler_proposal_posteriors(
                 observations,
                 model_parameter_names,
                 draw,
+                fixed_mask,
                 start_date=start_date,
                 log_likelihood_start=log_likelihood_start,
             )
@@ -1850,6 +1864,28 @@ def _optional_sampler_trace_vector(
     return values
 
 
+def _optional_sampler_fixed_mask(
+    handle: Any,
+    parameter_count: int,
+) -> tuple[bool, ...] | None:
+    name = "sampler/fixed"
+    if name not in handle:
+        return None
+    values = np.asarray(handle[name][()], dtype=np.float64)
+    shape = tuple(int(value) for value in values.shape)
+    if shape != (parameter_count,):
+        msg = f"{name} must have shape {(parameter_count,)}, got {shape}."
+        raise ValueError(msg)
+    if not np.all(np.isfinite(values)):
+        msg = f"{name} must contain only finite values."
+        raise ValueError(msg)
+    rounded = np.rint(values)
+    if not np.allclose(values, rounded) or not np.all((rounded == 0.0) | (rounded == 1.0)):
+        msg = f"{name} must contain only 0/1 fixed flags."
+        raise ValueError(msg)
+    return tuple(bool(value) for value in rounded.astype(np.int8))
+
+
 def _optional_sampler_trace_matrix(
     handle: Any,
     name: str,
@@ -1898,19 +1934,30 @@ def _safe_model_value_posterior_components(
     observations: np.ndarray,
     parameter_names: tuple[str, ...],
     values: np.ndarray,
+    fixed_mask: np.ndarray,
     *,
     start_date: Any | None = None,
     log_likelihood_start: int = 0,
 ) -> np.ndarray:
     try:
+        replay_values = np.asarray(values, dtype=np.float64).copy()
+        if fixed_mask.shape != replay_values.shape:
+            msg = (
+                "Sampler fixed mask shape does not match parameter vector: "
+                f"{fixed_mask.shape} vs {replay_values.shape}."
+            )
+            raise ValueError(msg)
+        for index, fixed in enumerate(fixed_mask):
+            if fixed:
+                replay_values[index] = model.parameters[parameter_names[index]].value
         log_posterior, log_likelihood, log_prior, _ = evaluate_log_posterior_for_parameter_values(
             model,
             observations,
             parameter_names,
-            values,
+            replay_values,
             start_date=start_date,
             log_likelihood_start=log_likelihood_start,
-            update_fixed_parameters=False,
+            update_fixed_parameters=True,
         )
         if not np.isfinite(log_posterior):
             return np.asarray([float("-inf"), float("-inf"), float("-inf")], dtype=np.float64)
@@ -1920,6 +1967,27 @@ def _safe_model_value_posterior_components(
         )
     except Exception:
         return np.asarray([float("-inf"), float("-inf"), float("-inf")], dtype=np.float64)
+
+
+def _sampler_replay_fixed_mask(
+    model: DSGEModel,
+    parameter_names: tuple[str, ...],
+    summary: SamplerFixtureSummary,
+) -> np.ndarray:
+    model_mask = np.asarray(
+        [bool(model.parameters[name].fixed) for name in parameter_names],
+        dtype=bool,
+    )
+    if summary.fixed_mask is None:
+        return model_mask
+    fixture_mask = np.asarray(summary.fixed_mask, dtype=bool)
+    if fixture_mask.shape != model_mask.shape:
+        msg = (
+            "sampler/fixed shape does not match resolved sampler parameters: "
+            f"{fixture_mask.shape} vs {model_mask.shape}."
+        )
+        raise ValueError(msg)
+    return np.logical_or(model_mask, fixture_mask)
 
 
 def _sampler_draw_labels(draws: int) -> tuple[str, ...]:
@@ -2547,6 +2615,14 @@ def _load_hdf5_labels(path: Path) -> FixtureLabels:
                             (draws,),
                             {0: draw_labels},
                         )
+            _add_hdf5_dataset_labels(
+                labels,
+                handle,
+                h5py.Dataset,
+                "sampler/fixed",
+                (len(sampler_parameter_names),),
+                {0: sampler_parameter_names},
+            )
             _add_hdf5_dataset_labels(
                 labels,
                 handle,

@@ -209,9 +209,17 @@ function parameter_scaled_value(parameter)
     return Float64(value)
 end
 
-function parameter_fixed(parameter)
+function parameter_fixed_bool(parameter)
+    regimes = maybe_property(parameter, (:regimes,); default = nothing)
+    if regimes !== nothing && haskey(regimes, :fixed)
+        return all(value -> Bool(value), values(regimes[:fixed]))
+    end
     value = maybe_property(parameter, (:fixed, :is_fixed); default = false)
-    return Bool(value) ? 1.0 : 0.0
+    return Bool(value)
+end
+
+function parameter_fixed(parameter)
+    return parameter_fixed_bool(parameter) ? 1.0 : 0.0
 end
 
 function parameter_bounds(parameter)
@@ -815,8 +823,7 @@ function metropolis_hastings_with_trace(
     end
 
     function trace_parameter_is_fixed(parameter)
-        return haskey(parameter.regimes, :fixed) ? all(values(parameter.regimes[:fixed])) :
-               parameter.fixed
+        return parameter_fixed_bool(parameter)
     end
 
     function trace_log_prior(parameters, values::Vector{Float64})::Float64
@@ -1153,6 +1160,7 @@ function export_sampler(
     sampler_log_acceptance = Float64[]
     sampler_acceptance_rate = ""
     sampler_block_acceptance_rates = ""
+    sampler_fixed = [parameter_fixed(parameter) for parameter in DSGE.get_parameters(model)]
     mhparams = h5open(rawpath(model, "estimate", "mhsave.h5"), "r") do handle
         if haskey(handle, "accepted")
             sampler_accepted = vec(read(handle["accepted"]))
@@ -1258,6 +1266,7 @@ function export_sampler(
     write_file_attribute(file, "sampler_seed", seed === nothing ? "" : string(seed))
 
     write_sampler_dataset(file, "sampler/mhparams", mhparams)
+    write_sampler_dataset(file, "sampler/fixed", sampler_fixed)
     if !isempty(sampler_accepted)
         write_sampler_dataset(file, "sampler/accepted", sampler_accepted)
     end

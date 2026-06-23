@@ -150,9 +150,10 @@ def test_required_fixture_arrays_profiles() -> None:
     assert "forecast_full/history_observables" in hard_target
     assert "forecast_full/observable_samples" in hard_target
     assert "forecast_full/history_observable_samples" in hard_target
-    assert sampler == ("sampler/mhparams", "sampler/proposal_covariance")
+    assert sampler == ("sampler/mhparams", "sampler/fixed", "sampler/proposal_covariance")
     assert sampler_trace == (
         "sampler/mhparams",
+        "sampler/fixed",
         "sampler/proposal_covariance",
         "sampler/accepted",
         "sampler/log_posterior",
@@ -160,6 +161,7 @@ def test_required_fixture_arrays_profiles() -> None:
     assert set(sampler).issubset(set(sampler_trace))
     assert sampler_proposal_trace == (
         "sampler/mhparams",
+        "sampler/fixed",
         "sampler/proposal_covariance",
         "sampler/accepted",
         "sampler/log_posterior",
@@ -342,6 +344,7 @@ def test_load_fixture_labels_reads_sampler_dimensions_from_julia_hdf5_attributes
     path = oracle / "m1002_ss10.h5"
     with h5py.File(path, "w") as handle:
         handle["sampler/mhparams"] = np.zeros((2, 3))
+        handle["sampler/fixed"] = np.array([0, 1, 0], dtype=np.int8)
         handle["sampler/proposal_covariance"] = np.eye(3)
         handle["sampler/draw_covariance"] = np.eye(3)
         handle["sampler/input_proposal_covariance"] = 2.0 * np.eye(3)
@@ -365,6 +368,7 @@ def test_load_fixture_labels_reads_sampler_dimensions_from_julia_hdf5_attributes
         0: ("alpha", "beta", "gamma"),
         1: ("alpha", "beta", "gamma"),
     }
+    assert labels["sampler/fixed"] == {0: ("alpha", "beta", "gamma")}
     assert labels["sampler/draw_covariance"] == {
         0: ("alpha", "beta", "gamma"),
         1: ("alpha", "beta", "gamma"),
@@ -422,6 +426,7 @@ def test_summarize_sampler_fixture_reads_julia_hdf5_sampler_metadata(tmp_path) -
             ],
             dtype=np.float64,
         )
+        handle["sampler/fixed"] = np.array([0, 1, 0], dtype=np.int8)
         handle["sampler/proposal_covariance"] = covariance
         handle["sampler/draw_covariance"] = covariance
         handle["sampler/input_proposal_covariance"] = 1.0e-8 * np.eye(3)
@@ -463,6 +468,8 @@ def test_summarize_sampler_fixture_reads_julia_hdf5_sampler_metadata(tmp_path) -
 
     assert summary.fixture_path == path
     assert summary.parameter_names == ("alpha", "beta", "gamma")
+    assert summary.fixed_mask == (False, True, False)
+    assert summary.fixed_count == 1
     assert summary.mhparams_shape == (3, 2)
     assert summary.parameter_axis == 0
     assert summary.draw_axis == 1
@@ -507,6 +514,8 @@ def test_summarize_sampler_fixture_reads_julia_hdf5_sampler_metadata(tmp_path) -
 
     payload = summary.to_dict()
     assert payload["fixture_path"] == str(path)
+    assert payload["fixed_mask"] == [False, True, False]
+    assert payload["fixed_count"] == 1
     assert payload["mhparams_shape"] == [3, 2]
     assert payload["covariance_shape"] == [3, 3]
     assert payload["accepted_shape"] == [2]
@@ -1690,6 +1699,7 @@ def test_julia_oracle_export_script_includes_sampler_flags() -> None:
     assert '"sampler-mode-in"' in script
     assert '"sampler-hessian-in"' in script
     assert 'Symbol("mh_", string(Char(0x03b1)))' in script
+    assert '"sampler/fixed"' in script
     assert '"sampler/proposal_parameters"' in script
     assert '"sampler/previous_parameters"' in script
     assert '"sampler/proposal_log_posterior"' in script
@@ -2746,8 +2756,13 @@ def _write_sampler_posterior_replay_hdf5(
     previous_log_posterior = previous_components[:, 0]
     previous_log_likelihood = previous_components[:, 1]
     previous_log_prior = previous_components[:, 2]
+    fixed_mask = np.asarray(
+        [parameter.fixed for parameter in model.parameters.values()],
+        dtype=np.int8,
+    )
     with h5py.File(path, "w") as handle:
         handle["sampler/mhparams"] = proposal_draws.T
+        handle["sampler/fixed"] = fixed_mask
         handle["sampler/proposal_covariance"] = np.eye(len(parameter_names), dtype=np.float64)
         handle["sampler/accepted"] = np.array([1, 1], dtype=np.int8)
         handle["sampler/log_posterior"] = proposal_log_posterior
