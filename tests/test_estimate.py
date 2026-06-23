@@ -64,6 +64,27 @@ def test_model_value_posterior_evaluator_matches_current_parameters() -> None:
     )
 
 
+def test_model_value_posterior_evaluator_can_ignore_fixed_parameter_values() -> None:
+    model = Model1002()
+    data = np.zeros((1, len(model.observables)))
+    fixed_name = next(name for name, parameter in model.parameters.items() if parameter.fixed)
+    fixed_value = model.parameters[fixed_name].value
+    estimate_result = estimate(model, data)
+
+    log_posterior, log_likelihood, log_prior, _ = evaluate_log_posterior_for_parameter_values(
+        model,
+        data,
+        (fixed_name,),
+        np.asarray([fixed_value + 1.0e-3], dtype=np.float64),
+        update_fixed_parameters=False,
+    )
+
+    assert log_posterior == estimate_result.log_posterior
+    assert log_likelihood == estimate_result.log_likelihood
+    assert log_prior == estimate_result.log_prior
+    assert model.parameters[fixed_name].value == fixed_value
+
+
 def test_estimate_can_run_metropolis_hastings_sampler() -> None:
     model = Model1002()
     data = np.zeros((1, len(model.observables)))
