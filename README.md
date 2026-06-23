@@ -308,6 +308,39 @@ uv run nydsge meansbands --cond-type full --source forecastobs --data path\to\ob
 uv run nydsge meansbands --source forecastpseudo --horizon 40
 ```
 
+### Forecast Analysis Reports
+
+`nydsge report` productizes forecast analysis artifacts: an all-observable macro
+forecast panel, per-observable impulse responses, and a true historical shock
+decomposition. Each command writes labeled numeric arrays (`.npz`), a JSON
+summary, and—unless `--no-plots` is passed—deterministic PNG figures. Plotting
+requires the optional `plot` extra (`uv pip install nydsge[plot]` or
+`pip install matplotlib`); the numeric arrays export without matplotlib.
+
+```powershell
+# Full bundle: macro forecast panel + per-observable IRFs + historical decomposition.
+uv run nydsge report forecast --data path\to\observables.csv --forecast-start 2018-Q4 --horizon 40 --output-dir outputs\forecast_report
+
+# Impulse responses only (computed from the solved state-space system).
+uv run nydsge report irf --horizon 40 --normalization one_sd --output-dir outputs\irf
+
+# True historical shock decomposition (RTS-smoothed shock/state contributions).
+uv run nydsge report historical-decomposition --data path\to\observables.csv --output-dir outputs\historical_decomposition
+
+# Numeric arrays only, no figures (no matplotlib needed).
+uv run nydsge report irf --horizon 40 --no-plots --json
+```
+
+Notes:
+
+- IRF shock normalization is documented in the output summary: `unit` applies a
+  `1.0` impulse, `one_sd` a one-standard-deviation impulse (`sqrt(diag(QQ))`).
+- The historical decomposition is a genuine decomposition: per-shock
+  contributions plus an initial-condition/deterministic baseline reconcile to
+  the model-implied smoothed observable path (the command fails if reconciliation
+  exceeds tolerance). It is not an IRF accumulation.
+- Reports exit nonzero when array dimensions and axis labels are inconsistent.
+
 ## V&V Workflow
 
 ```mermaid
