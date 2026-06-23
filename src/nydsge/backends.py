@@ -155,12 +155,18 @@ class JaxBackend:
         return jax.device_put(jnp.asarray(value, dtype=self._dtype), self._device)
 
     def zeros(self, shape: tuple[int, ...]) -> Any:
-        _, jnp = self._modules
-        return jnp.zeros(shape, dtype=self._dtype)
+        jax, jnp = self._modules
+        return jax.device_put(
+            jnp.zeros(shape, dtype=self._dtype),
+            self._device,
+        )
 
     def eye(self, n: int) -> Any:
-        _, jnp = self._modules
-        return jnp.eye(n, dtype=self._dtype)
+        jax, jnp = self._modules
+        return jax.device_put(
+            jnp.eye(n, dtype=self._dtype),
+            self._device,
+        )
 
     def matmul(self, left: Any, right: Any) -> Any:
         _, jnp = self._modules

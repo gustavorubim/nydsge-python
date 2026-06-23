@@ -35,6 +35,28 @@ def test_jax_cpu_backend_contract_when_available() -> None:
     _assert_backend_contract(JaxBackend(device="cpu"))
 
 
+def test_torch_cuda_backend_contract_when_available() -> None:
+    pytest.importorskip("torch")
+    try:
+        resolved = RuntimeConfig(backend="torch", device="cuda").resolve()
+    except UnsupportedRuntimeError as err:
+        pytest.skip(str(err))
+
+    backend = TorchBackend(device=resolved.device, dtype=resolved.dtype)
+    _assert_backend_contract(backend)
+
+
+def test_jax_cuda_backend_contract_when_available() -> None:
+    pytest.importorskip("jax")
+    try:
+        resolved = RuntimeConfig(backend="jax", device="cuda").resolve()
+    except UnsupportedRuntimeError as err:
+        pytest.skip(str(err))
+
+    backend = JaxBackend(device=resolved.device, dtype=resolved.dtype)
+    _assert_backend_contract(backend)
+
+
 def _assert_backend_contract(backend: ArrayBackend) -> None:
     matrix = np.array([[2.0, 0.5], [0.5, 1.0]])
     vector = np.array([1.0, 2.0])
