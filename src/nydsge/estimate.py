@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -369,6 +369,35 @@ def parameter_estimation_vector(
         ],
         dtype=np.float64,
     )
+
+
+def evaluate_log_posterior_for_parameter_values(
+    model: DSGEModel,
+    observations: np.ndarray,
+    parameter_names: tuple[str, ...],
+    values: np.ndarray,
+    *,
+    start_date: Any | None = None,
+    log_likelihood_start: int = 0,
+    update_fixed_parameters: bool = True,
+) -> tuple[float, float, float, KalmanResult]:
+    original_parameters = dict(model.parameters)
+    try:
+        _set_parameter_model_value_vector(
+            model,
+            original_parameters,
+            parameter_names,
+            np.asarray(values, dtype=np.float64),
+            update_fixed=update_fixed_parameters,
+        )
+        return _evaluate_log_posterior(
+            model,
+            np.asarray(observations, dtype=np.float64),
+            start_date=start_date,
+            log_likelihood_start=log_likelihood_start,
+        )
+    finally:
+        model.parameters.update(original_parameters)
 
 
 def finite_difference_hessian(
@@ -1151,6 +1180,7 @@ def _evaluate_log_posterior(
     observations: np.ndarray,
     *,
     start_date: Any | None = None,
+    log_likelihood_start: int = 0,
 ) -> tuple[float, float, float, KalmanResult]:
     system = compute_system(model)
     kalman = kalman_log_likelihood(
@@ -1163,6 +1193,7 @@ def _evaluate_log_posterior(
             start_date=start_date,
         ),
         backend=get_backend(model.runtime),
+        log_likelihood_start=log_likelihood_start,
     )
     log_prior = model_log_prior(model.parameters)
     log_posterior = kalman.log_likelihood + log_prior
@@ -1233,6 +1264,27 @@ def _set_parameter_estimation_vector(
         raise ValueError(msg)
     for name, value in zip(parameter_names, values, strict=True):
         model.parameters[name] = update_parameter_value(original_parameters[name], float(value))
+
+
+def _set_parameter_model_value_vector(
+    model: DSGEModel,
+    original_parameters: dict[str, Parameter],
+    parameter_names: tuple[str, ...],
+    values: np.ndarray,
+    *,
+    update_fixed: bool = True,
+) -> None:
+    if values.shape != (len(parameter_names),):
+        msg = f"Parameter vector must have shape {(len(parameter_names),)}."
+        raise ValueError(msg)
+    missing = [name for name in parameter_names if name not in original_parameters]
+    if missing:
+        msg = "Unknown parameter(s): " + ", ".join(missing)
+        raise KeyError(msg)
+    for name, value in zip(parameter_names, values, strict=True):
+        if not update_fixed and original_parameters[name].fixed:
+            continue
+        model.parameters[name] = replace(original_parameters[name], value=float(value))
 
 
 def _model_values_for_estimation_vector(

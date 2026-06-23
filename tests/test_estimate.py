@@ -9,6 +9,7 @@ from nydsge.estimate import (
     estimate,
     estimation_mode_from_result,
     estimation_parameter_names,
+    evaluate_log_posterior_for_parameter_values,
     finite_difference_hessian,
     load_estimation_mode,
     load_sampler_result,
@@ -36,6 +37,31 @@ def test_estimate_model1002_evaluates_current_parameter_posterior() -> None:
     assert np.isclose(result.log_posterior, result.log_likelihood + result.log_prior)
     assert len(result.parameter_values) == len(model.parameters)
     assert result.kalman.filtered_states.shape == (2, 84)
+
+
+def test_model_value_posterior_evaluator_matches_current_parameters() -> None:
+    model = Model1002()
+    data = np.zeros((1, len(model.observables)))
+    names = tuple(model.parameters)
+    values = np.asarray([parameter.value for parameter in model.parameters.values()])
+    original_values = values.copy()
+
+    estimate_result = estimate(model, data)
+    log_posterior, log_likelihood, log_prior, kalman = evaluate_log_posterior_for_parameter_values(
+        model,
+        data,
+        names,
+        values,
+    )
+
+    assert log_posterior == estimate_result.log_posterior
+    assert log_likelihood == estimate_result.log_likelihood
+    assert log_prior == estimate_result.log_prior
+    assert kalman.filtered_states.shape == estimate_result.kalman.filtered_states.shape
+    np.testing.assert_allclose(
+        [parameter.value for parameter in model.parameters.values()],
+        original_values,
+    )
 
 
 def test_estimate_can_run_metropolis_hastings_sampler() -> None:
