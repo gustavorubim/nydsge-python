@@ -312,6 +312,31 @@ function ordered_mapping_names(mapping)
     return [parameter_name(item, item) for item in items]
 end
 
+function ordered_mapping_transform_values(mapping, attribute::Symbol; default = "identity")
+    items = collect(mapping)
+    if all(item -> item isa Pair, items)
+        sorted_items = sort(items; by = item -> item.second)
+        values = [maybe_property(item.second, (attribute,), default = nothing) for item in sorted_items]
+    else
+        values = [maybe_property(item, (attribute,), default = nothing) for item in items]
+    end
+    return [value === nothing ? default : string(value) for value in values]
+end
+
+function ordered_mapping_source_names(mapping)
+    items = collect(mapping)
+    if all(item -> item isa Pair, items)
+        sorted_items = sort(items; by = item -> item.second)
+        values = [maybe_property(item.second, (:source_names,), default = nothing) for item in sorted_items]
+    else
+        values = [maybe_property(item, (:source_names,), default = nothing) for item in items]
+    end
+    return [
+        source_names === nothing ? "" : join(source_names, "|")
+        for source_names in values
+    ]
+end
+
 function quarter_label(date)
     quarter = ((Dates.month(date) - 1) ÷ 3) + 1
     return "$(Dates.year(date))-Q$(quarter)"
@@ -347,10 +372,41 @@ function export_label_attributes(file, model)
         ",",
     ))
     write_file_attribute(file, "observable_names", join(ordered_mapping_names(model.observables), ","))
+    write_file_attribute(
+        file,
+        "observable_sources",
+        join(ordered_mapping_source_names(model.observables), ","),
+    )
+    write_file_attribute(
+        file,
+        "observable_forward_transforms",
+        join(ordered_mapping_transform_values(model.observables, :forward_transform), ","),
+    )
+    write_file_attribute(
+        file,
+        "observable_reverse_transforms",
+        join(ordered_mapping_transform_values(model.observables, :reverse_transform), ","),
+    )
     write_file_attribute(file, "pseudo_observable_names", join(
         ordered_mapping_names(model.pseudo_observables),
         ",",
     ))
+    write_file_attribute(
+        file,
+        "pseudo_observable_reverse_transforms",
+        join(
+            ordered_mapping_transform_values(model.pseudo_observables, :reverse_transform),
+            ",",
+        ),
+    )
+    write_file_attribute(
+        file,
+        "pseudo_observable_forward_transforms",
+        join(
+            ordered_mapping_transform_values(model.pseudo_observables, :forward_transform),
+            ",",
+        ),
+    )
 end
 
 function export_mode_forecast(

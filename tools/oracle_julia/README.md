@@ -190,8 +190,8 @@ Replay masks `sampler/fixed` coordinates back to the Python model values before
 evaluating posterior components, then compares log posterior, log likelihood,
 and log prior traces separately.
 The real sampler smoke currently reaches finite replay and reports the measured
-posterior offset in JSON; exact absolute sampler-likelihood normalization and
-full mode/Hessian/adaptation sampler parity remain pending.
+posterior offset in JSON; exact absolute sampler-likelihood normalization is not
+yet matched.
 The sampler compare command converts the traced Julia HDF5 fixture to the same
 diagnostic schema used by Python sampler `.npz` archives, then compares retained
 draws, accepted flags, log posterior traces, covariance, acceptance windows, and
