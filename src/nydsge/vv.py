@@ -12,9 +12,11 @@ import pandas as pd
 from nydsge.core import DSGEModel, Parameter
 from nydsge.estimate import (
     EstimateResult,
+    EstimationModeResult,
     MetropolisHastingsResult,
     evaluate_log_posterior_for_parameter_values,
     sampler_diagnostics,
+    validate_estimation_mode,
     validate_sampler_result,
 )
 from nydsge.forecast import ForecastOutput, MeansBands
@@ -114,6 +116,25 @@ class SamplerComparisonReport:
         return {
             "oracle_sampler": str(self.oracle_sampler),
             "candidate_sampler": str(self.candidate_sampler),
+            "passed": self.passed,
+            "comparisons": [item.to_dict() for item in self.comparisons],
+        }
+
+
+@dataclass(frozen=True)
+class ModeComparisonReport:
+    oracle_mode: Path
+    candidate_mode: Path
+    comparisons: tuple[ArrayComparison, ...]
+
+    @property
+    def passed(self) -> bool:
+        return all(item.passed for item in self.comparisons)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "oracle_mode": str(self.oracle_mode),
+            "candidate_mode": str(self.candidate_mode),
             "passed": self.passed,
             "comparisons": [item.to_dict() for item in self.comparisons],
         }
@@ -394,6 +415,7 @@ POSTERIOR_FIXTURE_REQUIREMENTS: tuple[str, ...] = (
 HARD_TARGET_FIXTURE_REQUIREMENTS: tuple[str, ...] = (
     *MODEL_SETUP_FIXTURE_REQUIREMENTS,
     *MATRIX_FIXTURE_REQUIREMENTS,
+    *KALMAN_FIXTURE_REQUIREMENTS,
     *POSTERIOR_FIXTURE_REQUIREMENTS,
     "forecast_mode/observables",
     "forecast_mode/history_observables",
@@ -1274,6 +1296,124 @@ def compare_sampler_results(
     )
 
 
+def compare_mode_results(
+    oracle_mode: Path,
+    candidate_mode: Path,
+    *,
+    oracle_result: EstimationModeResult,
+    candidate_result: EstimationModeResult,
+    atol: float = 1.0e-8,
+    rtol: float = 1.0e-8,
+) -> ModeComparisonReport:
+    validate_estimation_mode(oracle_result)
+    validate_estimation_mode(candidate_result)
+    comparisons: list[ArrayComparison] = []
+    if oracle_result.parameter_names != candidate_result.parameter_names:
+        comparisons.append(
+            ArrayComparison(
+                name="parameter_names",
+                status="label_mismatch",
+                expected_shape=(len(oracle_result.parameter_names),),
+                actual_shape=(len(candidate_result.parameter_names),),
+                max_abs_diff=None,
+                max_rel_diff=None,
+                atol=atol,
+                rtol=rtol,
+                message=(
+                    "Mode parameter names differ: "
+                    f"{oracle_result.parameter_names} vs {candidate_result.parameter_names}."
+                ),
+            )
+        )
+    comparisons.extend(
+        [
+            compare_arrays(
+                "estimation_values",
+                oracle_result.estimation_values,
+                candidate_result.estimation_values,
+                atol=atol,
+                rtol=rtol,
+                labels={0: oracle_result.parameter_names},
+            ),
+            compare_arrays(
+                "objective_value",
+                np.asarray([oracle_result.objective_value], dtype=np.float64),
+                np.asarray([candidate_result.objective_value], dtype=np.float64),
+                atol=atol,
+                rtol=rtol,
+            ),
+        ]
+    )
+    if oracle_result.hessian is None and candidate_result.hessian is None:
+        comparisons.append(
+            ArrayComparison(
+                name="hessian",
+                status="passed",
+                expected_shape=(0, 0),
+                actual_shape=(0, 0),
+                max_abs_diff=0.0,
+                max_rel_diff=0.0,
+                atol=atol,
+                rtol=rtol,
+                message="",
+            )
+        )
+    elif oracle_result.hessian is None or candidate_result.hessian is None:
+        comparisons.append(
+            ArrayComparison(
+                name="hessian",
+                status="shape_mismatch",
+                expected_shape=None
+                if oracle_result.hessian is None
+                else oracle_result.hessian.shape,
+                actual_shape=(
+                    None if candidate_result.hessian is None else candidate_result.hessian.shape
+                ),
+                max_abs_diff=None,
+                max_rel_diff=None,
+                atol=atol,
+                rtol=rtol,
+                message="Mode Hessian presence differs between oracle and candidate.",
+            )
+        )
+    else:
+        comparisons.append(
+            compare_arrays(
+                "hessian",
+                oracle_result.hessian,
+                candidate_result.hessian,
+                atol=atol,
+                rtol=rtol,
+                labels={
+                    0: oracle_result.parameter_names,
+                    1: oracle_result.parameter_names,
+                },
+            )
+        )
+    if oracle_result.success != candidate_result.success:
+        comparisons.append(
+            ArrayComparison(
+                name="metadata/success",
+                status="failed",
+                expected_shape=(1,),
+                actual_shape=(1,),
+                max_abs_diff=None,
+                max_rel_diff=None,
+                atol=0.0,
+                rtol=0.0,
+                message=(
+                    "Mode optimization success flags differ: "
+                    f"{oracle_result.success} vs {candidate_result.success}."
+                ),
+            )
+        )
+    return ModeComparisonReport(
+        oracle_mode=oracle_mode,
+        candidate_mode=candidate_mode,
+        comparisons=tuple(comparisons),
+    )
+
+
 def compare_arrays(
     name: str,
     expected: np.ndarray,
@@ -1338,14 +1478,58 @@ def compare_fixture_dirs(
 ) -> FixtureComparisonReport:
     oracle_arrays = load_fixture_arrays(oracle_dir)
     candidate_arrays = load_fixture_arrays(candidate_dir)
-    if array_names is not None:
-        included = set(array_names)
-        oracle_arrays = {name: value for name, value in oracle_arrays.items() if name in included}
-        candidate_arrays = {
-            name: value for name, value in candidate_arrays.items() if name in included
-        }
     labels = {**load_fixture_labels(candidate_dir), **load_fixture_labels(oracle_dir)}
     comparisons: list[ArrayComparison] = []
+
+    if array_names is not None:
+        for name in sorted(set(array_names)):
+            expected = oracle_arrays.get(name)
+            actual = candidate_arrays.get(name)
+            if expected is None:
+                comparisons.append(
+                    ArrayComparison(
+                        name=name,
+                        status="missing_oracle",
+                        expected_shape=None,
+                        actual_shape=None if actual is None else actual.shape,
+                        max_abs_diff=None,
+                        max_rel_diff=None,
+                        atol=atol,
+                        rtol=rtol,
+                        message="Oracle fixture is missing this required array.",
+                    )
+                )
+                continue
+            if actual is None:
+                comparisons.append(
+                    ArrayComparison(
+                        name=name,
+                        status="missing_candidate",
+                        expected_shape=expected.shape,
+                        actual_shape=None,
+                        max_abs_diff=None,
+                        max_rel_diff=None,
+                        atol=atol,
+                        rtol=rtol,
+                        message="Candidate fixture is missing this array.",
+                    )
+                )
+                continue
+            comparisons.append(
+                compare_arrays(
+                    name,
+                    expected,
+                    actual,
+                    atol=atol,
+                    rtol=rtol,
+                    labels=labels.get(name),
+                )
+            )
+        return FixtureComparisonReport(
+            oracle_dir=oracle_dir,
+            candidate_dir=candidate_dir,
+            comparisons=tuple(comparisons),
+        )
 
     for name, expected in sorted(oracle_arrays.items()):
         if name not in candidate_arrays:

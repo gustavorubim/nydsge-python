@@ -91,6 +91,7 @@ from nydsge.vv import (
     check_fixture_coverage,
     check_sampler_proposal_trace,
     compare_fixture_dirs,
+    compare_mode_results,
     compare_sampler_results,
     load_canonical_fixture,
     load_sampler_fixture_result,
@@ -2353,6 +2354,84 @@ def vv_sampler_compare(
         raise typer.Exit(code=1)
 
 
+@vv_app.command("mode-compare")
+def vv_mode_compare(
+    oracle_mode: Annotated[
+        Path,
+        typer.Option("--oracle-mode", help="Reference optimized mode .npz archive."),
+    ],
+    candidate_mode: Annotated[
+        Path,
+        typer.Option("--candidate-mode", help="Candidate optimized mode .npz archive."),
+    ],
+    tolerance_profile: Annotated[
+        str,
+        typer.Option(
+            "--tolerance-profile",
+            help="Named tolerance profile: strict, cpu-oracle, forecast, or accelerator.",
+        ),
+    ] = "strict",
+    atol: Annotated[
+        float | None,
+        typer.Option(help="Absolute tolerance override for the selected profile."),
+    ] = None,
+    rtol: Annotated[
+        float | None,
+        typer.Option(help="Relative tolerance override for the selected profile."),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit JSON instead of a table."),
+    ] = False,
+) -> None:
+    """Compare optimized mode archives for parameter and objective parity."""
+    try:
+        profile = resolve_tolerance_profile(tolerance_profile, atol=atol, rtol=rtol)
+        oracle_result = load_estimation_mode(oracle_mode)
+        candidate_result = load_estimation_mode(candidate_mode)
+        report = compare_mode_results(
+            oracle_mode,
+            candidate_mode,
+            oracle_result=oracle_result,
+            candidate_result=candidate_result,
+            atol=profile.atol,
+            rtol=profile.rtol,
+        )
+    except (FileNotFoundError, KeyError, OSError, ValueError) as err:
+        console.print(f"[yellow]{err}[/yellow]")
+        raise typer.Exit(code=2) from err
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    **report.to_dict(),
+                    "tolerance_profile": profile.to_dict(),
+                },
+                indent=2,
+            )
+        )
+    else:
+        table = Table(title=f"Mode comparison ({profile.name})")
+        table.add_column("Metric")
+        table.add_column("Status")
+        table.add_column("Max abs")
+        table.add_column("Max rel")
+        table.add_column("Worst", overflow="fold")
+        table.add_column("Message")
+        for item in report.comparisons:
+            table.add_row(
+                item.name,
+                item.status,
+                "" if item.max_abs_diff is None else f"{item.max_abs_diff:.3e}",
+                "" if item.max_rel_diff is None else f"{item.max_rel_diff:.3e}",
+                _format_comparison_location(item.max_abs_index, item.max_abs_label),
+                item.message,
+            )
+        console.print(table)
+    if not report.passed:
+        raise typer.Exit(code=1)
+
+
 @vv_app.command("export-financial-frictions")
 def vv_export_financial_frictions(
     output_dir: Annotated[
@@ -4150,6 +4229,8 @@ def _export_hard_target_smoke_inputs(
         str(draws),
         "--include-posterior",
         "true",
+        "--include-kalman",
+        "true",
         "--data-in",
         str(observables_path),
         "--horizon",
@@ -4424,6 +4505,15 @@ def _export_model1002_candidate_suite(
             exported=exported,
             allow_empty_data_columns=allow_empty_data_columns,
         )
+        _save_suite_kalman(
+            model,
+            posterior.kalman,
+            output_dir=output_dir,
+            filename="kalman.npz",
+            data_path=data_path,
+            exported=exported,
+            allow_empty_data_columns=allow_empty_data_columns,
+        )
 
     sampler = _load_sampler_draws(sampler_draws)
     shock_samples = _load_shock_samples(shock_samples_path)
@@ -4639,6 +4729,31 @@ def _save_suite_posterior(
         _posterior_manifest(
             model,
             result,
+            data_path=data_path,
+            array_prefix=Path(filename).stem,
+            allow_empty_data_columns=allow_empty_data_columns,
+        ),
+    )
+    exported.append({"kind": Path(filename).stem, "path": str(path)})
+    exported.append({"kind": "manifest", "path": str(manifest_path)})
+
+
+def _save_suite_kalman(
+    model: Model1002,
+    kalman: KalmanResult,
+    *,
+    output_dir: Path,
+    filename: str,
+    data_path: Path,
+    exported: list[dict[str, object]],
+    allow_empty_data_columns: bool = False,
+) -> None:
+    path = save_kalman_fixture(kalman, output_dir, filename=filename)
+    manifest_path = save_fixture_manifest(
+        output_dir,
+        _kalman_manifest(
+            model,
+            kalman,
             data_path=data_path,
             array_prefix=Path(filename).stem,
             allow_empty_data_columns=allow_empty_data_columns,
@@ -5038,8 +5153,13 @@ def _kalman_manifest(
     *,
     data_path: Path,
     array_prefix: str = "kalman",
+    allow_empty_data_columns: bool = False,
 ) -> dict[str, object]:
-    history_dates = _history_date_labels(model, data_path)
+    history_dates = _history_date_labels(
+        model,
+        data_path,
+        allow_empty_data_columns=allow_empty_data_columns,
+    )
     state_labels = _state_labels(model)
     labels: dict[str, dict[str, list[str]]] = {}
     _add_array_labels(

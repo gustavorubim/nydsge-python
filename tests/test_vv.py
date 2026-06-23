@@ -14,6 +14,8 @@ from nydsge.cli import _parameter_manifest, app
 from nydsge.estimate import (
     MetropolisHastingsResult,
     evaluate_log_posterior_for_parameter_values,
+    load_estimation_mode,
+    load_sampler_result,
     save_sampler_result,
 )
 from nydsge.forecast import ForecastOutput, MeansBands
@@ -27,6 +29,7 @@ from nydsge.vv import (
     check_sampler_proposal_trace,
     compare_arrays,
     compare_fixture_dirs,
+    compare_mode_results,
     compare_sampler_results,
     load_canonical_fixture,
     load_fixture_arrays,
@@ -3399,6 +3402,111 @@ def _write_sampler_posterior_replay_hdf5(
         handle.attrs["sampler_trace_available"] = "true"
         handle.attrs["sampler_proposal_trace_available"] = "true"
     return path
+
+
+def test_compare_fixture_dirs_reports_missing_oracle_for_profile(tmp_path) -> None:
+    oracle = tmp_path / "oracle"
+    candidate = tmp_path / "candidate"
+    oracle.mkdir()
+    candidate.mkdir()
+    _write_required_arrays(oracle, required_fixture_arrays("matrix"))
+    _write_required_arrays(candidate, required_fixture_arrays("hard-target"))
+
+    report = compare_fixture_dirs(
+        oracle,
+        candidate,
+        array_names=required_fixture_arrays("hard-target"),
+    )
+
+    assert not report.passed
+    missing = [item.name for item in report.comparisons if item.status == "missing_oracle"]
+    assert "kalman/log_likelihood" in missing
+    assert "forecast_full/observable_samples" in missing
+
+
+def test_smoke_hard_target_compare_passes_without_julia() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    oracle_dir = repo_root / "tests" / "fixtures" / "smoke" / "oracle"
+    candidate_dir = repo_root / "tests" / "fixtures" / "smoke" / "candidate"
+    report = compare_fixture_dirs(
+        oracle_dir,
+        candidate_dir,
+        array_names=required_fixture_arrays("hard-target"),
+        atol=1.0e-10,
+        rtol=1.0e-10,
+    )
+    assert report.passed
+
+
+def test_stochastic_forecast_shared_shocks_pass_strict() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    oracle_dir = repo_root / "tests" / "fixtures" / "smoke" / "oracle_stochastic"
+    candidate_dir = repo_root / "tests" / "fixtures" / "smoke" / "candidate_stochastic_shared"
+    report = compare_fixture_dirs(
+        oracle_dir,
+        candidate_dir,
+        array_names=required_fixture_arrays("forecast-full"),
+        atol=1.0e-10,
+        rtol=1.0e-10,
+    )
+    assert report.passed
+
+
+def test_production_sampler_compare_smoke_fixture() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    oracle_path = (
+        repo_root / "tests" / "fixtures" / "smoke" / "oracle_sampler" / "m1002_ss10_sampler.h5"
+    )
+    candidate_path = repo_root / "tests" / "fixtures" / "smoke" / "candidate" / "sampler.npz"
+    oracle_result = load_sampler_fixture_result(oracle_path)
+    candidate_result = load_sampler_result(candidate_path)
+    report = compare_sampler_results(
+        oracle_path,
+        candidate_path,
+        oracle_result=oracle_result,
+        candidate_result=candidate_result,
+        windows=4,
+    )
+    assert report.passed
+    assert oracle_result.parameter_draws.shape[0] == 10
+
+
+def test_mode_compare_passes_matching_archives() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    mode_path = repo_root / "tests" / "fixtures" / "smoke" / "candidate" / "mode.npz"
+    mode = load_estimation_mode(mode_path)
+    report = compare_mode_results(
+        mode_path,
+        mode_path,
+        oracle_result=mode,
+        candidate_result=mode,
+    )
+    assert report.passed
+
+
+def test_vv_compare_cli_reports_missing_oracle_for_hard_target_profile() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    result = CliRunner().invoke(
+        app,
+        [
+            "vv",
+            "compare",
+            "--oracle-dir",
+            str(repo_root / "tests" / "fixtures" / "oracle"),
+            "--candidate-dir",
+            str(repo_root / "tests" / "fixtures" / "candidate"),
+            "--profile",
+            "hard-target",
+            "--tolerance-profile",
+            "strict",
+            "--json",
+        ],
+    )
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["passed"] is False
+    statuses = {item["status"] for item in payload["comparisons"]}
+    assert "missing_oracle" in statuses
 
 
 def _write_sampler_archive(tmp_path: Path) -> Path:

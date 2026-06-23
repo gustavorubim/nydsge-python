@@ -1739,6 +1739,7 @@ def test_vv_export_hard_target_inputs_writes_deterministic_bundle(tmp_path) -> N
     )
     assert manifest == payload
     assert "--include-posterior" in payload["julia_oracle_command"]
+    assert "--include-kalman" in payload["julia_oracle_command"]
     assert "--shock-samples" in payload["python_candidate_command"]
     assert "hard-target" in payload["compare_command"]
 
