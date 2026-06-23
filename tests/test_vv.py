@@ -10,17 +10,25 @@ import pytest
 from typer.testing import CliRunner
 
 from nydsge.cli import app
-from nydsge.estimate import MetropolisHastingsResult, save_sampler_result
+from nydsge.estimate import (
+    MetropolisHastingsResult,
+    evaluate_log_posterior_for_parameter_values,
+    save_sampler_result,
+)
 from nydsge.forecast import ForecastOutput, MeansBands
 from nydsge.models import Model1002
 from nydsge.solve import build_system, solve_canonical
 from nydsge.vv import (
     check_fixture_coverage,
+    check_sampler_proposal_trace,
     compare_arrays,
     compare_fixture_dirs,
+    compare_sampler_results,
     load_canonical_fixture,
     load_fixture_arrays,
     load_fixture_labels,
+    load_sampler_fixture_result,
+    replay_sampler_proposal_posteriors,
     required_fixture_arrays,
     resolve_tolerance_profile,
     save_canonical_fixture,
@@ -31,6 +39,7 @@ from nydsge.vv import (
     save_steady_state_fixture,
     save_system_fixture,
     save_transition_fixture,
+    summarize_sampler_fixture,
 )
 
 
@@ -83,6 +92,8 @@ def test_required_fixture_arrays_profiles() -> None:
     forecast_full_history = required_fixture_arrays("forecast-full-history")
     hard_target = required_fixture_arrays("hard-target")
     sampler = required_fixture_arrays("sampler")
+    sampler_trace = required_fixture_arrays("sampler-trace")
+    sampler_proposal_trace = required_fixture_arrays("sampler-proposal-trace")
 
     assert parameters == (
         "parameters/values",
@@ -140,6 +151,26 @@ def test_required_fixture_arrays_profiles() -> None:
     assert "forecast_full/observable_samples" in hard_target
     assert "forecast_full/history_observable_samples" in hard_target
     assert sampler == ("sampler/mhparams", "sampler/proposal_covariance")
+    assert sampler_trace == (
+        "sampler/mhparams",
+        "sampler/proposal_covariance",
+        "sampler/accepted",
+        "sampler/log_posterior",
+    )
+    assert set(sampler).issubset(set(sampler_trace))
+    assert sampler_proposal_trace == (
+        "sampler/mhparams",
+        "sampler/proposal_covariance",
+        "sampler/accepted",
+        "sampler/log_posterior",
+        "sampler/proposal_parameters",
+        "sampler/previous_parameters",
+        "sampler/proposal_log_posterior",
+        "sampler/previous_log_posterior",
+        "sampler/uniform_draw",
+        "sampler/log_acceptance",
+    )
+    assert set(sampler_trace).issubset(set(sampler_proposal_trace))
     assert set(sampler).issubset(set(hard_target)) is False
 
     with pytest.raises(ValueError, match="Unknown fixture coverage profile"):
@@ -150,6 +181,17 @@ def test_compare_arrays_reports_shape_mismatch() -> None:
     report = compare_arrays("matrix", np.ones((1, 2)), np.ones((2, 1)))
     assert not report.passed
     assert report.status == "shape_mismatch"
+
+
+def test_compare_arrays_treats_matching_nonfinite_values_as_equal() -> None:
+    report = compare_arrays(
+        "diagnostics/core",
+        np.array([np.inf, np.nan, 1.0]),
+        np.array([np.inf, np.nan, 1.0 + 1.0e-12]),
+    )
+
+    assert report.passed
+    assert report.max_abs_diff == pytest.approx(1.0e-12)
 
 
 def test_compare_arrays_reports_worst_mismatch_coordinate() -> None:
@@ -195,6 +237,21 @@ def test_load_fixture_arrays_reads_npz_and_compare_dirs(tmp_path) -> None:
     report = compare_fixture_dirs(oracle, candidate)
     assert report.passed
     assert {item.name for item in report.comparisons} == {"system/CCC", "system/TTT"}
+
+
+def test_load_fixture_arrays_ignores_non_numeric_csv(tmp_path) -> None:
+    oracle = tmp_path / "oracle"
+    oracle.mkdir()
+    np.savetxt(oracle / "numeric.csv", np.array([[1.0, 2.0]]), delimiter=",")
+    pd.DataFrame({"date": ["1960-Q1"], "obs_gdp": [1.0]}).to_csv(
+        oracle / "observables.csv",
+        index=False,
+    )
+
+    arrays = load_fixture_arrays(oracle)
+
+    assert sorted(arrays) == ["numeric"]
+    np.testing.assert_allclose(arrays["numeric"], np.array([[1.0, 2.0]]))
 
 
 def test_load_fixture_arrays_reads_hdf5_dataset_paths_without_file_prefix(tmp_path) -> None:
@@ -286,6 +343,16 @@ def test_load_fixture_labels_reads_sampler_dimensions_from_julia_hdf5_attributes
     with h5py.File(path, "w") as handle:
         handle["sampler/mhparams"] = np.zeros((2, 3))
         handle["sampler/proposal_covariance"] = np.eye(3)
+        handle["sampler/draw_covariance"] = np.eye(3)
+        handle["sampler/input_proposal_covariance"] = 2.0 * np.eye(3)
+        handle["sampler/accepted"] = np.array([1, 0])
+        handle["sampler/log_posterior"] = np.array([-10.0, -9.5])
+        handle["sampler/proposal_parameters"] = np.zeros((2, 3))
+        handle["sampler/previous_parameters"] = np.ones((2, 3))
+        handle["sampler/proposal_log_posterior"] = np.array([-9.9, -9.4])
+        handle["sampler/previous_log_posterior"] = np.array([-10.1, -9.6])
+        handle["sampler/uniform_draw"] = np.array([0.25, 0.75])
+        handle["sampler/log_acceptance"] = np.array([0.2, -0.2])
         handle.attrs["sampler_parameter_names"] = "alpha,beta,gamma"
 
     labels = load_fixture_labels(oracle)
@@ -298,6 +365,313 @@ def test_load_fixture_labels_reads_sampler_dimensions_from_julia_hdf5_attributes
         0: ("alpha", "beta", "gamma"),
         1: ("alpha", "beta", "gamma"),
     }
+    assert labels["sampler/draw_covariance"] == {
+        0: ("alpha", "beta", "gamma"),
+        1: ("alpha", "beta", "gamma"),
+    }
+    assert labels["sampler/input_proposal_covariance"] == {
+        0: ("alpha", "beta", "gamma"),
+        1: ("alpha", "beta", "gamma"),
+    }
+    assert labels["sampler/accepted"] == {0: ("draw_0", "draw_1")}
+    assert labels["sampler/log_posterior"] == {0: ("draw_0", "draw_1")}
+    assert labels["sampler/proposal_parameters"] == {
+        0: ("draw_0", "draw_1"),
+        1: ("alpha", "beta", "gamma"),
+    }
+    assert labels["sampler/previous_parameters"] == {
+        0: ("draw_0", "draw_1"),
+        1: ("alpha", "beta", "gamma"),
+    }
+    assert labels["sampler/proposal_log_posterior"] == {0: ("draw_0", "draw_1")}
+    assert labels["sampler/previous_log_posterior"] == {0: ("draw_0", "draw_1")}
+    assert labels["sampler/uniform_draw"] == {0: ("draw_0", "draw_1")}
+    assert labels["sampler/log_acceptance"] == {0: ("draw_0", "draw_1")}
+
+
+def test_load_fixture_labels_reads_parameter_first_sampler_dimensions(tmp_path) -> None:
+    h5py = pytest.importorskip("h5py")
+    oracle = tmp_path / "oracle"
+    oracle.mkdir()
+    path = oracle / "m1002_ss10.h5"
+    with h5py.File(path, "w") as handle:
+        handle["sampler/mhparams"] = np.zeros((3, 2))
+        handle["sampler/proposal_covariance"] = np.eye(3)
+        handle.attrs["sampler_parameter_names"] = "alpha,beta,gamma"
+
+    labels = load_fixture_labels(oracle)
+
+    assert labels["sampler/mhparams"] == {
+        0: ("alpha", "beta", "gamma"),
+        1: ("draw_0", "draw_1"),
+    }
+
+
+def test_summarize_sampler_fixture_reads_julia_hdf5_sampler_metadata(tmp_path) -> None:
+    h5py = pytest.importorskip("h5py")
+    oracle = tmp_path / "oracle"
+    oracle.mkdir()
+    path = oracle / "m1002_ss10_sampler_smoke.h5"
+    covariance = np.diag([1.0, 4.0, 9.0])
+    with h5py.File(path, "w") as handle:
+        handle["sampler/mhparams"] = np.array(
+            [
+                [0.1, 0.2],
+                [1.1, 1.2],
+                [2.1, 2.2],
+            ],
+            dtype=np.float64,
+        )
+        handle["sampler/proposal_covariance"] = covariance
+        handle["sampler/draw_covariance"] = covariance
+        handle["sampler/input_proposal_covariance"] = 1.0e-8 * np.eye(3)
+        handle["sampler/accepted"] = np.array([1, 0], dtype=np.int8)
+        handle["sampler/log_posterior"] = np.array([-12.0, -10.0], dtype=np.float64)
+        handle["sampler/proposal_parameters"] = np.array(
+            [
+                [0.15, 0.25],
+                [1.15, 1.25],
+                [2.15, 2.25],
+            ],
+            dtype=np.float64,
+        )
+        handle["sampler/previous_parameters"] = np.array(
+            [
+                [0.05, 0.15],
+                [1.05, 1.15],
+                [2.05, 2.15],
+            ],
+            dtype=np.float64,
+        )
+        handle["sampler/proposal_log_posterior"] = np.array([-11.5, -9.5])
+        handle["sampler/previous_log_posterior"] = np.array([-12.5, -10.5])
+        handle["sampler/uniform_draw"] = np.array([0.25, 0.75])
+        handle["sampler/log_acceptance"] = np.array([1.0, -1.0])
+        handle.attrs["sampler_parameter_names"] = "alpha,beta,gamma"
+        handle.attrs["sampler_draws"] = "2"
+        handle.attrs["sampler_burnin"] = 0
+        handle.attrs["sampler_proposal_scale"] = "1.0e-8"
+        handle.attrs["sampler_covariance_source"] = "saved_draw_covariance"
+        handle.attrs["sampler_trace_available"] = "true"
+        handle.attrs["sampler_proposal_trace_available"] = "true"
+        handle.attrs["sampler_acceptance_rate"] = "0.5"
+        handle.attrs["sampler_block_acceptance_rates"] = "0.5"
+        handle.attrs["sampler_input_proposal_covariance_available"] = "true"
+        handle.attrs["sampler_seed"] = 123
+
+    summary = summarize_sampler_fixture(oracle)
+
+    assert summary.fixture_path == path
+    assert summary.parameter_names == ("alpha", "beta", "gamma")
+    assert summary.mhparams_shape == (3, 2)
+    assert summary.parameter_axis == 0
+    assert summary.draw_axis == 1
+    assert summary.draws == 2
+    assert summary.parameter_count == 3
+    assert summary.covariance_shape == (3, 3)
+    assert summary.covariance_source == "saved_draw_covariance"
+    assert summary.covariance_min_eigenvalue == 1.0
+    assert summary.covariance_max_eigenvalue == 9.0
+    assert summary.covariance_condition_number == 9.0
+    assert summary.covariance_positive_semidefinite is True
+    assert summary.input_proposal_covariance_available is True
+    assert summary.trace_available is True
+    assert summary.accepted_shape == (2,)
+    assert summary.log_posterior_shape == (2,)
+    assert summary.accepted_draws == 1
+    assert summary.realized_acceptance_rate == 0.5
+    assert summary.log_posterior_mean == -11.0
+    assert summary.log_posterior_minimum == -12.0
+    assert summary.log_posterior_maximum == -10.0
+    assert summary.proposal_trace_available is True
+    assert summary.proposal_parameters_shape == (3, 2)
+    assert summary.previous_parameters_shape == (3, 2)
+    assert summary.proposal_log_posterior_shape == (2,)
+    assert summary.previous_log_posterior_shape == (2,)
+    assert summary.uniform_draw_shape == (2,)
+    assert summary.log_acceptance_shape == (2,)
+    assert summary.proposal_log_posterior_minimum == -11.5
+    assert summary.proposal_log_posterior_maximum == -9.5
+    assert summary.log_acceptance_minimum == -1.0
+    assert summary.log_acceptance_maximum == 1.0
+    assert summary.metadata["draws"] == 2
+    assert summary.metadata["burnin"] == 0
+    assert summary.metadata["proposal_scale"] == 1.0e-8
+    assert summary.metadata["trace_available"] is True
+    assert summary.metadata["proposal_trace_available"] is True
+    assert summary.metadata["acceptance_rate"] == 0.5
+    assert summary.metadata["block_acceptance_rates"] == 0.5
+    assert summary.metadata["seed"] == 123
+    assert summary.unavailable_diagnostics == ()
+    assert summary.unavailable_proposal_diagnostics == ()
+
+    payload = summary.to_dict()
+    assert payload["fixture_path"] == str(path)
+    assert payload["mhparams_shape"] == [3, 2]
+    assert payload["covariance_shape"] == [3, 3]
+    assert payload["accepted_shape"] == [2]
+    assert payload["log_posterior_shape"] == [2]
+    assert payload["proposal_trace_available"] is True
+    assert payload["proposal_parameters_shape"] == [3, 2]
+    assert payload["uniform_draw_shape"] == [2]
+    assert payload["unavailable_diagnostics"] == []
+    assert payload["unavailable_proposal_diagnostics"] == []
+
+
+def test_summarize_sampler_fixture_rejects_ambiguous_square_draws(tmp_path) -> None:
+    h5py = pytest.importorskip("h5py")
+    oracle = tmp_path / "oracle"
+    oracle.mkdir()
+    path = oracle / "ambiguous_sampler.h5"
+    with h5py.File(path, "w") as handle:
+        handle["sampler/mhparams"] = np.eye(2)
+        handle["sampler/proposal_covariance"] = np.eye(2)
+        handle.attrs["sampler_parameter_names"] = "alpha,beta"
+
+    with pytest.raises(ValueError, match="orientation is ambiguous"):
+        summarize_sampler_fixture(path)
+
+
+def test_summarize_sampler_fixture_reports_missing_trace_diagnostics(tmp_path) -> None:
+    h5py = pytest.importorskip("h5py")
+    path = tmp_path / "sampler.h5"
+    with h5py.File(path, "w") as handle:
+        handle["sampler/mhparams"] = np.zeros((2, 3))
+        handle["sampler/proposal_covariance"] = np.eye(2)
+        handle.attrs["sampler_parameter_names"] = "alpha,beta"
+        handle.attrs["sampler_draws"] = 3
+
+    summary = summarize_sampler_fixture(path)
+
+    assert summary.trace_available is False
+    assert summary.accepted_shape is None
+    assert summary.log_posterior_shape is None
+    assert summary.proposal_trace_available is False
+    assert summary.unavailable_diagnostics == ("accepted", "log_posterior")
+    assert summary.unavailable_proposal_diagnostics == (
+        "proposal_parameters",
+        "previous_parameters",
+        "proposal_log_posterior",
+        "previous_log_posterior",
+        "uniform_draw",
+        "log_acceptance",
+    )
+
+
+def test_load_sampler_fixture_result_converts_julia_trace_to_sampler_result(tmp_path) -> None:
+    path = _write_sampler_trace_hdf5(tmp_path)
+
+    result = load_sampler_fixture_result(path)
+
+    assert result.parameter_names == ("alpha", "beta")
+    assert result.parameter_draws.shape == (3, 2)
+    np.testing.assert_allclose(
+        result.parameter_draws,
+        np.array([[0.1, 0.2], [1.1, 1.2], [2.1, 2.2]]),
+    )
+    np.testing.assert_allclose(result.estimation_draws, result.parameter_draws)
+    np.testing.assert_array_equal(result.accepted, np.array([True, False, True]))
+    np.testing.assert_allclose(result.log_posterior, np.array([-3.0, -2.5, -2.0]))
+    np.testing.assert_allclose(result.proposal_covariance, np.diag([0.5, 2.0]))
+    assert result.acceptance_rate == 2 / 3
+    assert result.seed == 123
+    assert result.burnin == 0
+    assert result.n_blocks == 1
+    assert result.n_param_blocks == 1
+    assert result.mhthin == 1
+    assert result.proposal_scale == 1.0e-8
+
+
+def test_compare_sampler_results_passes_matching_julia_trace_and_python_archive(
+    tmp_path,
+) -> None:
+    oracle_path = _write_sampler_trace_hdf5(tmp_path)
+    oracle_result = load_sampler_fixture_result(oracle_path)
+    candidate_path = save_sampler_result(oracle_result, tmp_path / "candidate_sampler.npz")
+
+    report = compare_sampler_results(
+        oracle_path,
+        candidate_path,
+        oracle_result=oracle_result,
+        candidate_result=oracle_result,
+        windows=2,
+    )
+
+    assert report.passed
+    assert {item.name for item in report.comparisons} == {
+        "parameter_draws",
+        "log_posterior",
+        "accepted",
+        "proposal_covariance",
+        "diagnostics/core",
+        "diagnostics/acceptance_windows",
+        "diagnostics/parameters",
+    }
+    payload = report.to_dict()
+    assert payload["oracle_sampler"] == str(oracle_path)
+    assert payload["candidate_sampler"] == str(candidate_path)
+    assert payload["passed"] is True
+
+
+def test_check_sampler_proposal_trace_replays_acceptance_bookkeeping(
+    tmp_path,
+) -> None:
+    oracle_path = _write_sampler_trace_hdf5(tmp_path)
+
+    report = check_sampler_proposal_trace(oracle_path)
+
+    assert report.passed
+    assert {item.name for item in report.comparisons} == {
+        "proposal_trace/log_acceptance",
+        "proposal_trace/accepted",
+        "proposal_trace/retained_log_posterior",
+        "proposal_trace/retained_parameters",
+    }
+    payload = report.to_dict()
+    assert payload["sampler_path"] == str(oracle_path)
+    assert payload["passed"] is True
+
+
+def test_check_sampler_proposal_trace_reports_failed_identity(
+    tmp_path,
+) -> None:
+    h5py = pytest.importorskip("h5py")
+    oracle_path = _write_sampler_trace_hdf5(tmp_path)
+    with h5py.File(oracle_path, "r+") as handle:
+        handle["sampler/log_acceptance"][1] = -0.01
+
+    report = check_sampler_proposal_trace(oracle_path)
+
+    assert not report.passed
+    statuses = {item.name: item.status for item in report.comparisons}
+    assert statuses["proposal_trace/log_acceptance"] == "failed"
+    assert statuses["proposal_trace/accepted"] == "failed"
+
+
+def test_replay_sampler_proposal_posteriors_matches_saved_trace(
+    tmp_path,
+) -> None:
+    model = Model1002()
+    observations = np.zeros((1, len(model.observables)))
+    oracle_path = _write_sampler_posterior_replay_hdf5(tmp_path, model, observations)
+
+    report = replay_sampler_proposal_posteriors(model, observations, oracle_path)
+
+    assert report.passed
+    assert report.draws == 2
+    assert report.parameter_count == len(model.parameters)
+    assert {item.name for item in report.comparisons} == {
+        "proposal_trace/proposal_log_posterior",
+        "proposal_trace/previous_log_posterior",
+        "proposal_trace/log_acceptance_from_replay",
+        "proposal_trace/proposal_log_likelihood",
+        "proposal_trace/previous_log_likelihood",
+        "proposal_trace/proposal_log_prior",
+        "proposal_trace/previous_log_prior",
+    }
+    payload = report.to_dict()
+    assert payload["sampler_path"] == str(oracle_path)
+    assert payload["passed"] is True
 
 
 def test_check_fixture_coverage_reports_missing_required_arrays(tmp_path) -> None:
@@ -329,6 +703,30 @@ def test_check_fixture_coverage_passes_complete_sampler_profile(tmp_path) -> Non
     _write_required_arrays(oracle, required_fixture_arrays("sampler"))
 
     report = check_fixture_coverage(oracle, profile="sampler")
+
+    assert report.passed
+    assert report.missing == ()
+
+
+def test_check_fixture_coverage_passes_complete_sampler_trace_profile(tmp_path) -> None:
+    oracle = tmp_path / "oracle"
+    oracle.mkdir()
+    _write_required_arrays(oracle, required_fixture_arrays("sampler-trace"))
+
+    report = check_fixture_coverage(oracle, profile="sampler-trace")
+
+    assert report.passed
+    assert report.missing == ()
+
+
+def test_check_fixture_coverage_passes_complete_sampler_proposal_trace_profile(
+    tmp_path,
+) -> None:
+    oracle = tmp_path / "oracle"
+    oracle.mkdir()
+    _write_required_arrays(oracle, required_fixture_arrays("sampler-proposal-trace"))
+
+    report = check_fixture_coverage(oracle, profile="sampler-proposal-trace")
 
     assert report.passed
     assert report.missing == ()
@@ -1286,6 +1684,18 @@ def test_julia_oracle_export_script_includes_sampler_flags() -> None:
     assert '"sampler-target-accept"' in script
     assert '"sampler-cc"' in script
     assert '"sampler-alpha"' in script
+    assert '"sampler-reoptimize"' in script
+    assert '"sampler-run-csminwel"' in script
+    assert '"sampler-proposal-scale"' in script
+    assert '"sampler-mode-in"' in script
+    assert '"sampler-hessian-in"' in script
+    assert 'Symbol("mh_", string(Char(0x03b1)))' in script
+    assert '"sampler/proposal_parameters"' in script
+    assert '"sampler/previous_parameters"' in script
+    assert '"sampler/proposal_log_posterior"' in script
+    assert '"sampler/previous_log_posterior"' in script
+    assert '"sampler/uniform_draw"' in script
+    assert '"sampler/log_acceptance"' in script
 
 
 def test_vv_export_matrices_cli_records_oracle_matching_settings(tmp_path) -> None:
@@ -2212,6 +2622,125 @@ def _write_observable_csv(tmp_path: Path, *, periods: int) -> Path:
 
 def _pre_forecast_quarters(periods: int) -> list[str]:
     return [f"2018-Q{quarter}" for quarter in range(4 - periods, 4)]
+
+
+def _write_sampler_trace_hdf5(tmp_path: Path) -> Path:
+    h5py = pytest.importorskip("h5py")
+    path = tmp_path / "sampler_trace.h5"
+    mhparams = np.array(
+        [[0.1, 1.1, 2.1], [0.2, 1.2, 2.2]],
+        dtype=np.float64,
+    )
+    proposal_parameters = np.array(
+        [[0.1, 1.3, 2.1], [0.2, 1.4, 2.2]],
+        dtype=np.float64,
+    )
+    previous_parameters = np.array(
+        [[0.0, 1.1, 2.0], [0.1, 1.2, 2.1]],
+        dtype=np.float64,
+    )
+    proposal_log_posterior = np.array([-3.0, -3.2, -2.0], dtype=np.float64)
+    previous_log_posterior = np.array([-3.4, -2.5, -2.2], dtype=np.float64)
+    log_acceptance = proposal_log_posterior - previous_log_posterior
+    with h5py.File(path, "w") as handle:
+        handle["sampler/mhparams"] = mhparams
+        handle["sampler/proposal_covariance"] = np.diag([0.5, 2.0])
+        handle["sampler/accepted"] = np.array([1, 0, 1], dtype=np.int8)
+        handle["sampler/log_posterior"] = np.array([-3.0, -2.5, -2.0])
+        handle["sampler/proposal_parameters"] = proposal_parameters
+        handle["sampler/previous_parameters"] = previous_parameters
+        handle["sampler/proposal_log_posterior"] = proposal_log_posterior
+        handle["sampler/previous_log_posterior"] = previous_log_posterior
+        handle["sampler/uniform_draw"] = np.array([0.2, 0.8, 0.9], dtype=np.float64)
+        handle["sampler/log_acceptance"] = log_acceptance
+        handle.attrs["sampler_parameter_names"] = "alpha,beta"
+        handle.attrs["sampler_draws"] = 3
+        handle.attrs["sampler_blocks"] = 1
+        handle.attrs["sampler_param_blocks"] = 1
+        handle.attrs["sampler_thin"] = 1
+        handle.attrs["sampler_burnin"] = 0
+        handle.attrs["sampler_proposal_scale"] = "1.0e-8"
+        handle.attrs["sampler_acceptance_rate"] = "0.6666666666666666"
+        handle.attrs["sampler_trace_available"] = "true"
+        handle.attrs["sampler_proposal_trace_available"] = "true"
+        handle.attrs["sampler_seed"] = 123
+    return path
+
+
+def _write_sampler_posterior_replay_hdf5(
+    tmp_path: Path,
+    model: Model1002,
+    observations: np.ndarray,
+) -> Path:
+    h5py = pytest.importorskip("h5py")
+    path = tmp_path / "sampler_posterior_replay.h5"
+    parameter_names = tuple(model.parameters)
+    current_values = np.asarray(
+        [parameter.value for parameter in model.parameters.values()],
+        dtype=np.float64,
+    )
+    proposal_draws = np.vstack([current_values, current_values])
+    previous_draws = np.vstack([current_values, current_values])
+    fixed_index = next(
+        index for index, parameter in enumerate(model.parameters.values()) if parameter.fixed
+    )
+    proposal_draws[0, fixed_index] += 1.0e-3
+    proposal_components = np.asarray(
+        [
+            evaluate_log_posterior_for_parameter_values(
+                model,
+                observations,
+                parameter_names,
+                draw,
+                update_fixed_parameters=False,
+            )[:3]
+            for draw in proposal_draws
+        ],
+        dtype=np.float64,
+    )
+    previous_components = np.asarray(
+        [
+            evaluate_log_posterior_for_parameter_values(
+                model,
+                observations,
+                parameter_names,
+                draw,
+                update_fixed_parameters=False,
+            )[:3]
+            for draw in previous_draws
+        ],
+        dtype=np.float64,
+    )
+    proposal_log_posterior = proposal_components[:, 0]
+    proposal_log_likelihood = proposal_components[:, 1]
+    proposal_log_prior = proposal_components[:, 2]
+    previous_log_posterior = previous_components[:, 0]
+    previous_log_likelihood = previous_components[:, 1]
+    previous_log_prior = previous_components[:, 2]
+    with h5py.File(path, "w") as handle:
+        handle["sampler/mhparams"] = proposal_draws.T
+        handle["sampler/proposal_covariance"] = np.eye(len(parameter_names), dtype=np.float64)
+        handle["sampler/accepted"] = np.array([1, 1], dtype=np.int8)
+        handle["sampler/log_posterior"] = proposal_log_posterior
+        handle["sampler/proposal_parameters"] = proposal_draws.T
+        handle["sampler/previous_parameters"] = previous_draws.T
+        handle["sampler/proposal_log_posterior"] = proposal_log_posterior
+        handle["sampler/previous_log_posterior"] = previous_log_posterior
+        handle["sampler/proposal_log_likelihood"] = proposal_log_likelihood
+        handle["sampler/previous_log_likelihood"] = previous_log_likelihood
+        handle["sampler/proposal_log_prior"] = proposal_log_prior
+        handle["sampler/previous_log_prior"] = previous_log_prior
+        handle["sampler/uniform_draw"] = np.array([0.2, 0.3], dtype=np.float64)
+        handle["sampler/log_acceptance"] = proposal_log_posterior - previous_log_posterior
+        handle.attrs["sampler_parameter_names"] = ",".join(parameter_names)
+        handle.attrs["sampler_draws"] = 2
+        handle.attrs["sampler_blocks"] = 1
+        handle.attrs["sampler_param_blocks"] = 1
+        handle.attrs["sampler_thin"] = 1
+        handle.attrs["sampler_burnin"] = 0
+        handle.attrs["sampler_trace_available"] = "true"
+        handle.attrs["sampler_proposal_trace_available"] = "true"
+    return path
 
 
 def _write_sampler_archive(tmp_path: Path) -> Path:
