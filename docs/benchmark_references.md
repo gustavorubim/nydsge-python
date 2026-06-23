@@ -14,6 +14,8 @@ Current workflow tools:
 - `scripts/compare_benchmark_reports.py` compares captured reports across
   machines.
 
+Only this capture/report/compare set is part of the active workflow.
+
 Current real-machine baseline status:
 
 - `windows-cpu`, `macos-cpu`, `linux-cpu`: captured when available from each target machine.
