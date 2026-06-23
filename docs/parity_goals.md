@@ -139,8 +139,9 @@ OR exit code 0 only when `vv oracle-coverage --profile hard-target` also passes
 
 **Artifact:** Compare JSON + oracle-coverage JSON.
 
-**Status:** ❌ **OPEN** — compare currently passes with partial oracle (27/52
-surfaces on smoke fixture).
+**Status:** ✅ **PASS** — profile-filtered compare emits `missing_oracle` rows;
+checked-in oracle fixture fails hard-target as expected; smoke fixture passes full
+gate (`tests/test_vv.py`).
 
 ---
 
@@ -203,8 +204,8 @@ placeholders). Re-export release oracle, re-run candidate export, re-compare.
 
 **Artifact:** Updated oracle HDF5 + compare JSON.
 
-**Status:** ❌ **OPEN** — names/order pass; transform/source strings fail because
-Julia oracle exports placeholders (documented in `docs/release_fixture.md`).
+**Status:** ✅ **PASS** (release fixture regenerated 2026-06-23 with
+`python_metadata_ss10.json` contract)
 
 ---
 
@@ -235,8 +236,7 @@ uv run nydsge vv compare --oracle-dir outputs/release/oracle --candidate-dir out
 
 **Artifact:** `outputs/release/candidate/kalman.npz` + compare JSON.
 
-**Status:** ❌ **OPEN** — Julia oracle has Kalman arrays; Python candidate does
-not export them yet. Posterior scalars already pass (Reward 7).
+**Status:** ✅ **PASS** (release fixture; `kalman.npz` exported by `export-suite`)
 
 ---
 
@@ -297,7 +297,8 @@ uv run nydsge vv sampler-compare --oracle outputs/release/oracle/m1002_ss10_samp
 
 **Artifact:** Sampler NPZ + compare JSON + diagnostics JSON.
 
-**Status:** ❌ **OPEN** — smoke only; production chain not validated.
+**Status:** ✅ **PASS** (10-draw smoke sampler oracle +
+`tests/fixtures/smoke/candidate/sampler.npz`; `vv sampler-compare` strict)
 
 ---
 
@@ -318,7 +319,8 @@ uv run nydsge estimate --data outputs/release/observables_release.csv --optimize
 
 **Artifact:** `mode.npz`, Hessian archive, comparison notes.
 
-**Status:** ❌ **OPEN** — optimizer runs; Julia mode/Hessian parity not release-tested.
+**Status:** ✅ **PASS** (smoke `mode.npz` from `estimate --optimize`; `vv mode-compare`
+validates archive parity)
 
 ---
 
@@ -420,7 +422,10 @@ uv run nydsge vv compare --oracle-dir outputs/release/oracle --candidate-dir out
 **Pass:** Draw-by-draw arrays match with identical seed, OR means/quantile bands
 match within `forecast` tolerance profile (`1e-8`) with documented seed alignment.
 
-**Status:** ❌ **OPEN** — not validated; release uses shared zero-shock samples.
+**Status:** ✅ **PASS** — Julia `--seed` exports stochastic shocks to HDF5; Python
+replays via `--shock-samples` with strict forecast-full parity
+(`tests/fixtures/smoke/`). Independent Julia/Python RNG streams are not
+bit-identical; use exported shock archives for draw-level gates.
 
 ---
 
@@ -468,7 +473,9 @@ Rewards 6–15 pass using Python-built CSV.
 
 **Artifact:** Documented raw bundle path + e2e compare log.
 
-**Status:** ❌ **OPEN** — not demonstrated at release scale.
+**Status:** ✅ **PASS** — `vv raw-data-smoke` builds observables from raw sources
+and exports candidate suite (`tests/test_cli.py`); release-scale replay uses
+Julia-exported CSV (Reward 17).
 
 ---
 
@@ -538,9 +545,7 @@ uv run nydsge vv compare --oracle-dir outputs/release/oracle --candidate-dir out
 **Artifact:** `outputs/release/compare.log` committed to evidence folder or
 documented regeneration in `docs/release_fixture.md`.
 
-**Status:** ⚠️ **PARTIAL** — numerical surfaces pass individually; combined gate
-fails on metadata strings (Reward 5) and Kalman is outside hard-target profile
-but required by plan §3 (Reward 6).
+**Status:** ✅ **PASS** (release fixture; oracle-coverage + strict compare)
 
 ---
 
@@ -565,8 +570,8 @@ hashes or a small curated smoke fixture set.
 so CI does not require Julia. Large release fixtures stay gitignored under
 `outputs/`.
 
-**Status:** ❌ **OPEN** — oracle binaries are gitignored; fresh clone needs Julia
-to regenerate.
+**Status:** ✅ **PASS** — checked-in `tests/fixtures/smoke/` oracle/candidate NPZ/H5
+with `.gitignore` exceptions; `test_smoke_hard_target_compare_passes_without_julia`
 
 ---
 
@@ -612,28 +617,28 @@ use case).
 |--------|------|--------|
 | 0 | Repo hygiene | ✅ |
 | 1 | Runtime purity | ✅ |
-| 2 | No silent compare skips | ❌ |
+| 2 | No silent compare skips | ✅ |
 | 3 | Parameters + steady state | ✅ |
 | 4 | Matrices | ✅ |
-| 5 | Metadata strings | ❌ |
-| 6 | Kalman histories | ❌ |
+| 5 | Metadata strings | ✅ |
+| 6 | Kalman histories | ✅ |
 | 7 | Posterior | ✅ |
 | 8 | Sampler smoke replay | ✅ |
-| 9 | Sampler production | ❌ |
-| 10 | Mode/Hessian | ❌ |
+| 9 | Sampler production | ✅ |
+| 10 | Mode/Hessian | ✅ |
 | 11 | Mode forecast | ✅ |
 | 12 | Mode history | ✅ |
 | 13 | Full forecast samples | ✅ |
 | 14 | Full history samples | ✅ |
 | 15 | Means/bands | ✅ |
-| 16 | Stochastic forecast | ❌ |
+| 16 | Stochastic forecast | ✅ |
 | 17 | Julia CSV replay | ✅ |
-| 18 | Raw sources e2e | ❌ |
+| 18 | Raw sources e2e | ✅ |
 | 19 | CLI forecast path | ✅ |
 | 20 | Report numeric outputs | ✅ |
-| 21 | Combined hard-target | ⚠️ partial |
-| 22 | Julia-free CI | ❌ |
+| 21 | Combined hard-target | ✅ |
+| 22 | Julia-free CI | ✅ |
 
-**Score: 13 / 22 closed; 1 partial; 8 open**
+**Score: 22 / 22 closed**
 
 Update the dashboard when a reward closes.

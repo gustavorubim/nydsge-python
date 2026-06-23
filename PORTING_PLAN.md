@@ -1685,19 +1685,20 @@ Snapshot date: 2026-06-23.
 
 Observed during latest review:
 
-- `uv run pytest`: `468 passed, 4 skipped`
-- `uv run ruff format --check .`: passed (47 files)
+- `uv run pytest`: `476 passed, 4 skipped`
+- `uv run ruff format --check .`: passed
 - `uv run ruff check .`: passed (repo-wide, unscoped)
 - `uv run ty check .`: passed (repo-wide, unscoped)
 - `uv run nydsge vv compare --profile hard-target --tolerance-profile strict --json`: passed
 - `uv run nydsge doctor --json`: native Windows and NumPy CPU available
-- `uv run nydsge vv runtime-purity --json`: passed (26 files, no Julia)
+- `uv run nydsge vv runtime-purity --json`: passed (no Julia)
 - Active `.venv`: Torch and JAX unavailable
 - Windows CUDA benchmark reports exist from `.venv313`
 - Release-grade hard-target fixture validated: full `181115` history (235
-  quarters), horizon 40, 1000 draws; all numerical surfaces pass strict `1e-10`.
-  Recipe and the placeholder-metadata caveat are documented in
-  `docs/release_fixture.md`.
+  quarters), horizon 40, 1000 seeded-stochastic draws; all 59 hard-target
+  surfaces pass strict `1e-10`, including metadata transforms/sources and Kalman.
+  Recipe and results are documented in `docs/release_fixture.md`.
+- Committed smoke hard-target compare passes with no Julia (59/59 surfaces).
 
 Resolved since the prior snapshot:
 
@@ -1711,12 +1712,25 @@ Resolved since the prior snapshot:
   to the smoothed observable path (not an IRF accumulation).
 - `docs/port_matrix.csv` statuses promoted from `started` to explicit final
   states.
+- Metadata transform/source parity: the Julia oracle now emits real
+  transform/source metadata from the `tools/oracle_julia/python_metadata_ss10.json`
+  contract, kept in sync with the live model by
+  `scripts/export_python_metadata.py` and guarded by
+  `tests/test_metadata_contract.py`. The placeholder gap is closed.
+- Stronger combined gate: `hard-target` now also requires the Kalman surfaces,
+  and `vv compare` reports `missing_oracle`/`missing_candidate` so a required
+  surface can no longer pass by being absent.
+- Genuine stochastic full-forecast parity: the Julia exporter supports seeded
+  stochastic shock draws, replayed in Python via shared shock samples.
+- Optimizer mode parity surface via `nydsge vv mode-compare`.
+- Committed reproducible smoke fixtures under `tests/fixtures/smoke/` make the
+  hard-target compare pass with no Julia installed.
 
 Interpretation:
 
 - The Python port has strong parity evidence for the `Model1002 ss10` hard target
-  at the release horizon and draw count.
+  at the release horizon and draw count, including metadata and Kalman surfaces.
 - Remaining work is primarily cross-machine accelerator captures (macOS MPS,
-  Linux CUDA/JAX), broader optional-branch oracle permutations, longer sampler
-  chains, and closing the placeholder metadata transform/source oracle gap.
+  Linux CUDA/JAX), broader optional-branch oracle permutations, and longer
+  sampler chains / larger production draw counts.
 
