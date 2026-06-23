@@ -14,9 +14,15 @@ Current workflow tools:
 - `scripts/compare_benchmark_reports.py` compares captured reports across
   machines.
 
-Current reference state: real-machine baseline JSON files are still pending for
-Windows CUDA, macOS MPS, and Linux CUDA/JAX. Keep those captures out of the
-source tree until they are intentionally curated under `reports/benchmarks/`.
+Current real-machine baseline status:
+
+- `windows-cpu`, `macos-cpu`, `linux-cpu`: captured when available from each target machine.
+- `windows-cuda`: **pending** on real-machine baseline capture.
+- `macos-mps`: **pending** on real-machine baseline capture.
+- `linux-cuda`: **pending** on real-machine CUDA/JAX baseline capture.
+
+Keep all pending real-machine baselines out of the repository source tree until they
+are intentionally curated under `reports/benchmarks/`.
 
 Example local capture:
 
@@ -133,11 +139,11 @@ The output payload is JSON with:
 - `speedups`: per `(kernel,backend,device,horizon,repeats,dtype)` entries with machine
   elapsed times and speedup ratios.
 
-Check the same matrix on:
+Compare only the currently captured machine set:
 
-- `macos-cpu`, `macos-mps`
-- `linux-cpu`, `linux-cuda`
-- `windows-cpu`, `windows-cuda`
+- `macos-cpu`
+- `linux-cpu`
+- `windows-cpu`
 
 and retain these files under versioned `reports/benchmarks/` locations for
 cross-machine comparisons.
