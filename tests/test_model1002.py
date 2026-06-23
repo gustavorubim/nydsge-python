@@ -686,8 +686,6 @@ def test_model1002_equilibrium_supports_altpolicy_pgap_ngdp_reference_equations(
     canonical = model.equilibrium_matrices()
     eq = model.indexes.equilibrium_conditions
     endo = model.indexes.endogenous_states
-    rho_pgap = math.exp(math.log(0.5) / 8.0)
-
     assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["pgap_t"] - 1] == 1.0
     assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["pi_t"] - 1] == -1.0
     assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["y_t"] - 1] == -1.0

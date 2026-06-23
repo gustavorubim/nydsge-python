@@ -21,3 +21,6 @@ build/
 *.jld
 *.jld2
 tests/fixtures/oracle/*.csv
+# Generated forecast/report run artifacts (figures, npz, scripts) are not source.
+outputs/
+mcps/
