@@ -16,6 +16,12 @@ def pseudo_measurement_matrices_ss10(model: Any, transition: Transition) -> Pseu
     pseudo = model.indexes.pseudo_observables
     n_pseudo = len(pseudo)
     n_states = len(endo) + len(endo_aug)
+    n_pseudo_states = n_states
+    if (
+        model._is_setting_enabled("add_initialize_pgap_ygap_pseudoobs")
+        and int(model.get_setting("n_mon_anticipated_shocks", 0)) == 0
+    ):
+        n_pseudo_states += 4
     ttt = np.asarray(transition.TTT, dtype=np.float64)
     ccc = np.asarray(transition.CCC, dtype=np.float64)
     if ttt.shape != (n_states, n_states):
@@ -25,7 +31,7 @@ def pseudo_measurement_matrices_ss10(model: Any, transition: Transition) -> Pseu
         msg = f"CCC must have shape {(n_states,)} for Model1002 pseudo-measurement."
         raise ValueError(msg)
 
-    zz = np.zeros((n_pseudo, n_states), dtype=np.float64)
+    zz = np.zeros((n_pseudo, n_pseudo_states), dtype=np.float64)
     dd = np.zeros(n_pseudo, dtype=np.float64)
     v = model.numeric_value
 
@@ -40,7 +46,9 @@ def pseudo_measurement_matrices_ss10(model: Any, transition: Transition) -> Pseu
         if row.shape != (n_states,):
             msg = f"Pseudo-measurement row {row_name} must have shape {(n_states,)}."
             raise ValueError(msg)
-        zz[pseudo[row_name] - 1, :] = row
+        extended_row = np.zeros(n_pseudo_states, dtype=np.float64)
+        extended_row[:n_states] = row
+        zz[pseudo[row_name] - 1, :] = extended_row
 
     def set_dd(row_name: str, value: float) -> None:
         dd[pseudo[row_name] - 1] = value
@@ -110,6 +118,12 @@ def pseudo_measurement_matrices_ss10(model: Any, transition: Transition) -> Pseu
     set_dd("LaborProductivityGrowth", trend_growth)
 
     set_zz("u_t", "u_t", 1.0)
+
+    if model._has_pgap_state():
+        set_zz("pgap_t", "pgap_t", 1.0)
+    if model._has_ygap_state():
+        set_zz("ygap_t", "ygap_t", 1.0)
+
     return PseudoMeasurement(ZZ_pseudo=zz, DD_pseudo=dd)
 
 

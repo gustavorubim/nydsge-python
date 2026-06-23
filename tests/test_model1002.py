@@ -154,6 +154,52 @@ def test_model1002_expected_ffr_spd_observables_indexes_and_parameters() -> None
     assert model.parameters["sigma_exp_rm4"].regime == "expected_ffr_spd"
 
 
+def test_model1002_expected_ffr_map_horizons_supports_unioned_observables() -> None:
+    model = Model1002(
+        settings={
+            "expected_ffr": {1: (4, 1), 2: [2], 3: {3}},
+            "n_mon_anticipated_shocks": 0,
+        }
+    )
+
+    assert "obs_exp_nominalrate1" in model.observables
+    assert "obs_exp_nominalrate2" in model.observables
+    assert "obs_exp_nominalrate3" in model.observables
+    assert "obs_exp_nominalrate4" in model.observables
+    assert "e_exp_rm1" in model.indexes.endogenous_states_augmented
+    assert "e_exp_rm2" in model.indexes.endogenous_states_augmented
+    assert "e_exp_rm3" in model.indexes.endogenous_states_augmented
+    assert "e_exp_rm4" in model.indexes.endogenous_states_augmented
+    assert model.parameters["sigma_exp_rm1"].value == 0.04375
+    assert model.parameters["sigma_exp_rm4"].value == 0.0625
+
+
+def test_model1002_expected_ffr_regime_horizon_parameters_preserve_regime_tags() -> None:
+    model = Model1002(
+        settings={
+            "expected_ffr": {"baseline": (4, 1), "shock": [3]},
+            "n_mon_anticipated_shocks": 0,
+        }
+    )
+
+    assert model.parameters["sigma_exp_rm1"].regime == "expected_ffr_spd[baseline]"
+    assert model.parameters["sigma_exp_rm3"].regime == "expected_ffr_spd[shock]"
+    assert model.parameters["sigma_exp_rm4"].regime == "expected_ffr_spd[baseline]"
+
+
+def test_model1002_expected_ffr_regime_horizon_overlaps_preserve_union_tags() -> None:
+    model = Model1002(
+        settings={
+            "expected_ffr": {"baseline": (4, 1), "shock": [3, 1]},
+            "n_mon_anticipated_shocks": 0,
+        }
+    )
+
+    assert model.parameters["sigma_exp_rm1"].regime == "expected_ffr_spd[baseline,shock]"
+    assert model.parameters["sigma_exp_rm3"].regime == "expected_ffr_spd[shock]"
+    assert model.parameters["sigma_exp_rm4"].regime == "expected_ffr_spd[baseline]"
+
+
 def test_model1002_ss104_enables_expected_ffr_spd_horizons() -> None:
     model = Model1002(subspec="ss104")
 
@@ -161,6 +207,64 @@ def test_model1002_ss104_enables_expected_ffr_spd_horizons() -> None:
     assert "obs_exp_nominalrate6" in model.observables
     assert "e_exp_rm6" in model.indexes.endogenous_states_augmented
     assert "exp_rm_sh6" in model.indexes.exogenous_shocks
+
+
+def test_model1002_uses_all_ffr_qs_when_expected_ffr_empty() -> None:
+    model = Model1002(
+        settings={
+            "expected_ffr": (),
+            "all_ffr_qs": [1, 4, 2],
+            "n_mon_anticipated_shocks": 2,
+        }
+    )
+
+    assert model.get_setting("expected_ffr") == ()
+    assert list(model.get_setting("all_ffr_qs")) == [1, 4, 2]
+    assert "obs_exp_nominalrate1" in model.observables
+    assert "obs_exp_nominalrate2" in model.observables
+    assert "obs_exp_nominalrate4" in model.observables
+    assert model.indexes.exogenous_shocks["exp_rm_sh1"] == 21
+
+
+def test_model1002_ss104_builds_system_with_ss10_pipeline() -> None:
+    model = Model1002(subspec="ss104")
+    system = compute_system(model)
+
+    n_states = len(model.indexes.endogenous_states) + len(model.indexes.endogenous_states_augmented)
+    n_exo = len(model.indexes.exogenous_shocks)
+    n_obs = len(model.indexes.observables)
+
+    assert system.transition.TTT.shape == (n_states, n_states)
+    assert system.transition.RRR.shape == (n_states, n_exo)
+    assert system.measurement.ZZ.shape == (n_obs, n_states)
+
+
+def test_model1002_ss104_supports_all_matrix_paths() -> None:
+    model = Model1002(subspec="ss104")
+    n_endo = len(model.indexes.endogenous_states)
+    n_states = len(model.indexes.endogenous_states) + len(model.indexes.endogenous_states_augmented)
+    n_exo = len(model.indexes.exogenous_shocks)
+
+    transition = Transition(
+        TTT=np.eye(n_states),
+        RRR=np.zeros((n_states, n_exo)),
+        CCC=np.zeros(n_states),
+    )
+    pre_augmented_transition = Transition(
+        TTT=np.eye(n_endo),
+        RRR=np.zeros((n_endo, n_exo)),
+        CCC=np.zeros(n_endo),
+    )
+
+    canonical = model.equilibrium_matrices()
+    measurement = model.measurement_matrices(transition)
+    pseudo_measurement = model.pseudo_measurement_matrices(transition)
+    augmented = model.augment_transition(pre_augmented_transition)
+
+    assert canonical.Gamma0.shape == (len(model.indexes.endogenous_states),) * 2
+    assert measurement.ZZ.shape == (len(model.indexes.observables), n_states)
+    assert pseudo_measurement.ZZ_pseudo.shape == (len(model.indexes.pseudo_observables), n_states)
+    assert augmented.TTT.shape == (n_states, n_states)
 
 
 def test_model1002_flexible_ait_initialization_observables_indexes_and_parameters() -> None:
@@ -187,6 +291,73 @@ def test_model1002_flexible_ait_initialization_observables_indexes_and_parameter
     assert model.parameters["sigma_ygap"].regime == "flexible_ait"
 
 
+def test_model1002_flexible_ait_initialization_adds_optional_pseudo_observables() -> None:
+    model = Model1002(
+        settings={
+            "add_initialize_pgap_ygap_pseudoobs": True,
+            "n_mon_anticipated_shocks": 0,
+        }
+    )
+
+    assert len(model.pseudo_observables) == 23
+    assert "pgap_t" in model.pseudo_observables
+    assert "ygap_t" in model.pseudo_observables
+    assert model.indexes.pseudo_observables["pgap_t"] > model.indexes.pseudo_observables["u_t"]
+    assert model.indexes.pseudo_observables["ygap_t"] > model.indexes.pseudo_observables["pgap_t"]
+
+
+def test_model1002_supports_add_pgap_or_ygap_pseudo_observables_without_initialization_flag() -> (
+    None
+):
+    model = Model1002(settings={"add_pgap": True, "n_mon_anticipated_shocks": 0})
+    assert len(model.pseudo_observables) == 23
+    assert "pgap_t" in model.pseudo_observables
+    assert "ygap_t" in model.pseudo_observables
+
+    model = Model1002(settings={"add_ygap": True, "n_mon_anticipated_shocks": 0})
+    assert len(model.pseudo_observables) == 23
+    assert "pgap_t" in model.pseudo_observables
+    assert "ygap_t" in model.pseudo_observables
+
+
+def test_model1002_builds_pseudo_measurement_with_add_pgap_without_initialization_flag() -> None:
+    model = Model1002(settings={"add_pgap": True, "n_mon_anticipated_shocks": 0})
+    n_states = len(model.indexes.endogenous_states) + len(model.indexes.endogenous_states_augmented)
+    transition = Transition(
+        TTT=np.eye(n_states),
+        RRR=np.zeros((n_states, len(model.indexes.exogenous_shocks))),
+        CCC=np.zeros(n_states),
+    )
+
+    pseudo_measurement = model.pseudo_measurement_matrices(transition)
+    pseudo = model.indexes.pseudo_observables
+    endo = model.indexes.endogenous_states
+    zz = pseudo_measurement.ZZ_pseudo
+
+    assert pseudo_measurement.ZZ_pseudo.shape == (23, n_states)
+    assert zz[pseudo["pgap_t"] - 1, endo["pgap_t"] - 1] == 1.0
+    np.testing.assert_allclose(zz[pseudo["ygap_t"] - 1, :], np.zeros(n_states))
+
+
+def test_model1002_builds_pseudo_measurement_with_add_ygap_without_initialization_flag() -> None:
+    model = Model1002(settings={"add_ygap": True, "n_mon_anticipated_shocks": 0})
+    n_states = len(model.indexes.endogenous_states) + len(model.indexes.endogenous_states_augmented)
+    transition = Transition(
+        TTT=np.eye(n_states),
+        RRR=np.zeros((n_states, len(model.indexes.exogenous_shocks))),
+        CCC=np.zeros(n_states),
+    )
+
+    pseudo_measurement = model.pseudo_measurement_matrices(transition)
+    pseudo = model.indexes.pseudo_observables
+    endo = model.indexes.endogenous_states
+    zz = pseudo_measurement.ZZ_pseudo
+
+    assert pseudo_measurement.ZZ_pseudo.shape == (23, n_states)
+    assert zz[pseudo["ygap_t"] - 1, endo["ygap_t"] - 1] == 1.0
+    np.testing.assert_allclose(zz[pseudo["pgap_t"] - 1, :], np.zeros(n_states))
+
+
 def test_model1002_conditional_measurement_error_indexes() -> None:
     model = Model1002(
         settings={
@@ -206,6 +377,86 @@ def test_model1002_conditional_measurement_error_indexes() -> None:
     assert model.parameters["rho_condgdp"].regime == "conditional_forecast"
     assert model.parameters["sigma_gdpexp"].regime == "conditional_forecast"
     assert model.parameters["sigma_condcorepce"].category == "measurement_error"
+
+
+def test_model1002_regime_keyed_flexible_ait_initialization_is_respected() -> None:
+    model = Model1002(
+        settings={
+            "regime_eqcond_info": {2: 1},
+            "add_initialize_pgap_ygap_pseudoobs": {"2": True},
+            "n_mon_anticipated_shocks": 0,
+        }
+    )
+
+    assert len(model.observables) == 15
+    assert "obs_pgap" in model.observables
+    assert "obs_ygap" in model.observables
+    assert len(model.pseudo_observables) == 23
+    assert "pgap_t" in model.pseudo_observables
+    assert "ygap_t" in model.pseudo_observables
+    assert "sigma_pgap" in model.parameters
+    assert "sigma_ygap" in model.parameters
+    assert "e_condgdp_t" not in model.indexes.endogenous_states_augmented
+    assert "condgdp_sh" not in model.indexes.exogenous_shocks
+
+
+def test_model1002_regime_named_keyed_flexible_ait_initialization_is_respected() -> None:
+    model = Model1002(
+        settings={
+            "regime_eqcond_info": {"baseline": 1},
+            "add_initialize_pgap_ygap_pseudoobs": {"baseline": True},
+            "n_mon_anticipated_shocks": 0,
+        }
+    )
+
+    assert len(model.observables) == 15
+    assert "obs_pgap" in model.observables
+    assert "obs_ygap" in model.observables
+    assert len(model.pseudo_observables) == 23
+    assert "pgap_t" in model.pseudo_observables
+    assert "ygap_t" in model.pseudo_observables
+    assert "sigma_pgap" in model.parameters
+    assert "sigma_ygap" in model.parameters
+
+
+def test_model1002_regime_named_keyed_add_pgap_is_respected_without_named_ygap() -> None:
+    model = Model1002(
+        settings={
+            "regime_eqcond_info": {"baseline": 1},
+            "add_pgap": {"baseline": True},
+            "add_ygap": {"shock": True},
+            "n_mon_anticipated_shocks": 0,
+        }
+    )
+
+    assert "pgap_t" in model.indexes.endogenous_states
+    assert "ygap_t" not in model.indexes.endogenous_states
+    assert "pgap_t" in model.pseudo_observables
+    assert "ygap_t" in model.pseudo_observables
+    assert "sigma_pgap" not in model.parameters
+
+
+def test_model1002_regime_keyed_conditional_measurement_error_indexes() -> None:
+    model = Model1002(
+        settings={
+            "regime_eqcond_info": {2: 1},
+            "add_iid_cond_obs_gdp_meas_err": {"2": True},
+            "add_iid_anticipated_obs_gdp_meas_err": {"2": True},
+            "add_iid_cond_obs_corepce_meas_err": {"2": True},
+            "n_mon_anticipated_shocks": 0,
+        }
+    )
+
+    assert len(model.indexes.endogenous_states_augmented) == 19
+    assert "e_condgdp_t" in model.indexes.endogenous_states_augmented
+    assert "e_gdpexp_t" in model.indexes.endogenous_states_augmented
+    assert "e_condcorepce_t" in model.indexes.endogenous_states_augmented
+    assert "condgdp_sh" in model.indexes.exogenous_shocks
+    assert "gdpexp_sh" in model.indexes.exogenous_shocks
+    assert "condcorepce_sh" in model.indexes.exogenous_shocks
+    assert "rho_condgdp" in model.parameters
+    assert "sigma_gdpexp" in model.parameters
+    assert "rho_condcorepce" in model.parameters
 
 
 def test_model1002_ss10_parameter_metadata() -> None:
@@ -346,9 +597,341 @@ def test_model1002_equilibrium_supports_flexible_ait_initialization_states() -> 
     assert canonical.Psi[eq["eq_ygap"] - 1, exo["ygap_sh"] - 1] == 1.0
 
 
+def test_model1002_equilibrium_supports_altpolicy_pgap_ygap_branches() -> None:
+    model = Model1002(
+        settings={
+            "add_altpolicy_pgap": True,
+            "add_altpolicy_ygap": True,
+            "n_mon_anticipated_shocks": 0,
+            "regime_eqcond_info": {1: 1},
+            "pgap_type": "smooth_ait",
+            "ygap_type": "smooth_ait_gdp_alt",
+            "ait_Thalf": 8.0,
+            "gdp_Thalf": 6.0,
+        }
+    )
+
+    canonical = model.equilibrium_matrices()
+    eq = model.indexes.equilibrium_conditions
+    endo = model.indexes.endogenous_states
+
+    rho_pgap = math.exp(math.log(0.5) / 8.0)
+    rho_ygap = math.exp(math.log(0.5) / 6.0)
+
+    assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["pgap_t"] - 1] == 1.0
+    assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["pi_t"] - 1] == -1.0
+    assert math.isclose(canonical.Gamma1[eq["eq_pgap"] - 1, endo["pgap_t"] - 1], rho_pgap)
+    assert canonical.Gamma0[eq["eq_ygap"] - 1, endo["ygap_t"] - 1] == 1.0
+    assert canonical.Gamma0[eq["eq_ygap"] - 1, endo["y_t"] - 1] == -1.0
+    assert canonical.Gamma0[eq["eq_ygap"] - 1, endo["z_t"] - 1] == -1.0
+    assert math.isclose(canonical.Gamma1[eq["eq_ygap"] - 1, endo["ygap_t"] - 1], rho_ygap)
+    assert math.isclose(canonical.Gamma1[eq["eq_ygap"] - 1, endo["y_t"] - 1], -rho_ygap)
+
+
+def test_model1002_equilibrium_supports_altpolicy_pgap_smooth_ait_gdp_alt_reference_equations() -> (
+    None
+):
+    model = Model1002(
+        settings={
+            "add_altpolicy_pgap": True,
+            "n_mon_anticipated_shocks": 0,
+            "regime_eqcond_info": {1: 1},
+            "pgap_type": "smooth_ait_gdp_alt",
+            "ait_Thalf": 8.0,
+        }
+    )
+
+    canonical = model.equilibrium_matrices()
+    eq = model.indexes.equilibrium_conditions
+    endo = model.indexes.endogenous_states
+    rho_pgap = math.exp(math.log(0.5) / 8.0)
+
+    assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["pgap_t"] - 1] == 1.0
+    assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["pi_t"] - 1] == -1.0
+    assert math.isclose(canonical.Gamma1[eq["eq_pgap"] - 1, endo["pgap_t"] - 1], rho_pgap)
+
+
+def test_model1002_equilibrium_supports_altpolicy_ygap_smooth_ait_reference_equations() -> None:
+    model = Model1002(
+        settings={
+            "add_altpolicy_ygap": True,
+            "n_mon_anticipated_shocks": 0,
+            "regime_eqcond_info": {1: 1},
+            "ygap_type": "smooth_ait",
+            "gdp_Thalf": 6.0,
+        }
+    )
+
+    canonical = model.equilibrium_matrices()
+    eq = model.indexes.equilibrium_conditions
+    endo = model.indexes.endogenous_states
+    rho_ygap = math.exp(math.log(0.5) / 6.0)
+
+    assert canonical.Gamma0[eq["eq_ygap"] - 1, endo["ygap_t"] - 1] == 1.0
+    assert canonical.Gamma0[eq["eq_ygap"] - 1, endo["y_t"] - 1] == -1.0
+    assert canonical.Gamma0[eq["eq_ygap"] - 1, endo["z_t"] - 1] == -1.0
+    assert math.isclose(canonical.Gamma1[eq["eq_ygap"] - 1, endo["ygap_t"] - 1], rho_ygap)
+    assert math.isclose(canonical.Gamma1[eq["eq_ygap"] - 1, endo["y_t"] - 1], -rho_ygap)
+
+
+def test_model1002_equilibrium_respects_non_unit_regime_eqcond_keys() -> None:
+    model = Model1002(
+        settings={
+            "add_altpolicy_pgap": True,
+            "add_altpolicy_ygap": True,
+            "n_mon_anticipated_shocks": 0,
+            "regime_eqcond_info": {0: 1, 2: 1},
+            "pgap_type": "smooth_ait",
+            "ygap_type": "smooth_ait_gdp_alt",
+            "ait_Thalf": 8.0,
+            "gdp_Thalf": 6.0,
+        }
+    )
+
+    canonical = model.equilibrium_matrices()
+    eq = model.indexes.equilibrium_conditions
+    endo = model.indexes.endogenous_states
+
+    assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["pgap_t"] - 1] == 1.0
+    assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["pi_t"] - 1] == 0.0
+    assert math.isclose(canonical.Gamma1[eq["eq_pgap"] - 1, endo["pgap_t"] - 1], 0.0)
+
+    assert canonical.Gamma0[eq["eq_ygap"] - 1, endo["ygap_t"] - 1] == 1.0
+    assert canonical.Gamma0[eq["eq_ygap"] - 1, endo["y_t"] - 1] == 0.0
+    assert canonical.Gamma0[eq["eq_ygap"] - 1, endo["z_t"] - 1] == 0.0
+    assert math.isclose(canonical.Gamma1[eq["eq_ygap"] - 1, endo["ygap_t"] - 1], 0.0)
+    assert math.isclose(canonical.Gamma1[eq["eq_ygap"] - 1, endo["y_t"] - 1], 0.0)
+
+
+def test_model1002_equilibrium_supports_altpolicy_pgap_set_pgap1_mixed_regime_selector() -> None:
+    model = Model1002(
+        settings={
+            "add_altpolicy_pgap": {"baseline": True},
+            "n_mon_anticipated_shocks": 0,
+            "regime_eqcond_info": {"baseline": 1},
+            "pgap_type": "smooth_ait",
+            "ait_Thalf": 8.0,
+            "set_pgap1": (["baseline"], 0.25),
+        }
+    )
+
+    canonical = model.equilibrium_matrices()
+    eq = model.indexes.equilibrium_conditions
+    endo = model.indexes.endogenous_states
+    rho_pgap = math.exp(math.log(0.5) / 8.0)
+
+    assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["pi_t"] - 1] == -1.0
+    assert canonical.C[eq["eq_pgap"] - 1] == rho_pgap * 0.25
+    assert math.isclose(canonical.Gamma1[eq["eq_pgap"] - 1, endo["pgap_t"] - 1], 0.0)
+
+
+def test_model1002_equilibrium_supports_add_pgap_rw_reference_equations() -> None:
+    model = Model1002(
+        settings={
+            "add_pgap": True,
+            "n_mon_anticipated_shocks": 0,
+            "regime_eqcond_info": {1: 1},
+            "pgap_type": "rw",
+            "ait_Thalf": 8.0,
+        }
+    )
+
+    canonical = model.equilibrium_matrices()
+    eq = model.indexes.equilibrium_conditions
+    endo = model.indexes.endogenous_states
+    rho_pgap = math.exp(math.log(0.5) / 8.0)
+
+    assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["pgap_t"] - 1] == 1.0
+    assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["pi_t"] - 1] == -1.0
+    assert math.isclose(canonical.Gamma1[eq["eq_pgap"] - 1, endo["pgap_t"] - 1], rho_pgap)
+
+
+def test_model1002_equilibrium_supports_add_pgap_smooth_ait_gdp_alt_reference_equations() -> None:
+    model = Model1002(
+        settings={
+            "add_pgap": True,
+            "n_mon_anticipated_shocks": 0,
+            "regime_eqcond_info": {1: 1},
+            "pgap_type": "smooth_ait_gdp_alt",
+            "ait_Thalf": 8.0,
+        }
+    )
+
+    canonical = model.equilibrium_matrices()
+    eq = model.indexes.equilibrium_conditions
+    endo = model.indexes.endogenous_states
+    rho_pgap = math.exp(math.log(0.5) / 8.0)
+
+    assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["pgap_t"] - 1] == 1.0
+    assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["pi_t"] - 1] == -1.0
+    assert math.isclose(canonical.Gamma1[eq["eq_pgap"] - 1, endo["pgap_t"] - 1], rho_pgap)
+
+
+def test_model1002_equilibrium_supports_add_pgap_flexible_ait_reference_equations() -> None:
+    model = Model1002(
+        settings={
+            "add_pgap": True,
+            "n_mon_anticipated_shocks": 0,
+            "regime_eqcond_info": {1: 1},
+            "pgap_type": "flexible_ait",
+            "ait_Thalf": 8.0,
+        }
+    )
+
+    canonical = model.equilibrium_matrices()
+    eq = model.indexes.equilibrium_conditions
+    endo = model.indexes.endogenous_states
+    rho_pgap = math.exp(math.log(0.5) / 8.0)
+
+    assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["pgap_t"] - 1] == 1.0
+    assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["pi_t"] - 1] == -1.0
+    assert math.isclose(canonical.Gamma1[eq["eq_pgap"] - 1, endo["pgap_t"] - 1], rho_pgap)
+
+
+def test_model1002_equilibrium_supports_add_ygap_rw_reference_equations() -> None:
+    model = Model1002(
+        settings={
+            "add_ygap": True,
+            "n_mon_anticipated_shocks": 0,
+            "regime_eqcond_info": {1: 1},
+            "ygap_type": "rw",
+            "gdp_Thalf": 6.0,
+        }
+    )
+
+    canonical = model.equilibrium_matrices()
+    eq = model.indexes.equilibrium_conditions
+    endo = model.indexes.endogenous_states
+    rho_ygap = math.exp(math.log(0.5) / 6.0)
+
+    assert canonical.Gamma0[eq["eq_ygap"] - 1, endo["ygap_t"] - 1] == 1.0
+    assert canonical.Gamma0[eq["eq_ygap"] - 1, endo["y_t"] - 1] == -1.0
+    assert canonical.Gamma0[eq["eq_ygap"] - 1, endo["z_t"] - 1] == -1.0
+    assert canonical.Gamma0[eq["eq_ygap"] - 1, endo["pi_t"] - 1] == 0.0
+    assert math.isclose(canonical.Gamma1[eq["eq_ygap"] - 1, endo["ygap_t"] - 1], rho_ygap)
+    assert math.isclose(canonical.Gamma1[eq["eq_ygap"] - 1, endo["y_t"] - 1], -rho_ygap)
+
+
+def test_model1002_equilibrium_supports_add_ygap_smooth_ait_reference_equations() -> None:
+    model = Model1002(
+        settings={
+            "add_ygap": True,
+            "n_mon_anticipated_shocks": 0,
+            "regime_eqcond_info": {1: 1},
+            "ygap_type": "smooth_ait",
+            "gdp_Thalf": 6.0,
+        }
+    )
+
+    canonical = model.equilibrium_matrices()
+    eq = model.indexes.equilibrium_conditions
+    endo = model.indexes.endogenous_states
+    rho_ygap = math.exp(math.log(0.5) / 6.0)
+
+    assert canonical.Gamma0[eq["eq_ygap"] - 1, endo["ygap_t"] - 1] == 1.0
+    assert canonical.Gamma0[eq["eq_ygap"] - 1, endo["y_t"] - 1] == -1.0
+    assert canonical.Gamma0[eq["eq_ygap"] - 1, endo["z_t"] - 1] == -1.0
+    assert math.isclose(canonical.Gamma1[eq["eq_ygap"] - 1, endo["ygap_t"] - 1], rho_ygap)
+    assert math.isclose(canonical.Gamma1[eq["eq_ygap"] - 1, endo["y_t"] - 1], -rho_ygap)
+
+
+def test_model1002_equilibrium_supports_add_ygap_flexible_ait_reference_equations() -> None:
+    model = Model1002(
+        settings={
+            "add_ygap": True,
+            "n_mon_anticipated_shocks": 0,
+            "regime_eqcond_info": {1: 1},
+            "ygap_type": "flexible_ait",
+            "gdp_Thalf": 6.0,
+        }
+    )
+
+    canonical = model.equilibrium_matrices()
+    eq = model.indexes.equilibrium_conditions
+    endo = model.indexes.endogenous_states
+    rho_ygap = math.exp(math.log(0.5) / 6.0)
+
+    assert canonical.Gamma0[eq["eq_ygap"] - 1, endo["ygap_t"] - 1] == 1.0
+    assert canonical.Gamma0[eq["eq_ygap"] - 1, endo["y_t"] - 1] == -1.0
+    assert canonical.Gamma0[eq["eq_ygap"] - 1, endo["z_t"] - 1] == -1.0
+    assert math.isclose(canonical.Gamma1[eq["eq_ygap"] - 1, endo["ygap_t"] - 1], rho_ygap)
+    assert math.isclose(canonical.Gamma1[eq["eq_ygap"] - 1, endo["y_t"] - 1], -rho_ygap)
+
+
+def test_model1002_equilibrium_supports_rw_reference_equations() -> None:
+    model = Model1002(
+        settings={
+            "add_rw": True,
+            "add_pgap": True,
+            "add_ygap": True,
+            "add_altpolicy_pgap": True,
+            "add_altpolicy_ygap": True,
+            "n_mon_anticipated_shocks": 0,
+            "regime_eqcond_info": {1: 1},
+            "Rref_type": "smooth_ait",
+            "pgap_type": "smooth_ait",
+            "ygap_type": "smooth_ait_gdp_alt",
+            "rw_rho_smooth": 0.8,
+            "rw_phi_pi": 3.0,
+            "rw_phi_y": 2.0,
+            "ait_Thalf": 8.0,
+            "gdp_Thalf": 6.0,
+        }
+    )
+
+    canonical = model.equilibrium_matrices()
+    eq = model.indexes.equilibrium_conditions
+    endo = model.indexes.endogenous_states
+    c = canonical.C
+    rho_rw = 0.93
+    rho_pgap = math.exp(math.log(0.5) / 8.0)
+    rho_ygap = math.exp(math.log(0.5) / 6.0)
+    rho_smooth = 0.8
+
+    assert canonical.Gamma0[eq["eq_rw"] - 1, endo["rw_t"] - 1] == 1.0
+    assert math.isclose(canonical.Gamma1[eq["eq_rw"] - 1, endo["rw_t"] - 1], rho_rw)
+    assert canonical.Gamma0[eq["eq_Rref"] - 1, endo["Rref_t"] - 1] == 1.0
+    assert math.isclose(canonical.Gamma1[eq["eq_Rref"] - 1, endo["Rref_t"] - 1], rho_smooth)
+    assert math.isclose(
+        c[eq["eq_Rref"] - 1],
+        0.0,
+    )
+    assert math.isclose(
+        canonical.Gamma0[eq["eq_Rref"] - 1, endo["pgap_t"] - 1],
+        -3.0 * (1.0 - rho_pgap) * (1.0 - rho_smooth),
+    )
+    assert math.isclose(
+        canonical.Gamma0[eq["eq_Rref"] - 1, endo["ygap_t"] - 1],
+        -2.0 * (1.0 - rho_ygap) * (1.0 - rho_smooth),
+    )
+
+
+def test_model1002_equilibrium_supports_ait_rm_shock_state() -> None:
+    model = Model1002(
+        settings={
+            "add_ait_rm": True,
+            "add_taylor_rm": True,
+            "n_mon_anticipated_shocks": 0,
+        }
+    )
+
+    canonical = model.equilibrium_matrices()
+    eq = model.indexes.equilibrium_conditions
+    endo = model.indexes.endogenous_states
+    exo = model.indexes.exogenous_shocks
+    value = model.numeric_value
+
+    assert canonical.Gamma0[eq["eq_ait_rm"] - 1, endo["ait_rm_t"] - 1] == 1.0
+    assert math.isclose(
+        canonical.Gamma1[eq["eq_ait_rm"] - 1, endo["ait_rm_t"] - 1], value("rho_ait_rm")
+    )
+    assert canonical.Psi[eq["eq_ait_rm"] - 1, exo["rm_ait_sh"] - 1] == 1.0
+    assert canonical.Gamma0[eq["eq_mp"] - 1, endo["ait_rm_t"] - 1] == -1.0
+
+
 def test_model1002_non_ss10_equilibrium_matrices_are_unported() -> None:
     model = Model1002(subspec="ss59")
-    with pytest.raises(NotPortedError, match="ss10 equilibrium"):
+    with pytest.raises(NotPortedError, match="ss10/ss104 equilibrium"):
         model.equilibrium_matrices()
 
 
@@ -458,6 +1041,149 @@ def test_model1002_measurement_supports_expected_ffr_spd_observables() -> None:
     )
 
 
+def test_model1002_measurement_supports_regime_keyed_expected_ffr_horizons() -> None:
+    model = Model1002(
+        settings={
+            "expected_ffr": {"baseline": (4, 1), "shock": [3]},
+            "n_mon_anticipated_shocks": 0,
+        }
+    )
+    n_states = len(model.indexes.endogenous_states) + len(model.indexes.endogenous_states_augmented)
+    transition = Transition(
+        TTT=0.5 * np.eye(n_states),
+        RRR=np.zeros((n_states, len(model.indexes.exogenous_shocks))),
+        CCC=np.zeros(n_states),
+    )
+
+    measurement = model.measurement_matrices(transition)
+    obs = model.indexes.observables
+    endo_aug = model.indexes.endogenous_states_augmented
+    exo = model.indexes.exogenous_shocks
+    value = model.numeric_value
+
+    assert "obs_exp_nominalrate1" in model.observables
+    assert "obs_exp_nominalrate3" in model.observables
+    assert "obs_exp_nominalrate4" in model.observables
+    assert measurement.ZZ[obs["obs_exp_nominalrate1"] - 1, endo_aug["e_exp_rm1"] - 1] == 1.0
+    assert measurement.ZZ[obs["obs_exp_nominalrate3"] - 1, endo_aug["e_exp_rm3"] - 1] == 1.0
+    assert measurement.ZZ[obs["obs_exp_nominalrate4"] - 1, endo_aug["e_exp_rm4"] - 1] == 1.0
+    assert math.isclose(
+        measurement.QQ[exo["exp_rm_sh1"] - 1, exo["exp_rm_sh1"] - 1],
+        value("sigma_exp_rm1") ** 2,
+    )
+    assert math.isclose(
+        measurement.QQ[exo["exp_rm_sh3"] - 1, exo["exp_rm_sh3"] - 1],
+        value("sigma_exp_rm3") ** 2,
+    )
+
+
+def test_model1002_measurement_supports_all_ffr_qs_fallback_when_expected_ffr_empty() -> None:
+    model = Model1002(
+        settings={
+            "expected_ffr": (),
+            "all_ffr_qs": [4, 2],
+            "n_mon_anticipated_shocks": 0,
+        }
+    )
+    n_states = len(model.indexes.endogenous_states) + len(model.indexes.endogenous_states_augmented)
+    transition = Transition(
+        TTT=0.5 * np.eye(n_states),
+        RRR=np.zeros((n_states, len(model.indexes.exogenous_shocks))),
+        CCC=np.zeros(n_states),
+    )
+
+    measurement = model.measurement_matrices(transition)
+    obs = model.indexes.observables
+    endo_aug = model.indexes.endogenous_states_augmented
+
+    assert "obs_exp_nominalrate4" in model.observables
+    assert "obs_exp_nominalrate2" in model.observables
+    assert measurement.ZZ[obs["obs_exp_nominalrate4"] - 1, endo_aug["e_exp_rm4"] - 1] == 1.0
+    assert measurement.ZZ[obs["obs_exp_nominalrate2"] - 1, endo_aug["e_exp_rm2"] - 1] == 1.0
+    assert "exp_rm_sh4" in model.indexes.exogenous_shocks
+    assert "exp_rm_sh2" in model.indexes.exogenous_shocks
+
+
+def test_model1002_measurement_rejects_invalid_expected_ffr_horizons() -> None:
+    with pytest.raises(ValueError, match="expected_ffr horizons must be positive integers."):
+        Model1002(settings={"expected_ffr": [1, 0, -1]})
+
+    with pytest.raises(TypeError, match="expected_ffr setting must be a sequence"):
+        Model1002(settings={"expected_ffr": "2"})
+
+
+def test_model1002_augmentation_rejects_invalid_expected_ffr_horizons() -> None:
+    with pytest.raises(ValueError, match="expected_ffr horizons must be positive integers."):
+        Model1002(settings={"expected_ffr": [0, 2]})
+
+    with pytest.raises(TypeError, match="expected_ffr setting must be a sequence"):
+        Model1002(settings={"expected_ffr": 2})
+
+    with pytest.raises(ValueError, match="expected_ffr horizons must be positive integers."):
+        Model1002(settings={"expected_ffr": (), "all_ffr_qs": [1, 0, 2]})
+
+    with pytest.raises(TypeError, match="expected_ffr setting must be a sequence"):
+        Model1002(settings={"expected_ffr": (), "all_ffr_qs": "2"})
+
+    with pytest.raises(TypeError, match="expected_ffr setting must be a sequence"):
+        Model1002(settings={"expected_ffr": {1: "2"}})
+
+    with pytest.raises(ValueError, match="expected_ffr horizons must be positive integers."):
+        Model1002(settings={"expected_ffr": {1: [0, 2]}})
+
+
+def test_model1002_augmentation_supports_all_ffr_qs_fallback_when_expected_ffr_empty() -> None:
+    model = Model1002(
+        settings={
+            "expected_ffr": (),
+            "all_ffr_qs": [4, 2],
+        }
+    )
+    n_endo = len(model.indexes.endogenous_states)
+    n_exo = len(model.indexes.exogenous_shocks)
+    transition = Transition(
+        TTT=np.eye(n_endo),
+        RRR=np.zeros((n_endo, n_exo)),
+        CCC=np.zeros(n_endo),
+    )
+
+    augmented = model.augment_transition(transition)
+    endo_aug = model.indexes.endogenous_states_augmented
+    exo = model.indexes.exogenous_shocks
+
+    assert "e_exp_rm4" in model.indexes.endogenous_states_augmented
+    assert "e_exp_rm2" in model.indexes.endogenous_states_augmented
+    assert augmented.RRR[endo_aug["e_exp_rm4"] - 1, exo["exp_rm_sh4"] - 1] == 1.0
+    assert augmented.RRR[endo_aug["e_exp_rm2"] - 1, exo["exp_rm_sh2"] - 1] == 1.0
+
+
+def test_model1002_augmentation_supports_regime_keyed_expected_ffr_horizons() -> None:
+    model = Model1002(
+        settings={
+            "expected_ffr": {"baseline": (4, 1), "shock": [3]},
+            "n_mon_anticipated_shocks": 0,
+        }
+    )
+    n_endo = len(model.indexes.endogenous_states)
+    n_exo = len(model.indexes.exogenous_shocks)
+    transition = Transition(
+        TTT=np.eye(n_endo),
+        RRR=np.zeros((n_endo, n_exo)),
+        CCC=np.zeros(n_endo),
+    )
+
+    augmented = model.augment_transition(transition)
+    endo_aug = model.indexes.endogenous_states_augmented
+    exo = model.indexes.exogenous_shocks
+
+    assert "e_exp_rm1" in model.indexes.endogenous_states_augmented
+    assert "e_exp_rm3" in model.indexes.endogenous_states_augmented
+    assert "e_exp_rm4" in model.indexes.endogenous_states_augmented
+    assert augmented.RRR[endo_aug["e_exp_rm1"] - 1, exo["exp_rm_sh1"] - 1] == 1.0
+    assert augmented.RRR[endo_aug["e_exp_rm3"] - 1, exo["exp_rm_sh3"] - 1] == 1.0
+    assert augmented.RRR[endo_aug["e_exp_rm4"] - 1, exo["exp_rm_sh4"] - 1] == 1.0
+
+
 def test_model1002_measurement_supports_flexible_ait_initialization_observables() -> None:
     model = Model1002(
         settings={
@@ -518,6 +1244,51 @@ def test_model1002_augmentation_supports_conditional_measurement_error_states() 
     assert augmented.TTT.shape == (82, 82)
     assert augmented.RRR.shape == (82, 22)
     assert augmented.RRR[endo_aug["e_exp_rm1"] - 1, exo["exp_rm_sh1"] - 1] == 1.0
+    assert augmented.TTT[endo_aug["e_condgdp_t"] - 1, endo_aug["e_condgdp_t"] - 1] == value(
+        "rho_condgdp"
+    )
+    assert augmented.RRR[endo_aug["e_condgdp_t"] - 1, exo["condgdp_sh"] - 1] == 1.0
+    assert augmented.TTT[endo_aug["e_gdpexp_t"] - 1, endo_aug["e_gdpexp_t"] - 1] == value(
+        "rho_gdpexp"
+    )
+    assert augmented.RRR[endo_aug["e_gdpexp_t"] - 1, exo["gdpexp_sh"] - 1] == 1.0
+    assert augmented.TTT[
+        endo_aug["e_condcorepce_t"] - 1,
+        endo_aug["e_condcorepce_t"] - 1,
+    ] == value("rho_condcorepce")
+    assert augmented.RRR[endo_aug["e_condcorepce_t"] - 1, exo["condcorepce_sh"] - 1] == 1.0
+
+
+def test_model1002_augmentation_supports_named_regime_conditional_measurement_error_states() -> (
+    None
+):
+    model = Model1002(
+        settings={
+            "regime_eqcond_info": {"baseline": 1},
+            "expected_ffr": {"baseline": [2]},
+            "add_iid_cond_obs_gdp_meas_err": {"baseline": True},
+            "add_anticipated_obs_gdp": {"baseline": True},
+            "add_iid_anticipated_obs_gdp_meas_err": {"baseline": True},
+            "add_iid_cond_obs_corepce_meas_err": {"baseline": True},
+            "n_mon_anticipated_shocks": 0,
+        }
+    )
+    n_endo = len(model.indexes.endogenous_states)
+    n_exo = len(model.indexes.exogenous_shocks)
+    transition = Transition(
+        TTT=np.eye(n_endo),
+        RRR=np.zeros((n_endo, n_exo)),
+        CCC=np.zeros(n_endo),
+    )
+
+    augmented = model.augment_transition(transition)
+    endo_aug = model.indexes.endogenous_states_augmented
+    exo = model.indexes.exogenous_shocks
+    value = model.numeric_value
+
+    assert augmented.TTT.shape == (82, 82)
+    assert augmented.RRR.shape == (82, 22)
+    assert augmented.RRR[endo_aug["e_exp_rm2"] - 1, exo["exp_rm_sh2"] - 1] == 1.0
     assert augmented.TTT[endo_aug["e_condgdp_t"] - 1, endo_aug["e_condgdp_t"] - 1] == value(
         "rho_condgdp"
     )
@@ -616,10 +1387,37 @@ def test_model1002_builds_ss10_pseudo_measurement_matrices() -> None:
     )
 
 
+def test_model1002_builds_ss10_pseudo_measurement_matrices_with_flexible_ait_initialization() -> (
+    None
+):
+    model = Model1002(
+        settings={
+            "add_initialize_pgap_ygap_pseudoobs": True,
+            "n_mon_anticipated_shocks": 0,
+        }
+    )
+    n_states = len(model.indexes.endogenous_states) + len(model.indexes.endogenous_states_augmented)
+    transition = Transition(
+        TTT=np.eye(n_states),
+        RRR=np.zeros((n_states, len(model.indexes.exogenous_shocks))),
+        CCC=np.zeros(n_states),
+    )
+
+    pseudo_measurement = model.pseudo_measurement_matrices(transition)
+    pseudo = model.indexes.pseudo_observables
+    endo = model.indexes.endogenous_states
+    zz = pseudo_measurement.ZZ_pseudo
+
+    assert pseudo_measurement.ZZ_pseudo.shape == (23, 84)
+    assert pseudo_measurement.DD_pseudo.shape == (23,)
+    assert zz[pseudo["pgap_t"] - 1, endo["pgap_t"] - 1] == 1.0
+    assert zz[pseudo["ygap_t"] - 1, endo["ygap_t"] - 1] == 1.0
+
+
 def test_model1002_non_ss10_measurement_matrices_are_unported() -> None:
     model = Model1002(subspec="ss59")
     transition = Transition(TTT=np.eye(1), RRR=np.zeros((1, 1)), CCC=np.zeros(1))
-    with pytest.raises(NotPortedError, match="ss10 measurement"):
+    with pytest.raises(NotPortedError, match="ss10/ss104 measurement"):
         model.measurement_matrices(transition)
 
 

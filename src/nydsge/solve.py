@@ -447,7 +447,7 @@ def compute_system(
     method: CanonicalSolveMethod = "auto",
 ) -> System:
     del tvis, verbose
-    if model.spec == "m1002" and model.subspec == "ss10":
+    if model.spec == "m1002" and model.subspec in {"ss10", "ss104"}:
         model1002 = cast(Any, model)
         canonical = model1002.equilibrium_matrices()
         solved = solve_canonical(canonical, method=method)

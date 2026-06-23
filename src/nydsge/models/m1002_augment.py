@@ -4,6 +4,7 @@ from typing import Any
 
 import numpy as np
 
+from nydsge.models.expected_ffr import parse_expected_ffr_horizons
 from nydsge.solve import Transition
 
 
@@ -68,11 +69,11 @@ def augment_transition_ss10(model: Any, transition: Transition) -> Transition:
     ttt_aug[row("e_corepce_t"), row("e_corepce_t")] = v("rho_corepce")
     ttt_aug[row("e_gdp_t"), row("e_gdp_t")] = v("rho_gdp")
     ttt_aug[row("e_gdi_t"), row("e_gdi_t")] = v("rho_gdi")
-    if model.get_setting("add_iid_cond_obs_gdp_meas_err", False):
+    if model._is_setting_enabled("add_iid_cond_obs_gdp_meas_err"):
         ttt_aug[row("e_condgdp_t"), row("e_condgdp_t")] = v("rho_condgdp")
-    if model.get_setting("add_iid_anticipated_obs_gdp_meas_err", False):
+    if model._is_setting_enabled("add_iid_anticipated_obs_gdp_meas_err"):
         ttt_aug[row("e_gdpexp_t"), row("e_gdpexp_t")] = v("rho_gdpexp")
-    if model.get_setting("add_iid_cond_obs_corepce_meas_err", False):
+    if model._is_setting_enabled("add_iid_cond_obs_corepce_meas_err"):
         ttt_aug[row("e_condcorepce_t"), row("e_condcorepce_t")] = v("rho_condcorepce")
 
     rrr_aug[row("Et_pi_t"), :] = (ttt @ rrr)[pi_row, :]
@@ -85,11 +86,11 @@ def augment_transition_ss10(model: Any, transition: Transition) -> Transition:
     rrr_aug[row("e_gdi_t"), shock("gdi_sh")] = 1.0
     for horizon in _expected_ffr_horizons(model):
         rrr_aug[row(f"e_exp_rm{horizon}"), shock(f"exp_rm_sh{horizon}")] = 1.0
-    if model.get_setting("add_iid_cond_obs_gdp_meas_err", False):
+    if model._is_setting_enabled("add_iid_cond_obs_gdp_meas_err"):
         rrr_aug[row("e_condgdp_t"), shock("condgdp_sh")] = 1.0
-    if model.get_setting("add_iid_anticipated_obs_gdp_meas_err", False):
+    if model._is_setting_enabled("add_iid_anticipated_obs_gdp_meas_err"):
         rrr_aug[row("e_gdpexp_t"), shock("gdpexp_sh")] = 1.0
-    if model.get_setting("add_iid_cond_obs_corepce_meas_err", False):
+    if model._is_setting_enabled("add_iid_cond_obs_corepce_meas_err"):
         rrr_aug[row("e_condcorepce_t"), shock("condcorepce_sh")] = 1.0
 
     ccc_aug[row("Et_pi_t")] = (ccc + ttt @ ccc)[pi_row]
@@ -98,7 +99,7 @@ def augment_transition_ss10(model: Any, transition: Transition) -> Transition:
 
 
 def _expected_ffr_horizons(model: Any) -> tuple[int, ...]:
-    raw_horizons = model.get_setting("expected_ffr", ())
-    if raw_horizons is None:
-        return ()
-    return tuple(sorted({int(horizon) for horizon in raw_horizons}))
+    return parse_expected_ffr_horizons(
+        model.get_setting("expected_ffr", ()),
+        model.get_setting("all_ffr_qs", ()),
+    )

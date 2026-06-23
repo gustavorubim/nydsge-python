@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 
+from nydsge.models.expected_ffr import parse_expected_ffr_horizons
 from nydsge.solve import Measurement, Transition
 
 
@@ -56,7 +57,7 @@ def measurement_matrices_ss10(model: Any, transition: Transition) -> Measurement
     set_zz("obs_gdp", endo, "z_t", 1.0)
     set_zz("obs_gdp", endo_aug, "e_gdp_t", 1.0)
     set_zz("obs_gdp", endo_aug, "e_gdp_t1", -v("me_level"))
-    if model.get_setting("add_iid_cond_obs_gdp_meas_err", False):
+    if model._is_setting_enabled("add_iid_cond_obs_gdp_meas_err"):
         set_zz("obs_gdp", endo_aug, "e_condgdp_t", 1.0)
     set_dd("obs_gdp", trend_growth)
 
@@ -81,7 +82,7 @@ def measurement_matrices_ss10(model: Any, transition: Transition) -> Measurement
 
     set_zz("obs_corepce", endo, "pi_t", 1.0)
     set_zz("obs_corepce", endo_aug, "e_corepce_t", 1.0)
-    if model.get_setting("add_iid_cond_obs_corepce_meas_err", False):
+    if model._is_setting_enabled("add_iid_cond_obs_corepce_meas_err"):
         set_zz("obs_corepce", endo_aug, "e_condcorepce_t", 1.0)
     set_dd("obs_corepce", inflation_trend)
 
@@ -119,7 +120,7 @@ def measurement_matrices_ss10(model: Any, transition: Transition) -> Measurement
     set_zz("obs_tfp", endo, "u_t", tfp_utilization_weight)
     set_zz("obs_tfp", endo_aug, "u_t1", -tfp_utilization_weight)
 
-    if model.get_setting("add_initialize_pgap_ygap_pseudoobs", False):
+    if model._is_setting_enabled("add_initialize_pgap_ygap_pseudoobs"):
         set_zz("obs_pgap", endo, "pgap_t", 1.0)
         set_zz("obs_ygap", endo, "ygap_t", 1.0)
 
@@ -146,14 +147,14 @@ def measurement_matrices_ss10(model: Any, transition: Transition) -> Measurement
     for shock_name, sigma_name in shock_sigmas.items():
         set_qq(shock_name, v(sigma_name) ** 2)
 
-    if model.get_setting("add_initialize_pgap_ygap_pseudoobs", False):
+    if model._is_setting_enabled("add_initialize_pgap_ygap_pseudoobs"):
         set_qq("pgap_sh", v("sigma_pgap") ** 2)
         set_qq("ygap_sh", v("sigma_ygap") ** 2)
-    if model.get_setting("add_iid_cond_obs_gdp_meas_err", False):
+    if model._is_setting_enabled("add_iid_cond_obs_gdp_meas_err"):
         set_qq("condgdp_sh", v("sigma_condgdp") ** 2)
-    if model.get_setting("add_iid_anticipated_obs_gdp_meas_err", False):
+    if model._is_setting_enabled("add_iid_anticipated_obs_gdp_meas_err"):
         set_qq("gdpexp_sh", v("sigma_gdpexp") ** 2)
-    if model.get_setting("add_iid_cond_obs_corepce_meas_err", False):
+    if model._is_setting_enabled("add_iid_cond_obs_corepce_meas_err"):
         set_qq("condcorepce_sh", v("sigma_condcorepce") ** 2)
 
     n_mon_anticipated_shocks = int(model.get_setting("n_mon_anticipated_shocks"))
@@ -177,7 +178,7 @@ def measurement_matrices_ss10(model: Any, transition: Transition) -> Measurement
         set_dd(obs_name, v("Rstarn") + ccc_h[endo["R_t"] - 1])
         set_qq(f"exp_rm_sh{horizon}", v(f"sigma_exp_rm{horizon}") ** 2)
 
-    if model.get_setting("add_anticipated_obs_gdp", False):
+    if model._is_setting_enabled("add_anticipated_obs_gdp"):
         gdp_row = zz[obs["obs_gdp"] - 1, :].copy()
         meas_err = float(model.get_setting("meas_err_anticipated_obs_gdp", 0.0))
         gdp_row[endo_aug["e_gdp_t"] - 1] = meas_err
@@ -186,7 +187,7 @@ def measurement_matrices_ss10(model: Any, transition: Transition) -> Measurement
             obs_name = f"obs_gdp{horizon}"
             ttt_h, ccc_h = _k_periods_ahead_expectations(ttt, ccc, horizon)
             zz[obs[obs_name] - 1, :] = gdp_row @ ttt_h
-            if model.get_setting("add_iid_anticipated_obs_gdp_meas_err", False):
+            if model._is_setting_enabled("add_iid_anticipated_obs_gdp_meas_err"):
                 set_zz(obs_name, endo_aug, "e_gdpexp_t", 1.0)
             set_dd(obs_name, trend_growth + float(gdp_row @ ccc_h))
 
@@ -209,10 +210,10 @@ def _one_to_k_periods_ahead_expectations(
 
 
 def _expected_ffr_horizons(model: Any) -> tuple[int, ...]:
-    raw_horizons = model.get_setting("expected_ffr", ())
-    if raw_horizons is None:
-        return ()
-    return tuple(sorted({int(horizon) for horizon in raw_horizons}))
+    return parse_expected_ffr_horizons(
+        model.get_setting("expected_ffr", ()),
+        model.get_setting("all_ffr_qs", ()),
+    )
 
 
 def _k_periods_ahead_expectations(

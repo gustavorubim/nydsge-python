@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from math import exp
+from math import exp, log
 from typing import Any
 
 import numpy as np
@@ -633,11 +633,218 @@ def equilibrium_matrices_ss10(model: Any) -> CanonicalSystem:
             set_col(Gamma0, f"eq_rml{index}", endo, f"rm_tl{index}", 1.0)
             set_col(Psi, f"eq_rml{index}", exo, f"rm_shl{index}", noant)
 
-    if model.get_setting("add_initialize_pgap_ygap_pseudoobs", False):
+    if model._is_setting_enabled("add_altpolicy_pgap"):
+        set_col(Gamma0, "eq_pgap", endo, "pgap_t", 1.0)
+        rho_pgap = None
+        pgap_type = model.get_setting("pgap_type", None)
+        if isinstance(pgap_type, str):
+            pgap_type = pgap_type.lower()
+        if model._is_regime_one_active() and pgap_type is not None:
+            if pgap_type == "ngdp":
+                set_col(Gamma0, "eq_pgap", endo, "pi_t", -1.0)
+                set_col(Gamma0, "eq_pgap", endo, "y_t", -1.0)
+                set_col(Gamma0, "eq_pgap", endo, "z_t", -1.0)
+                set_col(Gamma1, "eq_pgap", endo, "pgap_t", 1.0)
+                set_col(Gamma1, "eq_pgap", endo, "y_t", -1.0)
+            elif pgap_type == "ait":
+                thalf = float(model.get_setting("ait_Thalf", 10))
+                rho_pgap = exp(log(0.5) / thalf)
+                set_col(Gamma0, "eq_pgap", endo, "pi_t", -1.0)
+                set_col(Gamma1, "eq_pgap", endo, "pgap_t", rho_pgap)
+            elif pgap_type in [
+                "smooth_ait",
+                "smooth_ait_gdp",
+                "smooth_ait_gdp_alt",
+                "flexible_ait",
+                "rw",
+            ]:
+                thalf = float(model.get_setting("ait_Thalf", 10))
+                rho_pgap = exp(log(0.5) / thalf)
+                set_col(Gamma0, "eq_pgap", endo, "pi_t", -1.0)
+                set_col(Gamma1, "eq_pgap", endo, "pgap_t", rho_pgap)
+
+            if rho_pgap is not None:
+                set_pgap1 = model.get_setting("set_pgap1", None)
+                if isinstance(set_pgap1, (list, tuple)) and len(set_pgap1) == 2:
+                    regime_list, pgap_level = set_pgap1
+                    applies_to_regime = model._is_regime_selector_active(regime_list)
+                    if applies_to_regime:
+                        C[eq["eq_pgap"] - 1] = rho_pgap * float(pgap_level)
+                        set_col(Gamma1, "eq_pgap", endo, "pgap_t", 0.0)
+
+        if model._is_setting_enabled("add_initialize_pgap_ygap_pseudoobs"):
+            set_col(Psi, "eq_pgap", exo, "pgap_sh", 1.0)
+
+    if (
+        model._is_setting_enabled("add_initialize_pgap_ygap_pseudoobs")
+        and not model._is_setting_enabled("add_altpolicy_pgap")
+        and not model._is_setting_enabled("add_pgap")
+    ):
         set_col(Gamma0, "eq_pgap", endo, "pgap_t", 1.0)
         set_col(Psi, "eq_pgap", exo, "pgap_sh", 1.0)
+
+    if model._is_setting_enabled("add_altpolicy_ygap"):
+        set_col(Gamma0, "eq_ygap", endo, "ygap_t", 1.0)
+        ygap_type = model.get_setting("ygap_type", None)
+        if isinstance(ygap_type, str):
+            ygap_type = ygap_type.lower()
+        if model._is_regime_one_active() and ygap_type in [
+            "smooth_ait",
+            "smooth_ait_gdp",
+            "smooth_ait_gdp_alt",
+            "flexible_ait",
+            "rw",
+        ]:
+            thalf = float(model.get_setting("gdp_Thalf", 10))
+            rho_ygap = exp(log(0.5) / thalf)
+            set_col(Gamma1, "eq_ygap", endo, "ygap_t", rho_ygap)
+            set_col(Gamma0, "eq_ygap", endo, "y_t", -1.0)
+            set_col(Gamma0, "eq_ygap", endo, "z_t", -1.0)
+            set_col(Gamma1, "eq_ygap", endo, "y_t", -rho_ygap)
+
+        if model._is_setting_enabled("add_initialize_pgap_ygap_pseudoobs"):
+            set_col(Psi, "eq_ygap", exo, "ygap_sh", 1.0)
+
+    if (
+        model._is_setting_enabled("add_initialize_pgap_ygap_pseudoobs")
+        and not model._is_setting_enabled("add_altpolicy_ygap")
+        and not model._is_setting_enabled("add_ygap")
+    ):
         set_col(Gamma0, "eq_ygap", endo, "ygap_t", 1.0)
         set_col(Psi, "eq_ygap", exo, "ygap_sh", 1.0)
+
+    if model._is_setting_enabled("add_rw"):
+        set_col(Gamma0, "eq_rw", endo, "rw_t", 1.0)
+        set_col(Gamma0, "eq_Rref", endo, "Rref_t", 1.0)
+        if model._is_regime_one_active() and model.get_setting("Rref_type", None) is not None:
+            rho_rw = float(model.get_setting("rho_rw", 0.93))
+            set_col(Gamma1, "eq_rw", endo, "rw_t", rho_rw)
+            rref_type = model.get_setting("Rref_type", None)
+            if isinstance(rref_type, str):
+                rref_type = rref_type.lower()
+            if rref_type == "ait":
+                thalf = float(model.get_setting("ait_Thalf", 10))
+                rho_pgap = exp(log(0.5) / thalf)
+                phi = float(
+                    model.get_setting(
+                        "ait_phi",
+                        model.get_setting("ait_phi", 0.25),
+                    )
+                )
+                set_col(Gamma0, "eq_Rref", endo, "Rref_t", 1.0)
+                set_col(Gamma1, "eq_Rref", endo, "Rref_t", 0.0)
+                C[eq["eq_Rref"] - 1] = 0.0
+                set_col(Gamma0, "eq_Rref", endo, "rw_t", -1.0)
+                if "pgap_t" in endo:
+                    set_col(
+                        Gamma0,
+                        "eq_Rref",
+                        endo,
+                        "pgap_t",
+                        -phi * (1.0 / (1.0 - rho_pgap)),
+                    )
+            elif rref_type in [
+                "smooth_ait",
+                "smooth_ait_gdp",
+                "smooth_ait_gdp_alt",
+                "flexible_ait",
+                "rw",
+            ]:
+                ait_thalf = float(model.get_setting("ait_Thalf", 10))
+                gdp_thalf = float(model.get_setting("gdp_Thalf", 10))
+                rho_pgap = exp(log(0.5) / ait_thalf)
+                rho_ygap = exp(log(0.5) / gdp_thalf)
+                rho_smooth = float(
+                    model.get_setting(
+                        "rw_rho_smooth",
+                        model.get_setting("rw_rho_smooth", 0.656),
+                    )
+                )
+                phi_pi = float(
+                    model.get_setting(
+                        "rw_phi_pi",
+                        model.get_setting("rw_phi_pi", 11.13),
+                    )
+                )
+                phi_y = float(
+                    model.get_setting(
+                        "rw_phi_y",
+                        model.get_setting("rw_phi_y", 11.13),
+                    )
+                )
+                set_col(Gamma0, "eq_Rref", endo, "Rref_t", 1.0)
+                set_col(Gamma1, "eq_Rref", endo, "Rref_t", rho_smooth)
+                C[eq["eq_Rref"] - 1] = 0.0
+                if "pgap_t" in endo:
+                    set_col(
+                        Gamma0,
+                        "eq_Rref",
+                        endo,
+                        "pgap_t",
+                        -phi_pi * (1.0 - rho_pgap) * (1.0 - rho_smooth),
+                    )
+                if "ygap_t" in endo:
+                    set_col(
+                        Gamma0,
+                        "eq_Rref",
+                        endo,
+                        "ygap_t",
+                        -phi_y * (1.0 - rho_ygap) * (1.0 - rho_smooth),
+                    )
+
+    if model._is_setting_enabled("add_pgap"):
+        pgap_type = model.get_setting("pgap_type", None)
+        if isinstance(pgap_type, str):
+            pgap_type = pgap_type.lower()
+        if pgap_type in [
+            "smooth_ait_gdp",
+            "smooth_ait",
+            "ait",
+            "smooth_ait_gdp_alt",
+            "flexible_ait",
+            "rw",
+        ]:
+            thalf = float(model.get_setting("ait_Thalf", 10))
+            rho_pgap = exp(log(0.5) / thalf)
+            set_col(Gamma0, "eq_pgap", endo, "pgap_t", 1.0)
+            set_col(Gamma0, "eq_pgap", endo, "pi_t", -1.0)
+            set_col(Gamma1, "eq_pgap", endo, "pgap_t", rho_pgap)
+            if model._is_setting_enabled("add_initialize_pgap_ygap_pseudoobs"):
+                set_col(Psi, "eq_pgap", exo, "pgap_sh", 1.0)
+
+    if model._is_setting_enabled("add_ygap"):
+        ygap_type = model.get_setting("ygap_type", None)
+        if isinstance(ygap_type, str):
+            ygap_type = ygap_type.lower()
+        if ygap_type in [
+            "smooth_ait",
+            "smooth_ait_gdp",
+            "smooth_ait_gdp_alt",
+            "flexible_ait",
+            "rw",
+        ]:
+            thalf = float(model.get_setting("gdp_Thalf", 10))
+            rho_ygap = exp(log(0.5) / thalf)
+            set_col(Gamma0, "eq_ygap", endo, "ygap_t", 1.0)
+            set_col(Gamma0, "eq_ygap", endo, "y_t", -1.0)
+            set_col(Gamma0, "eq_ygap", endo, "z_t", -1.0)
+            set_col(Gamma1, "eq_ygap", endo, "ygap_t", rho_ygap)
+            set_col(Gamma1, "eq_ygap", endo, "y_t", -rho_ygap)
+            if model._is_setting_enabled("add_initialize_pgap_ygap_pseudoobs"):
+                set_col(Psi, "eq_ygap", exo, "ygap_sh", 1.0)
+
+    if model._is_setting_enabled("add_ait_rm"):
+        set_col(Gamma0, "eq_ait_rm", endo, "ait_rm_t", 1.0)
+        set_col(
+            Gamma1,
+            "eq_ait_rm",
+            endo,
+            "ait_rm_t",
+            float(v("rho_ait_rm")),
+        )
+        set_col(Psi, "eq_ait_rm", exo, "rm_ait_sh", 1.0)
+        if model.get_setting("add_taylor_rm", False):
+            set_col(Gamma0, "eq_mp", endo, "ait_rm_t", -1.0)
 
     canonical = CanonicalSystem(Gamma0=Gamma0, Gamma1=Gamma1, C=C, Psi=Psi, Pi=Pi)
     canonical.validate()

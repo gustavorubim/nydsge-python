@@ -25,6 +25,10 @@ from nydsge.financial_frictions import (
     zeta_spb_fn,
     zeta_zomega_fn,
 )
+from nydsge.models.expected_ffr import (
+    parse_expected_ffr_horizons,
+    parse_expected_ffr_regime_horizons,
+)
 from nydsge.models.m1002_augment import augment_transition_ss10
 from nydsge.models.m1002_eqcond import equilibrium_matrices_ss10
 from nydsge.models.m1002_measurement import measurement_matrices_ss10
@@ -34,7 +38,7 @@ from nydsge.runtime import RuntimeConfig
 from nydsge.solve import CanonicalSystem, Measurement, PseudoMeasurement, Transition
 
 ParameterSpec = tuple[str, float, bool, tuple[float, float] | None, str]
-PseudoObservableSpec = tuple[str, str, str]
+PseudoObservableSpec = tuple[str, str, str] | tuple[str, str, str, str]
 
 MODEL1002_SS10_STEADY_STATE_NAMES: tuple[str, ...] = (
     "z_star",
@@ -203,6 +207,11 @@ MODEL1002_SS10_PSEUDO_OBSERVABLE_SPECS: tuple[PseudoObservableSpec, ...] = (
     ("NominalRateGap", "Nominal Rate Gap", "quarter_to_annual"),
     ("LaborProductivityGrowth", "Labor Productivity Growth", "quarter_to_annual"),
     ("u_t", "u_t", "identity"),
+)
+
+MODEL1002_SS10_OPTIONAL_PSEUDO_OBSERVABLE_SPECS: tuple[PseudoObservableSpec, ...] = (
+    ("pgap_t", "pgap", "identity"),
+    ("ygap_t", "ygap", "identity"),
 )
 
 MODEL1002_SS10_PARAMETER_SPECS: tuple[ParameterSpec, ...] = (
@@ -671,7 +680,7 @@ class Model1002(DSGEModel):
                     forward_transform="expected_ffr_spd",
                 )
             )
-        if self.get_setting("add_initialize_pgap_ygap_pseudoobs", False):
+        if self._is_setting_enabled("add_initialize_pgap_ygap_pseudoobs"):
             self.add_observable(
                 Observable(
                     "obs_pgap",
@@ -690,7 +699,7 @@ class Model1002(DSGEModel):
                     forward_transform="flexible_ait_gap",
                 )
             )
-        if self.get_setting("add_anticipated_obs_gdp", False):
+        if self._is_setting_enabled("add_anticipated_obs_gdp"):
             source = str(self.get_setting("filename_anticipated_obs_gdp", "ANTGDP"))
             count = int(self.get_setting("n_anticipated_obs_gdp", 1))
             for index in range(1, count + 1):
@@ -715,7 +724,7 @@ class Model1002(DSGEModel):
             ],
             *[f"obs_exp_nominalrate{horizon}" for horizon in self._expected_ffr_horizons()],
         ]
-        if self.get_setting("add_anticipated_obs_gdp", False):
+        if self._is_setting_enabled("add_anticipated_obs_gdp"):
             forward_looking.extend(
                 f"obs_gdp{index}"
                 for index in range(1, int(self.get_setting("n_anticipated_obs_gdp", 1)) + 1)
@@ -739,14 +748,35 @@ class Model1002(DSGEModel):
             self.observable_mappings[observable_key] = observable
 
     def _init_pseudo_observable_mappings(self) -> None:
-        for name, description, reverse_transform in MODEL1002_SS10_PSEUDO_OBSERVABLE_SPECS:
+        for spec in MODEL1002_SS10_PSEUDO_OBSERVABLE_SPECS:
+            if len(spec) == 4:
+                name, description, reverse_transform, forward_transform = spec
+            else:
+                name, description, reverse_transform = spec
+                forward_transform = "identity"
             self.add_pseudo_observable(
                 PseudoObservable(
                     name=name,
                     description=description,
                     reverse_transform=reverse_transform,
+                    forward_transform=forward_transform,
                 )
             )
+        if self._has_pgap_state() or self._has_ygap_state():
+            for spec in MODEL1002_SS10_OPTIONAL_PSEUDO_OBSERVABLE_SPECS:
+                if len(spec) == 4:
+                    name, description, reverse_transform, forward_transform = spec
+                else:
+                    name, description, reverse_transform = spec
+                    forward_transform = "identity"
+                self.add_pseudo_observable(
+                    PseudoObservable(
+                        name=name,
+                        description=description,
+                        reverse_transform=reverse_transform,
+                        forward_transform=forward_transform,
+                    )
+                )
         self.set_setting(
             "forward_looking_pseudo_observables",
             [
@@ -781,6 +811,7 @@ class Model1002(DSGEModel):
             )
         for name in MODEL1002_SS10_POST_ANTICIPATED_PARAMETER_NAMES:
             self._add_parameter_from_spec(name)
+        horizon_regime_tags = self._expected_ffr_horizon_regimes()
         for horizon in self._expected_ffr_horizons():
             self.add_parameter(
                 Parameter(
@@ -795,19 +826,19 @@ class Model1002(DSGEModel):
                         "measurement-error standard deviation."
                     ),
                     category="measurement_error",
-                    regime="expected_ffr_spd",
+                    regime=f"expected_ffr_spd{horizon_regime_tags.get(horizon, '')}",
                 )
             )
-        if self.get_setting("add_iid_cond_obs_gdp_meas_err", False):
+        if self._is_setting_enabled("add_iid_cond_obs_gdp_meas_err"):
             self._add_parameter_from_spec("rho_condgdp")
             self._add_parameter_from_spec("sigma_condgdp")
-        if self.get_setting("add_iid_anticipated_obs_gdp_meas_err", False):
+        if self._is_setting_enabled("add_iid_anticipated_obs_gdp_meas_err"):
             self._add_parameter_from_spec("rho_gdpexp")
             self._add_parameter_from_spec("sigma_gdpexp")
-        if self.get_setting("add_iid_cond_obs_corepce_meas_err", False):
+        if self._is_setting_enabled("add_iid_cond_obs_corepce_meas_err"):
             self._add_parameter_from_spec("rho_condcorepce")
             self._add_parameter_from_spec("sigma_condcorepce")
-        if self.get_setting("add_initialize_pgap_ygap_pseudoobs", False):
+        if self._is_setting_enabled("add_initialize_pgap_ygap_pseudoobs"):
             for name, description in (
                 ("sigma_pgap", "Average inflation-gap initialization shock standard deviation."),
                 ("sigma_ygap", "Average output-gap initialization shock standard deviation."),
@@ -825,6 +856,8 @@ class Model1002(DSGEModel):
                         regime="flexible_ait",
                     )
                 )
+        if self._is_setting_enabled("add_ait_rm"):
+            self._add_parameter_from_spec("rho_ait_rm")
 
     def _add_parameter_from_spec(self, name: str) -> None:
         try:
@@ -917,10 +950,15 @@ class Model1002(DSGEModel):
         ] + [f"rm_tl{i}" for i in range(1, n_ant + 1)]
         for key, value in antshocks.items():
             endogenous_states.extend(f"{key}_tl{i}" for i in range(1, value + 1))
+        if self._is_setting_enabled("add_rw"):
+            endogenous_states.append("rw_t")
+            endogenous_states.append("Rref_t")
         if self._has_pgap_state():
             endogenous_states.append("pgap_t")
         if self._has_ygap_state():
             endogenous_states.append("ygap_t")
+        if self._is_setting_enabled("add_ait_rm"):
+            endogenous_states.append("ait_rm_t")
         exogenous_shocks = [
             "g_sh",
             "b_sh",
@@ -941,9 +979,11 @@ class Model1002(DSGEModel):
             "gdp_sh",
             "gdi_sh",
         ] + [f"rm_shl{i}" for i in range(1, n_ant + 1)]
+        if self._is_setting_enabled("add_ait_rm"):
+            exogenous_shocks.append("rm_ait_sh")
         for key, value in antshocks.items():
             exogenous_shocks.extend(f"{key}_shl{i}" for i in range(1, value + 1))
-        if self.get_setting("add_initialize_pgap_ygap_pseudoobs", False):
+        if self._is_setting_enabled("add_initialize_pgap_ygap_pseudoobs"):
             exogenous_shocks.extend(["pgap_sh", "ygap_sh"])
         expected_shocks = [
             "Ec_sh",
@@ -1026,6 +1066,11 @@ class Model1002(DSGEModel):
         ] + [f"eq_rml{i}" for i in range(1, n_ant + 1)]
         for key, value in antshocks.items():
             equilibrium_conditions.extend(f"eq_{key}l{i}" for i in range(1, value + 1))
+        if self._is_setting_enabled("add_rw"):
+            equilibrium_conditions.append("eq_rw")
+            equilibrium_conditions.append("eq_Rref")
+        if self._is_setting_enabled("add_ait_rm"):
+            equilibrium_conditions.append("eq_ait_rm")
         if self._has_pgap_state():
             equilibrium_conditions.append("eq_pgap")
         if self._has_ygap_state():
@@ -1051,13 +1096,13 @@ class Model1002(DSGEModel):
         for horizon in self._expected_ffr_horizons():
             endogenous_states_augmented.append(f"e_exp_rm{horizon}")
             exogenous_shocks.append(f"exp_rm_sh{horizon}")
-        if self.get_setting("add_iid_cond_obs_gdp_meas_err", False):
+        if self._is_setting_enabled("add_iid_cond_obs_gdp_meas_err"):
             endogenous_states_augmented.append("e_condgdp_t")
             exogenous_shocks.append("condgdp_sh")
-        if self.get_setting("add_iid_anticipated_obs_gdp_meas_err", False):
+        if self._is_setting_enabled("add_iid_anticipated_obs_gdp_meas_err"):
             endogenous_states_augmented.append("e_gdpexp_t")
             exogenous_shocks.append("gdpexp_sh")
-        if self.get_setting("add_iid_cond_obs_corepce_meas_err", False):
+        if self._is_setting_enabled("add_iid_cond_obs_corepce_meas_err"):
             endogenous_states_augmented.append("e_condcorepce_t")
             exogenous_shocks.append("condcorepce_sh")
         self.indexes.endogenous_states = self.build_one_based_index(endogenous_states)
@@ -1102,31 +1147,107 @@ class Model1002(DSGEModel):
         return {}
 
     def _expected_ffr_horizons(self) -> tuple[int, ...]:
-        raw_horizons = self.get_setting("expected_ffr", ())
-        if raw_horizons is None:
-            return ()
-        if isinstance(raw_horizons, str) or not isinstance(raw_horizons, (list, tuple, set)):
-            msg = "expected_ffr setting must be a sequence of positive integer horizons."
-            raise TypeError(msg)
-        horizons = tuple(sorted({int(horizon) for horizon in raw_horizons}))
-        if any(horizon <= 0 for horizon in horizons):
-            msg = "expected_ffr horizons must be positive integers."
-            raise ValueError(msg)
-        return horizons
+        return parse_expected_ffr_horizons(
+            self.get_setting("expected_ffr", ()),
+            self.get_setting("all_ffr_qs", ()),
+        )
+
+    def _expected_ffr_regime_horizons(self) -> tuple[tuple[str, tuple[int, ...]], ...]:
+        return parse_expected_ffr_regime_horizons(
+            self.get_setting("expected_ffr", ()),
+            self.get_setting("all_ffr_qs", ()),
+        )
+
+    def _expected_ffr_horizon_regimes(self) -> dict[int, str]:
+        regime_horizons = self._expected_ffr_regime_horizons()
+        if len(regime_horizons) == 1 and regime_horizons[0][0] == "default":
+            return {}
+
+        tags: dict[int, list[str]] = {}
+        for regime_name, horizons in regime_horizons:
+            for horizon in horizons:
+                tags.setdefault(horizon, []).append(regime_name)
+
+        return {horizon: f"[{','.join(values)}]" for horizon, values in tags.items() if values}
+
+    @staticmethod
+    def _normalize_regime_key(value: Any) -> str | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return str(value)
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not normalized:
+                return None
+            try:
+                return str(int(normalized))
+            except ValueError:
+                return normalized
+        return None
+
+    def _active_regime_set(self) -> set[str]:
+        regime_eqcond_info = self.get_setting("regime_eqcond_info", None)
+        if not isinstance(regime_eqcond_info, Mapping) or not bool(regime_eqcond_info):
+            return {"1"}
+
+        active_regimes: set[str] = set()
+        for regime in regime_eqcond_info:
+            normalized = self._normalize_regime_key(regime)
+            if normalized is not None:
+                active_regimes.add(normalized)
+        return active_regimes
+
+    def _is_setting_enabled(self, setting_name: str) -> bool:
+        setting_value = self.get_setting(setting_name, False)
+        active_regimes = self._active_regime_set()
+        if not active_regimes:
+            return False
+        if isinstance(setting_value, Mapping):
+            for regime in active_regimes:
+                for key, value in setting_value.items():
+                    setting_regime = self._normalize_regime_key(key)
+                    if setting_regime is not None and setting_regime == regime:
+                        return bool(value)
+            return False
+        return bool(setting_value)
+
+    def _is_regime_selector_active(self, regime_selector: Any) -> bool:
+        active_regimes = self._active_regime_set()
+        if not active_regimes:
+            return False
+        if isinstance(regime_selector, (list, tuple, set)):
+            for entry in regime_selector:
+                if self._is_regime_selector_active(entry):
+                    return True
+            return False
+        normalized = self._normalize_regime_key(regime_selector)
+        return normalized is not None and normalized in active_regimes
+
+    def _is_regime_one_active(self) -> bool:
+        return bool({"1", "baseline", "default"} & self._active_regime_set())
 
     def _has_pgap_state(self) -> bool:
-        return bool(self.get_setting("add_initialize_pgap_ygap_pseudoobs", False))
+        return bool(
+            self._is_setting_enabled("add_initialize_pgap_ygap_pseudoobs")
+            or self._is_setting_enabled("add_altpolicy_pgap")
+            or self._is_setting_enabled("add_pgap")
+        )
 
     def _has_ygap_state(self) -> bool:
-        return bool(self.get_setting("add_initialize_pgap_ygap_pseudoobs", False))
+        return bool(
+            self._is_setting_enabled("add_initialize_pgap_ygap_pseudoobs")
+            or self._is_setting_enabled("add_altpolicy_ygap")
+            or self._is_setting_enabled("add_ygap")
+        )
 
     def _init_steady_state_placeholders(self) -> None:
         for name in MODEL1002_SS10_STEADY_STATE_NAMES:
             self.set_steady_state(name, float("nan"))
 
     def compute_steady_state(self) -> OrderedDict[str, float]:
-        if self.subspec != "ss10":
-            msg = "Only Model1002 ss10 steady state is ported."
+        if self.subspec not in {"ss10", "ss104"}:
+            msg = "Only Model1002 ss10/ss104 steady state is ported."
             raise NotPortedError(msg)
 
         p = self.numeric_value
@@ -1310,25 +1431,25 @@ class Model1002(DSGEModel):
         return self.compute_steady_state()
 
     def equilibrium_matrices(self) -> CanonicalSystem:
-        if self.subspec != "ss10":
-            msg = "Only Model1002 ss10 equilibrium conditions are ported."
+        if self.subspec not in {"ss10", "ss104"}:
+            msg = "Only Model1002 ss10/ss104 equilibrium conditions are ported."
             raise NotPortedError(msg)
         return equilibrium_matrices_ss10(self)
 
     def measurement_matrices(self, transition: Transition) -> Measurement:
-        if self.subspec != "ss10":
-            msg = "Only Model1002 ss10 measurement matrices are ported."
+        if self.subspec not in {"ss10", "ss104"}:
+            msg = "Only Model1002 ss10/ss104 measurement matrices are ported."
             raise NotPortedError(msg)
         return measurement_matrices_ss10(self, transition)
 
     def pseudo_measurement_matrices(self, transition: Transition) -> PseudoMeasurement:
-        if self.subspec != "ss10":
-            msg = "Only Model1002 ss10 pseudo-measurement matrices are ported."
+        if self.subspec not in {"ss10", "ss104"}:
+            msg = "Only Model1002 ss10/ss104 pseudo-measurement matrices are ported."
             raise NotPortedError(msg)
         return pseudo_measurement_matrices_ss10(self, transition)
 
     def augment_transition(self, transition: Transition) -> Transition:
-        if self.subspec != "ss10":
-            msg = "Only Model1002 ss10 transition augmentation is ported."
+        if self.subspec not in {"ss10", "ss104"}:
+            msg = "Only Model1002 ss10/ss104 transition augmentation is ported."
             raise NotPortedError(msg)
         return augment_transition_ss10(self, transition)
