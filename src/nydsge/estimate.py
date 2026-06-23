@@ -50,6 +50,14 @@ class MetropolisHastingsResult:
     target_accept: float = 0.25
     alpha: float = 1.0
     c: float = 0.5
+    sampling_method: str | None = None
+    mode_in: bool | None = None
+    hessian_in: bool | None = None
+    calculate_hessian: bool | None = None
+    reoptimize: bool | None = None
+    run_csminwel: bool | None = None
+    cc: float | None = None
+    cc0: float | None = None
 
 
 @dataclass(frozen=True)
@@ -170,6 +178,8 @@ def estimate(
     mh_target_accept: float = 0.25,
     mh_alpha: float = 1.0,
     mh_c: float = 0.5,
+    mh_cc: float = 0.09,
+    mh_cc0: float = 0.01,
     seed: int | None = None,
     mode: EstimationModeResult | None = None,
 ) -> EstimateResult:
@@ -212,6 +222,12 @@ def estimate(
         raise ValueError(msg)
     if mh_adaptive_accept and mh_c <= 0.0:
         msg = "mh_c must be positive."
+        raise ValueError(msg)
+    if mh_cc <= 0.0:
+        msg = "mh_cc must be positive."
+        raise ValueError(msg)
+    if mh_cc0 <= 0.0:
+        msg = "mh_cc0 must be positive."
         raise ValueError(msg)
     if proposal_scale <= 0.0:
         msg = "proposal_scale must be positive."
@@ -273,6 +289,7 @@ def estimate(
             raise ValueError(msg)
 
         if mh_draws > 0:
+            mode_in = mode is not None
             if not selected_names:
                 selected_names = estimation_parameter_names(model, parameter_names=parameter_names)
             sampler_proposal_covariance = proposal_covariance
@@ -296,6 +313,16 @@ def estimate(
                 c=mh_c,
                 seed=seed,
                 start_date=start_date,
+            )
+            sampler = replace(
+                sampler,
+                mode_in=mode_in,
+                hessian_in=bool(mode is not None and mode.hessian is not None),
+                calculate_hessian=bool(optimize and compute_hessian),
+                reoptimize=bool(optimize),
+                run_csminwel=bool(optimize),
+                cc=mh_cc,
+                cc0=mh_cc0,
             )
         elif parameter_names is not None and not optimize:
             msg = "parameter_names are only valid when optimize=True or mh_draws > 0."
@@ -902,6 +929,7 @@ def metropolis_hastings(
         target_accept=target_accept,
         alpha=alpha,
         c=c,
+        sampling_method="MH",
     )
 
 
@@ -915,6 +943,24 @@ def save_sampler_result(
         msg = "Sampler results must be written as a .npz archive."
         raise ValueError(msg)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    optional_fields: dict[str, Any] = {}
+    if sampler.sampling_method is not None:
+        optional_fields["sampling_method"] = np.asarray([sampler.sampling_method], dtype="U")
+    if sampler.mode_in is not None:
+        optional_fields["mode_in"] = np.asarray([sampler.mode_in], dtype=bool)
+    if sampler.hessian_in is not None:
+        optional_fields["hessian_in"] = np.asarray([sampler.hessian_in], dtype=bool)
+    if sampler.calculate_hessian is not None:
+        optional_fields["calculate_hessian"] = np.asarray([sampler.calculate_hessian], dtype=bool)
+    if sampler.reoptimize is not None:
+        optional_fields["reoptimize"] = np.asarray([sampler.reoptimize], dtype=bool)
+    if sampler.run_csminwel is not None:
+        optional_fields["run_csminwel"] = np.asarray([sampler.run_csminwel], dtype=bool)
+    if sampler.cc is not None:
+        optional_fields["cc"] = np.asarray([sampler.cc], dtype=np.float64)
+    if sampler.cc0 is not None:
+        optional_fields["cc0"] = np.asarray([sampler.cc0], dtype=np.float64)
+
     np.savez(
         destination,
         parameter_names=np.asarray(sampler.parameter_names, dtype=str),
@@ -935,12 +981,19 @@ def save_sampler_result(
         c=np.asarray([sampler.c], dtype=np.float64),
         seed=np.asarray([-1 if sampler.seed is None else sampler.seed], dtype=np.int64),
         burnin=np.asarray([sampler.burnin], dtype=np.int64),
+        **optional_fields,
     )
     return destination
 
 
 def load_sampler_result(path: Path | str) -> MetropolisHastingsResult:
     source = Path(path)
+    if not source.exists():
+        msg = f"Sampler result archive does not exist: {source}"
+        raise FileNotFoundError(msg)
+    if source.suffix != ".npz":
+        msg = f"Sampler result path must be an .npz archive: {source}"
+        raise ValueError(msg)
     with np.load(source) as archive:
         required = {
             "parameter_names",
@@ -958,6 +1011,38 @@ def load_sampler_result(path: Path | str) -> MetropolisHastingsResult:
             msg = "Sampler archive is missing array(s): " + ", ".join(missing)
             raise KeyError(msg)
         seed_value = int(np.ravel(archive["seed"])[0])
+        sampling_method = None
+        if "sampling_method" in archive:
+            sampling_method = str(np.ravel(archive["sampling_method"])[0])
+            if sampling_method == "b''":
+                sampling_method = None
+        mode_in = (
+            _coerce_numpy_scalar_bool(np.ravel(archive["mode_in"])[0])
+            if "mode_in" in archive
+            else None
+        )
+        hessian_in = (
+            _coerce_numpy_scalar_bool(np.ravel(archive["hessian_in"])[0])
+            if "hessian_in" in archive
+            else None
+        )
+        calculate_hessian = (
+            _coerce_numpy_scalar_bool(np.ravel(archive["calculate_hessian"])[0])
+            if "calculate_hessian" in archive
+            else None
+        )
+        reoptimize = (
+            _coerce_numpy_scalar_bool(np.ravel(archive["reoptimize"])[0])
+            if "reoptimize" in archive
+            else None
+        )
+        run_csminwel = (
+            _coerce_numpy_scalar_bool(np.ravel(archive["run_csminwel"])[0])
+            if "run_csminwel" in archive
+            else None
+        )
+        cc = _coerce_numpy_scalar_float(np.ravel(archive["cc"])[0]) if "cc" in archive else None
+        cc0 = _coerce_numpy_scalar_float(np.ravel(archive["cc0"])[0]) if "cc0" in archive else None
         result = MetropolisHastingsResult(
             parameter_names=tuple(str(name) for name in archive["parameter_names"].tolist()),
             estimation_draws=np.asarray(archive["estimation_draws"], dtype=np.float64),
@@ -987,9 +1072,54 @@ def load_sampler_result(path: Path | str) -> MetropolisHastingsResult:
             else 0.25,
             alpha=float(np.ravel(archive["alpha"])[0]) if "alpha" in archive else 1.0,
             c=float(np.ravel(archive["c"])[0]) if "c" in archive else 0.5,
+            sampling_method=sampling_method,
+            mode_in=mode_in,
+            hessian_in=hessian_in,
+            calculate_hessian=calculate_hessian,
+            reoptimize=reoptimize,
+            run_csminwel=run_csminwel,
+            cc=cc,
+            cc0=cc0,
         )
     validate_sampler_result(result)
     return result
+
+
+def _coerce_numpy_scalar_bool(value: Any) -> bool | None:
+    if isinstance(value, np.bool_):
+        return bool(value)
+    if isinstance(value, (bool, np.integer, np.floating, int, float)):
+        if float(value) in {0.0, 1.0}:
+            return bool(int(value))
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode()
+    text = str(value).strip().casefold()
+    if text in {"true", "1"}:
+        return True
+    if text in {"false", "0"}:
+        return False
+    return None
+
+
+def _coerce_numpy_scalar_float(value: Any) -> float | None:
+    if isinstance(value, np.floating):
+        numeric = float(value)
+    elif isinstance(value, (float, int)):
+        numeric = float(value)
+    elif isinstance(value, np.integer):
+        numeric = float(int(value))
+    elif isinstance(value, (bytes, bytearray)):
+        try:
+            numeric = float(value.decode())
+        except ValueError:
+            return None
+    else:
+        try:
+            numeric = float(str(value).strip())
+        except ValueError:
+            return None
+    return numeric if np.isfinite(numeric) else None
 
 
 def validate_sampler_result(sampler: MetropolisHastingsResult) -> None:
@@ -1049,6 +1179,32 @@ def validate_sampler_result(sampler: MetropolisHastingsResult) -> None:
     if not np.isfinite(sampler.acceptance_rate) or not 0.0 <= sampler.acceptance_rate <= 1.0:
         msg = "Sampler acceptance_rate must be finite and between 0 and 1."
         raise ValueError(msg)
+    if sampler.sampling_method is not None and not isinstance(sampler.sampling_method, str):
+        msg = "Sampler sampling_method must be a string."
+        raise ValueError(msg)
+    if sampler.mode_in is not None and not isinstance(sampler.mode_in, bool):
+        msg = "Sampler mode_in must be a boolean."
+        raise ValueError(msg)
+    if sampler.hessian_in is not None and not isinstance(sampler.hessian_in, bool):
+        msg = "Sampler hessian_in must be a boolean."
+        raise ValueError(msg)
+    if sampler.calculate_hessian is not None and not isinstance(sampler.calculate_hessian, bool):
+        msg = "Sampler calculate_hessian must be a boolean."
+        raise ValueError(msg)
+    if sampler.reoptimize is not None and not isinstance(sampler.reoptimize, bool):
+        msg = "Sampler reoptimize must be a boolean."
+        raise ValueError(msg)
+    if sampler.run_csminwel is not None and not isinstance(sampler.run_csminwel, bool):
+        msg = "Sampler run_csminwel must be a boolean."
+        raise ValueError(msg)
+    if sampler.cc is not None:
+        if not np.isfinite(sampler.cc):
+            msg = "Sampler cc must be finite."
+            raise ValueError(msg)
+    if sampler.cc0 is not None:
+        if not np.isfinite(sampler.cc0):
+            msg = "Sampler cc0 must be finite."
+            raise ValueError(msg)
     if sampler.burnin < 0:
         msg = "Sampler burnin must be nonnegative."
         raise ValueError(msg)

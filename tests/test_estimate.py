@@ -110,6 +110,83 @@ def test_estimate_can_run_metropolis_hastings_sampler() -> None:
     assert np.isfinite(result.parameter_values["alpha"])
 
 
+def test_estimate_sampler_records_mode_hessian_metadata() -> None:
+    model = Model1002()
+    data = np.zeros((1, len(model.observables)))
+    mode = EstimationModeResult(
+        parameter_names=("alpha",),
+        estimation_values=parameter_estimation_vector(model, ("alpha",)),
+        objective_value=1.0,
+        success=True,
+        message="fixture",
+        iterations=1,
+        function_evaluations=2,
+        hessian=np.array([[1.0e8]], dtype=np.float64),
+    )
+
+    result = estimate(
+        model,
+        data,
+        mode=mode,
+        mh_draws=2,
+        proposal_covariance=np.array([[1.0e-8]], dtype=np.float64),
+        seed=7,
+    )
+
+    assert result.sampler is not None
+    assert result.sampler.mode_in is True
+    assert result.sampler.hessian_in is True
+    assert result.sampler.calculate_hessian is False
+    assert result.sampler.reoptimize is False
+    assert result.sampler.run_csminwel is False
+    assert result.sampler.cc == 0.09
+    assert result.sampler.cc0 == 0.01
+
+
+def test_estimate_sampler_records_optimization_chain_metadata() -> None:
+    model = Model1002()
+    data = np.zeros((1, len(model.observables)))
+
+    result = estimate(
+        model,
+        data,
+        optimize=True,
+        parameter_names=["alpha"],
+        maxiter=1,
+        compute_hessian=True,
+        mh_draws=2,
+        proposal_covariance=np.array([[1.0e-8]], dtype=np.float64),
+        seed=7,
+    )
+
+    assert result.sampler is not None
+    assert result.sampler.mode_in is False
+    assert result.sampler.hessian_in is False
+    assert result.sampler.calculate_hessian is True
+    assert result.sampler.reoptimize is True
+    assert result.sampler.run_csminwel is True
+    assert result.sampler.cc == 0.09
+    assert result.sampler.cc0 == 0.01
+
+
+def test_estimate_sampler_records_custom_cc_metadata() -> None:
+    model = Model1002()
+    data = np.zeros((1, len(model.observables)))
+
+    result = estimate(
+        model,
+        data,
+        mh_draws=2,
+        mh_cc=0.13,
+        mh_cc0=0.03,
+        seed=7,
+    )
+
+    assert result.sampler is not None
+    assert result.sampler.cc == 0.13
+    assert result.sampler.cc0 == 0.03
+
+
 def test_sampler_result_can_round_trip_npz_archive(tmp_path) -> None:
     model = Model1002()
     data = np.zeros((1, len(model.observables)))
