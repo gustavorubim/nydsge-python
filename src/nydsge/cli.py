@@ -114,6 +114,7 @@ from nydsge.vv import (
 app = typer.Typer(help="Native Python tools for the NY Fed DSGE model port.")
 data_app = typer.Typer(help="Data loading and build commands.")
 vv_app = typer.Typer(help="Verification and validation commands.")
+report_app = typer.Typer(help="Forecast analysis reports: forecast panel, IRFs, decomposition.")
 console = Console()
 
 FINANCIAL_FRICTIONS_INPUT_NAMES = ("z", "sigma", "spr")
@@ -5745,8 +5746,195 @@ def _parse_number_list(value: str) -> np.ndarray:
         raise ValueError(msg) from err
 
 
+def _run_report(builder: Any, *, json_output: bool) -> None:
+    from nydsge.report import ReportArtifacts, ReportError
+
+    try:
+        artifacts: ReportArtifacts = builder()
+    except (ReportError, NotPortedError, FileNotFoundError, KeyError, ValueError) as err:
+        console.print(f"[yellow]{err}[/yellow]")
+        raise typer.Exit(code=2) from err
+    payload = {
+        "output_dir": str(artifacts.output_dir),
+        "summary": str(artifacts.summary),
+        "figures": [str(path) for path in artifacts.figures],
+        "arrays": [str(path) for path in artifacts.arrays],
+        "kind": artifacts.manifest.get("kind"),
+    }
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+    table = Table(title=f"Report: {artifacts.manifest.get('kind')}")
+    table.add_column("Artifact")
+    table.add_column("Count")
+    table.add_row("figures", str(len(artifacts.figures)))
+    table.add_row("arrays", str(len(artifacts.arrays)))
+    table.add_row("summary", str(artifacts.summary))
+    console.print(table)
+
+
+@report_app.command("forecast")
+def report_forecast(
+    output_dir: Annotated[
+        Path,
+        typer.Option("--output-dir", help="Directory where report artifacts are written."),
+    ] = Path("outputs/forecast_report"),
+    model: Annotated[str, typer.Option("--model", help="Model name.")] = "m1002",
+    subspec: Annotated[str, typer.Option(help="Model1002 subspec.")] = "ss10",
+    data_vintage: Annotated[str, typer.Option("--data-vintage", help="Data vintage.")] = "181115",
+    forecast_start: Annotated[
+        str,
+        typer.Option("--forecast-start", help="First forecast quarter, e.g. 2018-Q4."),
+    ] = "2018-Q4",
+    horizon: Annotated[int, typer.Option(help="Forecast horizon.")] = 40,
+    data_path: Annotated[
+        Path | None,
+        typer.Option("--data", help="Observable CSV; defaults to the configured vintage."),
+    ] = None,
+    history_method: Annotated[
+        str,
+        typer.Option("--history-method", help="History method: filtered or smoothed."),
+    ] = "smoothed",
+    irf_normalization: Annotated[
+        str,
+        typer.Option("--irf-normalization", help="IRF shock normalization: unit or one_sd."),
+    ] = "one_sd",
+    allow_empty_data_columns: Annotated[
+        bool,
+        typer.Option("--allow-empty-data-columns", help="Permit all-missing optional columns."),
+    ] = False,
+    no_plots: Annotated[
+        bool,
+        typer.Option("--no-plots", help="Export numeric arrays only (skip figures)."),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON output.")] = False,
+) -> None:
+    """Generate the full forecast analysis bundle (panel, IRFs, decomposition)."""
+    from nydsge.report import generate_forecast_report
+
+    model_obj = _resolve_model(
+        model_name=model,
+        subspec=subspec,
+        settings=_model1002_settings(data_vintage=data_vintage, forecast_start=forecast_start),
+    )
+    data = _load_cli_data(
+        model_obj,
+        data_path,
+        allow_empty_data_columns=allow_empty_data_columns,
+    )
+    _run_report(
+        lambda: generate_forecast_report(
+            model_obj,
+            output_dir=output_dir,
+            horizon=horizon,
+            data=data,
+            history_method=history_method,
+            irf_normalization=irf_normalization,
+            check_empty_columns=not allow_empty_data_columns,
+            make_plots=not no_plots,
+        ),
+        json_output=json_output,
+    )
+
+
+@report_app.command("irf")
+def report_irf(
+    output_dir: Annotated[
+        Path,
+        typer.Option("--output-dir", help="Directory where IRF artifacts are written."),
+    ] = Path("outputs/irf"),
+    model: Annotated[str, typer.Option("--model", help="Model name.")] = "m1002",
+    subspec: Annotated[str, typer.Option(help="Model1002 subspec.")] = "ss10",
+    forecast_start: Annotated[
+        str,
+        typer.Option("--forecast-start", help="First forecast quarter, e.g. 2018-Q4."),
+    ] = "2018-Q4",
+    horizon: Annotated[int, typer.Option(help="IRF horizon.")] = 40,
+    normalization: Annotated[
+        str,
+        typer.Option("--normalization", help="Shock normalization: unit or one_sd."),
+    ] = "one_sd",
+    no_plots: Annotated[
+        bool,
+        typer.Option("--no-plots", help="Export numeric arrays only (skip figures)."),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON output.")] = False,
+) -> None:
+    """Compute impulse responses from the solved state-space system."""
+    from nydsge.report import generate_irf_report
+
+    model_obj = _resolve_model(
+        model_name=model,
+        subspec=subspec,
+        settings=_model1002_settings(data_vintage="181115", forecast_start=forecast_start),
+    )
+    _run_report(
+        lambda: generate_irf_report(
+            model_obj,
+            output_dir=output_dir,
+            horizon=horizon,
+            normalization=normalization,
+            make_plots=not no_plots,
+        ),
+        json_output=json_output,
+    )
+
+
+@report_app.command("historical-decomposition")
+def report_historical_decomposition(
+    output_dir: Annotated[
+        Path,
+        typer.Option("--output-dir", help="Directory where decomposition artifacts are written."),
+    ] = Path("outputs/historical_decomposition"),
+    model: Annotated[str, typer.Option("--model", help="Model name.")] = "m1002",
+    subspec: Annotated[str, typer.Option(help="Model1002 subspec.")] = "ss10",
+    data_vintage: Annotated[str, typer.Option("--data-vintage", help="Data vintage.")] = "181115",
+    forecast_start: Annotated[
+        str,
+        typer.Option("--forecast-start", help="First forecast quarter, e.g. 2018-Q4."),
+    ] = "2018-Q4",
+    data_path: Annotated[
+        Path | None,
+        typer.Option("--data", help="Observable CSV; defaults to the configured vintage."),
+    ] = None,
+    allow_empty_data_columns: Annotated[
+        bool,
+        typer.Option("--allow-empty-data-columns", help="Permit all-missing optional columns."),
+    ] = False,
+    no_plots: Annotated[
+        bool,
+        typer.Option("--no-plots", help="Export numeric arrays only (skip figures)."),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON output.")] = False,
+) -> None:
+    """Export a true historical shock decomposition of the in-sample path."""
+    from nydsge.report import generate_historical_decomposition_report
+
+    model_obj = _resolve_model(
+        model_name=model,
+        subspec=subspec,
+        settings=_model1002_settings(data_vintage=data_vintage, forecast_start=forecast_start),
+    )
+    data = _load_cli_data(
+        model_obj,
+        data_path,
+        allow_empty_data_columns=allow_empty_data_columns,
+    )
+    _run_report(
+        lambda: generate_historical_decomposition_report(
+            model_obj,
+            output_dir=output_dir,
+            data=data,
+            check_empty_columns=not allow_empty_data_columns,
+            make_plots=not no_plots,
+        ),
+        json_output=json_output,
+    )
+
+
 app.add_typer(data_app, name="data")
 app.add_typer(vv_app, name="vv")
+app.add_typer(report_app, name="report")
 
 
 if __name__ == "__main__":
