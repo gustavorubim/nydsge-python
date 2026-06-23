@@ -31,6 +31,20 @@ Reference timing files should be collected separately for native Windows CPU,
 Windows CUDA, macOS CPU/MPS, Linux CPU, and Linux CUDA/JAX machines. Unsupported
 targets should remain in the report as explicit skipped rows.
 
+Native benchmark labels:
+
+- `windows-cpu`: native Windows with the NumPy CPU reference path.
+- `windows-cuda`: native Windows with PyTorch CUDA available.
+- `macos-cpu`: native macOS with the NumPy CPU reference path.
+- `macos-mps`: native macOS with PyTorch MPS available.
+- `linux-cpu`: native Linux with the NumPy CPU reference path.
+- `linux-cuda`: native Linux with PyTorch CUDA or JAX CUDA available.
+
+Do not capture Windows timings from WSL. `nydsge doctor` and benchmark reports
+should show the `platform/native` row as available before collecting reference
+timings; accelerator rows that are unavailable should stay in the report as
+skipped rows.
+
 ### Cross-Machine Capture Protocol
 
 For each native machine, capture:
