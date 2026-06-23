@@ -153,6 +153,45 @@ uv run nydsge vv compare --oracle-dir tests/fixtures/oracle --candidate-dir test
 uv run nydsge vv compare --oracle-dir tests/fixtures/oracle --candidate-dir tests/fixtures/candidate --profile hard-target --tolerance-profile strict --json
 ```
 
+Fast sampler-oracle smoke fixtures can be generated without running the Julia
+mode optimizer or Hessian calculation by supplying a tiny diagonal proposal:
+
+```powershell
+julia +1.8 --project=tools/oracle_julia tools/oracle_julia/export_model1002.jl --out tests/fixtures/oracle/m1002_ss10_sampler_smoke.h5 --include-sampler true --sampler-draws 2 --sampler-burnin 0 --sampler-blocks 1 --sampler-param-blocks 1 --sampler-thin 1 --sampler-calculate-hessian false --sampler-reoptimize false --sampler-proposal-scale 1.0e-8 --sampler-seed 123 --data-out tests/fixtures/oracle/sampler_observables.csv
+uv run nydsge vv oracle-coverage --oracle-dir tests/fixtures/oracle --profile sampler --json
+uv run nydsge vv oracle-coverage --oracle-dir tests/fixtures/oracle --profile sampler-trace --json
+uv run nydsge vv oracle-coverage --oracle-dir tests/fixtures/oracle --profile sampler-proposal-trace --json
+uv run nydsge vv sampler-fixture-summary --sampler tests/fixtures/oracle --json
+uv run nydsge vv sampler-proposal-trace-check --sampler tests/fixtures/oracle --json
+uv run nydsge vv sampler-posterior-replay --sampler tests/fixtures/oracle --data tests/fixtures/oracle/sampler_observables.csv --allow-empty-data-columns --json
+uv run nydsge vv sampler-compare --oracle-sampler tests/fixtures/oracle --candidate-sampler path\to\python_sampler.npz --windows 4 --json
+```
+
+The fixture summary command reports the HDF5 draw orientation, parameter labels,
+retained-draw covariance health, sampler attributes, and retained-draw
+`accepted`/`log_posterior` traces when the exporter runs through its traced
+proposal-scale path. The base `sampler` coverage profile stays compatible with
+older `mhsave.h5` exports; `sampler-trace` is the stricter sampler-reward gate.
+The `sampler-proposal-trace` profile additionally requires retained proposal
+vectors, previous-state vectors, proposal/previous log-posterior values, uniform
+acceptance draws, and log-acceptance ratios. Those arrays, plus the sampler CSV
+written by `--data-out`, are the deterministic inputs for Python posterior
+replay checks.
+The sampler proposal trace identity gate validates retained proposal/previous
+traces, acceptance decisions, retained log posterior values, and retained
+`mhparams` metadata:
+`uv run nydsge vv sampler-proposal-trace-check --sampler tests/fixtures/oracle --json`.
+The sampler posterior replay diagnostic evaluates those model-space Julia
+proposal and previous vectors through the Python posterior path:
+`uv run nydsge vv sampler-posterior-replay --sampler tests/fixtures/oracle --data tests/fixtures/oracle/sampler_observables.csv --allow-empty-data-columns --json`.
+The real sampler smoke currently reaches finite replay and reports the measured
+posterior offset in JSON; exact absolute sampler-likelihood normalization and
+full mode/Hessian/adaptation sampler parity remain pending.
+The sampler compare command converts the traced Julia HDF5 fixture to the same
+diagnostic schema used by Python sampler `.npz` archives, then compares retained
+draws, accepted flags, log posterior traces, covariance, acceptance windows, and
+per-parameter diagnostics under an explicit tolerance profile.
+
 `export-suite` writes parameters, steady state, matrices, mode forecasts, mode
 means/bands, optional posterior and history artifacts when `--data` is
 supplied, and optional full-distribution artifacts, including forecastobs and

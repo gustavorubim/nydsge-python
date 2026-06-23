@@ -12,6 +12,7 @@ using CSV
 using DataFrames
 using DSGE
 using HDF5
+using LinearAlgebra
 using ModelConstructors
 using Random
 using Statistics
@@ -45,6 +46,11 @@ function parse_args(args)
         "sampler-c" => "0.5",
         "sampler-cc0" => "0.01",
         "sampler-calculate-hessian" => "true",
+        "sampler-reoptimize" => "false",
+        "sampler-run-csminwel" => "false",
+        "sampler-proposal-scale" => "",
+        "sampler-mode-in" => "",
+        "sampler-hessian-in" => "",
         "data-in" => "",
         "data-out" => "",
     )
@@ -89,6 +95,14 @@ function parse_optional_int(value::String)
         return nothing
     end
     return parse(Int, text)
+end
+
+function parse_optional_float(value::String)
+    text = strip(value)
+    if isempty(text)
+        return nothing
+    end
+    return parse(Float64, text)
 end
 
 function write_sampler_dataset(file, name, value)
@@ -214,8 +228,11 @@ end
 
 function ordered_mapping_names(mapping)
     items = collect(mapping)
-    sorted_items = sort(items; by = item -> item.second)
-    return [string(item.first) for item in sorted_items]
+    if all(item -> item isa Pair, items)
+        sorted_items = sort(items; by = item -> item.second)
+        return [string(item.first) for item in sorted_items]
+    end
+    return [parameter_name(item, item) for item in items]
 end
 
 function quarter_label(date)
@@ -748,10 +765,288 @@ function export_financial_frictions(file)
     write_dataset(file, "financial_frictions/values", values)
 end
 
+function metropolis_hastings_with_trace(
+    proposal_dist,
+    model,
+    data::Matrix{Float64},
+    cc0::Float64,
+    cc::Float64;
+    n_blocks::Int = 1,
+    n_param_blocks::Int = 1,
+    n_sim::Int = 100,
+    n_burn::Int = 0,
+    mhthin::Int = 1,
+    savepath::String = "mhsave.h5",
+    rng = MersenneTwister(0),
+    regime_switching::Bool = false,
+    toggle::Bool = true,
+)
+    if regime_switching
+        error("Sampler trace export does not yet support regime-switching parameters.")
+    end
+    if n_blocks <= n_burn
+        error("Sampler trace export requires n_blocks > n_burn.")
+    end
+
+    mu_symbol = Symbol(string(Char(0x03bc)))
+    sigma_symbol = Symbol(string(Char(0x03c3)))
+    lambda_symbol = Symbol(string(Char(0x03bb)), "_vals")
+    propdist = DSGE.init_deg_mvnormal(
+        getfield(proposal_dist, mu_symbol),
+        getfield(proposal_dist, sigma_symbol),
+    )
+    parameters = DSGE.get_parameters(model)
+    use_chand_recursion = !any(isnan.(data)) && !regime_switching
+
+    function loglikelihood(parameter_vector, data_matrix::Matrix{Float64})::Float64
+        DSGE.update!(
+            model,
+            parameter_vector;
+            regime_switching = regime_switching,
+            toggle = toggle,
+        )
+        return DSGE.likelihood(
+            model,
+            data_matrix;
+            sampler = true,
+            catch_errors = false,
+            use_chand_recursion = use_chand_recursion,
+        )
+    end
+
+    function trace_parameter_is_fixed(parameter)
+        return haskey(parameter.regimes, :fixed) ? all(values(parameter.regimes[:fixed])) :
+               parameter.fixed
+    end
+
+    function trace_log_prior(parameters, values::Vector{Float64})::Float64
+        if length(values) != length(parameters)
+            error("Sampler trace prior vector has the wrong parameter count.")
+        end
+
+        total = 0.0
+        for i = 1:length(parameters)
+            parameter = parameters[i]
+            if !trace_parameter_is_fixed(parameter) && ModelConstructors.hasprior(parameter)
+                total += ModelConstructors.logpdf(ModelConstructors.parameter(parameter, values[i]))
+            end
+        end
+        return total
+    end
+
+    para_old = rand(propdist, rng; cc = cc0)
+    post_old = -Inf
+    initialized = false
+    while !initialized
+        post_old = ModelConstructors.posterior!(
+            loglikelihood,
+            parameters,
+            para_old,
+            data;
+            sampler = true,
+        )
+        if post_old > -Inf
+            setfield!(propdist, mu_symbol, para_old)
+            initialized = true
+        else
+            para_old = rand(propdist, rng; cc = cc0)
+        end
+    end
+
+    free_para_inds = ModelConstructors.get_free_para_inds(
+        parameters;
+        regime_switching = regime_switching,
+        toggle = toggle,
+    )
+    n_params = length(parameters)
+    if n_param_blocks == 1
+        blocks_free = Vector{Int}[free_para_inds]
+        reblock = false
+    else
+        n_free_para = length(free_para_inds)
+        blocks_free = Vector{Int}[]
+        reblock = true
+    end
+
+    rows_per_block = n_sim * n_param_blocks
+    mhparams = zeros(rows_per_block, n_params)
+    mhaccepted = zeros(Int8, rows_per_block)
+    mhlogpost = fill(-Inf, rows_per_block)
+    mhproposal = zeros(rows_per_block, n_params)
+    mhprevious = zeros(rows_per_block, n_params)
+    mhproposal_logpost = fill(-Inf, rows_per_block)
+    mhprevious_logpost = fill(-Inf, rows_per_block)
+    mhproposal_loglikelihood = fill(-Inf, rows_per_block)
+    mhprevious_loglikelihood = fill(-Inf, rows_per_block)
+    mhproposal_logprior = fill(-Inf, rows_per_block)
+    mhprevious_logprior = fill(-Inf, rows_per_block)
+    mhuniform = fill(NaN, rows_per_block)
+    mhlog_acceptance = fill(-Inf, rows_per_block)
+    block_acceptance_rates = zeros(Float64, n_blocks)
+    all_rejections = 0
+
+    simfile = h5open(savepath, "w")
+    n_saved_obs = rows_per_block * (n_blocks - n_burn)
+    saved_accepted = zeros(Int8, n_saved_obs)
+    saved_logpost = fill(-Inf, n_saved_obs)
+    saved_proposal = zeros(n_saved_obs, n_params)
+    saved_previous = zeros(n_saved_obs, n_params)
+    saved_proposal_logpost = fill(-Inf, n_saved_obs)
+    saved_previous_logpost = fill(-Inf, n_saved_obs)
+    saved_proposal_loglikelihood = fill(-Inf, n_saved_obs)
+    saved_previous_loglikelihood = fill(-Inf, n_saved_obs)
+    saved_proposal_logprior = fill(-Inf, n_saved_obs)
+    saved_previous_logprior = fill(-Inf, n_saved_obs)
+    saved_uniform = fill(NaN, n_saved_obs)
+    saved_log_acceptance = fill(-Inf, n_saved_obs)
+    parasim = isdefined(HDF5, :create_dataset) ?
+        HDF5.create_dataset(
+            simfile,
+            "mhparams",
+            datatype(Float64),
+            dataspace(n_saved_obs, n_params);
+            chunk = (rows_per_block, n_params),
+        ) :
+        HDF5.d_create(
+            simfile,
+            "mhparams",
+            datatype(Float64),
+            dataspace(n_saved_obs, n_params),
+            "chunk",
+            (rows_per_block, n_params),
+        )
+
+    try
+        for block = 1:n_blocks
+            block_rejections = 0
+
+            for j = 1:(n_sim * mhthin)
+                if reblock
+                    blocks_free = DSGE.SMC.generate_free_blocks(n_free_para, n_param_blocks)
+                    for block_f in blocks_free
+                        sort!(block_f)
+                    end
+                end
+
+                for (k, block_a) in enumerate(blocks_free)
+                    para_previous = deepcopy(para_old)
+                    post_previous = post_old
+                    para_subset = para_old[block_a]
+                    proposal_mu = getfield(propdist, mu_symbol)
+                    proposal_sigma = getfield(propdist, sigma_symbol)
+                    proposal_lambda = getfield(propdist, lambda_symbol)
+                    subset_sigma = (
+                        proposal_sigma[block_a, block_a] +
+                        proposal_sigma[block_a, block_a]'
+                    ) / 2.0
+                    d_subset = DegenerateMvNormal(
+                        proposal_mu[block_a],
+                        subset_sigma,
+                        inv(subset_sigma),
+                        proposal_lambda[block_a],
+                    )
+
+                    para_draw = rand(d_subset, rng; cc = cc)
+                    para_new = deepcopy(para_old)
+                    para_new[block_a] = para_draw
+                    post_new = ModelConstructors.posterior!(
+                        loglikelihood,
+                        parameters,
+                        para_new,
+                        data;
+                        sampler = true,
+                    )
+                    prior_new = trace_log_prior(parameters, para_new)
+                    prior_previous = trace_log_prior(parameters, para_previous)
+
+                    accepted_step = false
+                    log_acceptance = post_new - post_old
+                    r = exp(log_acceptance)
+                    x = rand(rng)
+                    if x < min(1.0, r)
+                        para_old = para_new
+                        post_old = post_new
+                        setfield!(propdist, mu_symbol, para_new)
+                        accepted_step = true
+                    else
+                        block_rejections += 1
+                    end
+
+                    if j % mhthin == 0
+                        draw_index = convert(Int, ((j / mhthin) - 1) * n_param_blocks + k)
+                        mhparams[draw_index, :] = para_old'
+                        mhaccepted[draw_index] = accepted_step ? Int8(1) : Int8(0)
+                        mhlogpost[draw_index] = post_old
+                        mhproposal[draw_index, :] = para_new'
+                        mhprevious[draw_index, :] = para_previous'
+                        mhproposal_logpost[draw_index] = post_new
+                        mhprevious_logpost[draw_index] = post_previous
+                        mhproposal_logprior[draw_index] = prior_new
+                        mhprevious_logprior[draw_index] = prior_previous
+                        mhproposal_loglikelihood[draw_index] = post_new - prior_new
+                        mhprevious_loglikelihood[draw_index] = post_previous - prior_previous
+                        mhuniform[draw_index] = x
+                        mhlog_acceptance[draw_index] = log_acceptance
+                    end
+                end
+            end
+
+            all_rejections += block_rejections
+            block_acceptance_rates[block] =
+                1.0 - block_rejections / (n_sim * mhthin * n_param_blocks)
+
+            block_start = rows_per_block * (block - n_burn - 1) + 1
+            block_end = block_start + rows_per_block - 1
+            if block > n_burn
+                parasim[block_start:block_end, :] = map(Float64, mhparams)
+                saved_accepted[block_start:block_end] = mhaccepted
+                saved_logpost[block_start:block_end] = mhlogpost
+                saved_proposal[block_start:block_end, :] = mhproposal
+                saved_previous[block_start:block_end, :] = mhprevious
+                saved_proposal_logpost[block_start:block_end] = mhproposal_logpost
+                saved_previous_logpost[block_start:block_end] = mhprevious_logpost
+                saved_proposal_loglikelihood[block_start:block_end] = mhproposal_loglikelihood
+                saved_previous_loglikelihood[block_start:block_end] = mhprevious_loglikelihood
+                saved_proposal_logprior[block_start:block_end] = mhproposal_logprior
+                saved_previous_logprior[block_start:block_end] = mhprevious_logprior
+                saved_uniform[block_start:block_end] = mhuniform
+                saved_log_acceptance[block_start:block_end] = mhlog_acceptance
+            end
+        end
+
+        simfile["accepted"] = saved_accepted
+        simfile["log_posterior"] = saved_logpost
+        simfile["proposal_parameters"] = saved_proposal
+        simfile["previous_parameters"] = saved_previous
+        simfile["proposal_log_posterior"] = saved_proposal_logpost
+        simfile["previous_log_posterior"] = saved_previous_logpost
+        simfile["proposal_log_likelihood"] = saved_proposal_loglikelihood
+        simfile["previous_log_likelihood"] = saved_previous_loglikelihood
+        simfile["proposal_log_prior"] = saved_proposal_logprior
+        simfile["previous_log_prior"] = saved_previous_logprior
+        simfile["uniform_draw"] = saved_uniform
+        simfile["log_acceptance"] = saved_log_acceptance
+
+        write_attribute(
+            simfile,
+            "acceptance_rate",
+            string(1.0 - all_rejections / (n_blocks * n_sim * mhthin * n_param_blocks)),
+        )
+        write_attribute(
+            simfile,
+            "block_acceptance_rates",
+            join(string.(block_acceptance_rates), ","),
+        )
+    finally
+        close(simfile)
+    end
+end
+
 function export_sampler(
     file,
     model;
     data_in::String = "",
+    data_out::String = "",
     draws::Int = 5000,
     burnin::Int = 2,
     blocks::Int = 22,
@@ -764,11 +1059,21 @@ function export_sampler(
     cc0::Float64 = 0.01,
     alpha::Float64 = 1.0,
     calculate_hessian::Bool = true,
+    reoptimize::Bool = false,
+    run_csminwel::Bool = false,
+    proposal_scale::Union{Float64,Nothing} = nothing,
+    mode_in::String = "",
+    hessian_in::String = "",
     seed::Union{Int,Nothing} = nothing,
 )
     history_data = load_or_read_history_data(model; data_in = data_in)
+    if !isempty(data_out)
+        mkpath(dirname(data_out))
+        CSV.write(data_out, history_data)
+    end
     model <= Setting(:sampling_method, :MH)
     model <= Setting(:calculate_hessian, calculate_hessian)
+    model <= Setting(:reoptimize, reoptimize)
     model <= Setting(:n_mh_simulations, draws, "Metropolis-Hastings draws")
     model <= Setting(:n_mh_blocks, blocks, "Metropolis-Hastings block count")
     model <= Setting(:n_mh_param_blocks, param_blocks, "Metropolis-Hastings parameter blocks")
@@ -777,25 +1082,124 @@ function export_sampler(
     model <= Setting(:mh_adaptive_accept, adaptive_accept, "Adaptive MH proposal acceptance")
     model <= Setting(:mh_target_accept, target_accept, "Target MH acceptance rate")
     model <= Setting(:mh_cc, cc, "Metropolis-Hastings cc parameter")
-    model <= Setting(:mh_α, alpha, "Metropolis-Hastings alpha parameter")
+    model <= Setting(Symbol("mh_", string(Char(0x03b1))), alpha, "Metropolis-Hastings alpha parameter")
     model <= Setting(:mh_c, c, "Metropolis-Hastings c parameter")
     model <= Setting(:mh_cc0, cc0, "Metropolis-Hastings cc0 parameter")
+    if !isempty(mode_in)
+        specify_mode!(model, mode_in; verbose = :none)
+    end
+    if !isempty(hessian_in)
+        specify_hessian!(model, hessian_in; verbose = :none)
+    end
     if seed !== nothing
         model.rng = MersenneTwister(seed)
     end
 
-    estimate(
-        model,
-        history_data;
-        old_data = Matrix{Float64}(undef, size(history_data, 1), 0),
-        sampling = true,
-        verbose = :none,
-    )
+    input_proposal_covariance = Matrix{Float64}(undef, 0, 0)
+    if proposal_scale !== nothing
+        n_params = length(DSGE.get_parameters(model))
+        input_proposal_covariance = Matrix{Float64}(I, n_params, n_params) .* proposal_scale
+    end
 
+    if proposal_scale !== nothing
+        data_matrix = history_data isa DataFrame ? df_to_matrix(model, history_data) : Matrix{Float64}(history_data)
+        params = ModelConstructors.get_values(
+            DSGE.get_parameters(model);
+            regime_switching = false,
+        )
+        propdist = DegenerateMvNormal(params, input_proposal_covariance)
+        if adaptive_accept
+            @warn "Sampler trace export is skipped when adaptive_accept=true."
+            metropolis_hastings(propdist, model, data_matrix, cc0, cc; verbose = :none)
+        else
+            metropolis_hastings_with_trace(
+                propdist,
+                model,
+                data_matrix,
+                cc0,
+                cc;
+                n_blocks = blocks,
+                n_param_blocks = param_blocks,
+                n_sim = draws,
+                n_burn = burnin,
+                mhthin = thin,
+                savepath = rawpath(model, "estimate", "mhsave.h5"),
+                rng = model.rng,
+            )
+        end
+        compute_parameter_covariance(model)
+    else
+        estimate(
+            model,
+            history_data;
+            old_data = Matrix{Float64}(undef, size(history_data, 1), 0),
+            run_csminwel = run_csminwel,
+            sampling = true,
+            verbose = :none,
+        )
+    end
+
+    sampler_accepted = Int8[]
+    sampler_log_posterior = Float64[]
+    sampler_proposal_parameters = Matrix{Float64}(undef, 0, 0)
+    sampler_previous_parameters = Matrix{Float64}(undef, 0, 0)
+    sampler_proposal_log_posterior = Float64[]
+    sampler_previous_log_posterior = Float64[]
+    sampler_proposal_log_likelihood = Float64[]
+    sampler_previous_log_likelihood = Float64[]
+    sampler_proposal_log_prior = Float64[]
+    sampler_previous_log_prior = Float64[]
+    sampler_uniform_draw = Float64[]
+    sampler_log_acceptance = Float64[]
+    sampler_acceptance_rate = ""
+    sampler_block_acceptance_rates = ""
     mhparams = h5open(rawpath(model, "estimate", "mhsave.h5"), "r") do handle
+        if haskey(handle, "accepted")
+            sampler_accepted = vec(read(handle["accepted"]))
+        end
+        if haskey(handle, "log_posterior")
+            sampler_log_posterior = vec(read(handle["log_posterior"]))
+        end
+        if haskey(handle, "proposal_parameters")
+            sampler_proposal_parameters = read(handle["proposal_parameters"])
+        end
+        if haskey(handle, "previous_parameters")
+            sampler_previous_parameters = read(handle["previous_parameters"])
+        end
+        if haskey(handle, "proposal_log_posterior")
+            sampler_proposal_log_posterior = vec(read(handle["proposal_log_posterior"]))
+        end
+        if haskey(handle, "previous_log_posterior")
+            sampler_previous_log_posterior = vec(read(handle["previous_log_posterior"]))
+        end
+        if haskey(handle, "proposal_log_likelihood")
+            sampler_proposal_log_likelihood = vec(read(handle["proposal_log_likelihood"]))
+        end
+        if haskey(handle, "previous_log_likelihood")
+            sampler_previous_log_likelihood = vec(read(handle["previous_log_likelihood"]))
+        end
+        if haskey(handle, "proposal_log_prior")
+            sampler_proposal_log_prior = vec(read(handle["proposal_log_prior"]))
+        end
+        if haskey(handle, "previous_log_prior")
+            sampler_previous_log_prior = vec(read(handle["previous_log_prior"]))
+        end
+        if haskey(handle, "uniform_draw")
+            sampler_uniform_draw = vec(read(handle["uniform_draw"]))
+        end
+        if haskey(handle, "log_acceptance")
+            sampler_log_acceptance = vec(read(handle["log_acceptance"]))
+        end
+        attrs = attributes(handle)
+        if "acceptance_rate" in keys(attrs)
+            sampler_acceptance_rate = read_attribute(handle, "acceptance_rate")
+        end
+        if "block_acceptance_rates" in keys(attrs)
+            sampler_block_acceptance_rates = read_attribute(handle, "block_acceptance_rates")
+        end
         read(handle["mhparams"])
     end
-    proposal_covariance = h5open(
+    draw_covariance = h5open(
         workpath(model, "estimate", "parameter_covariance.h5"),
         "r",
     ) do handle
@@ -820,10 +1224,117 @@ function export_sampler(
     write_file_attribute(file, "sampler_c", string(c))
     write_file_attribute(file, "sampler_cc0", string(cc0))
     write_file_attribute(file, "sampler_calculate_hessian", string(calculate_hessian))
+    write_file_attribute(file, "sampler_reoptimize", string(reoptimize))
+    write_file_attribute(file, "sampler_run_csminwel", string(run_csminwel))
+    write_file_attribute(
+        file,
+        "sampler_proposal_scale",
+        proposal_scale === nothing ? "" : string(proposal_scale),
+    )
+    write_file_attribute(file, "sampler_mode_in", mode_in)
+    write_file_attribute(file, "sampler_hessian_in", hessian_in)
+    write_file_attribute(file, "sampler_covariance_source", "saved_draw_covariance")
+    write_file_attribute(
+        file,
+        "sampler_trace_available",
+        string(!isempty(sampler_accepted) && !isempty(sampler_log_posterior)),
+    )
+    write_file_attribute(
+        file,
+        "sampler_proposal_trace_available",
+        string(!isempty(sampler_proposal_parameters) && !isempty(sampler_proposal_log_posterior)),
+    )
+    write_file_attribute(file, "sampler_acceptance_rate", sampler_acceptance_rate)
+    write_file_attribute(
+        file,
+        "sampler_block_acceptance_rates",
+        sampler_block_acceptance_rates,
+    )
+    write_file_attribute(
+        file,
+        "sampler_input_proposal_covariance_available",
+        string(!isempty(input_proposal_covariance)),
+    )
     write_file_attribute(file, "sampler_seed", seed === nothing ? "" : string(seed))
 
     write_sampler_dataset(file, "sampler/mhparams", mhparams)
-    write_sampler_dataset(file, "sampler/proposal_covariance", proposal_covariance)
+    if !isempty(sampler_accepted)
+        write_sampler_dataset(file, "sampler/accepted", sampler_accepted)
+    end
+    if !isempty(sampler_log_posterior)
+        write_sampler_dataset(file, "sampler/log_posterior", sampler_log_posterior)
+    end
+    if !isempty(sampler_proposal_parameters)
+        write_sampler_dataset(
+            file,
+            "sampler/proposal_parameters",
+            sampler_proposal_parameters,
+        )
+    end
+    if !isempty(sampler_previous_parameters)
+        write_sampler_dataset(
+            file,
+            "sampler/previous_parameters",
+            sampler_previous_parameters,
+        )
+    end
+    if !isempty(sampler_proposal_log_posterior)
+        write_sampler_dataset(
+            file,
+            "sampler/proposal_log_posterior",
+            sampler_proposal_log_posterior,
+        )
+    end
+    if !isempty(sampler_previous_log_posterior)
+        write_sampler_dataset(
+            file,
+            "sampler/previous_log_posterior",
+            sampler_previous_log_posterior,
+        )
+    end
+    if !isempty(sampler_proposal_log_likelihood)
+        write_sampler_dataset(
+            file,
+            "sampler/proposal_log_likelihood",
+            sampler_proposal_log_likelihood,
+        )
+    end
+    if !isempty(sampler_previous_log_likelihood)
+        write_sampler_dataset(
+            file,
+            "sampler/previous_log_likelihood",
+            sampler_previous_log_likelihood,
+        )
+    end
+    if !isempty(sampler_proposal_log_prior)
+        write_sampler_dataset(
+            file,
+            "sampler/proposal_log_prior",
+            sampler_proposal_log_prior,
+        )
+    end
+    if !isempty(sampler_previous_log_prior)
+        write_sampler_dataset(
+            file,
+            "sampler/previous_log_prior",
+            sampler_previous_log_prior,
+        )
+    end
+    if !isempty(sampler_uniform_draw)
+        write_sampler_dataset(file, "sampler/uniform_draw", sampler_uniform_draw)
+    end
+    if !isempty(sampler_log_acceptance)
+        write_sampler_dataset(file, "sampler/log_acceptance", sampler_log_acceptance)
+    end
+    write_sampler_dataset(file, "sampler/proposal_covariance", draw_covariance)
+    write_sampler_dataset(file, "sampler/draw_covariance", draw_covariance)
+    if !isempty(input_proposal_covariance)
+        write_sampler_dataset(
+            file,
+            "sampler/input_proposal_covariance",
+            input_proposal_covariance,
+        )
+    end
 end
 
 function export_model1002(;
@@ -854,6 +1365,11 @@ function export_model1002(;
     sampler_c,
     sampler_cc0,
     sampler_calculate_hessian,
+    sampler_reoptimize,
+    sampler_run_csminwel,
+    sampler_proposal_scale,
+    sampler_mode_in,
+    sampler_hessian_in,
     data_in,
     data_out,
 )
@@ -894,6 +1410,7 @@ function export_model1002(;
                 file,
                 model;
                 data_in = data_in,
+                data_out = data_out,
                 draws = sampler_draws,
                 burnin = sampler_burnin,
                 blocks = sampler_blocks,
@@ -906,6 +1423,11 @@ function export_model1002(;
                 cc0 = sampler_cc0,
                 alpha = sampler_alpha,
                 calculate_hessian = sampler_calculate_hessian,
+                reoptimize = sampler_reoptimize,
+                run_csminwel = sampler_run_csminwel,
+                proposal_scale = sampler_proposal_scale,
+                mode_in = sampler_mode_in,
+                hessian_in = sampler_hessian_in,
                 seed = sampler_seed,
             )
         end
@@ -1013,6 +1535,11 @@ function export_model1002_main(args = ARGS)
         sampler_c = parse_float(options["sampler-c"]),
         sampler_cc0 = parse_float(options["sampler-cc0"]),
         sampler_calculate_hessian = parse_bool(options["sampler-calculate-hessian"]),
+        sampler_reoptimize = parse_bool(options["sampler-reoptimize"]),
+        sampler_run_csminwel = parse_bool(options["sampler-run-csminwel"]),
+        sampler_proposal_scale = parse_optional_float(options["sampler-proposal-scale"]),
+        sampler_mode_in = options["sampler-mode-in"],
+        sampler_hessian_in = options["sampler-hessian-in"],
         data_in = options["data-in"],
         data_out = options["data-out"],
     )
