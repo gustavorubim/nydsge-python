@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 from typer.testing import CliRunner
 
 import nydsge.cli as cli
@@ -12,12 +13,14 @@ from nydsge.cli import app
 from nydsge.estimate import (
     EstimationModeResult,
     MetropolisHastingsResult,
+    evaluate_log_posterior_for_parameter_values,
     parameter_estimation_vector,
     save_estimation_mode,
     save_sampler_result,
 )
 from nydsge.models import Model1002
 from nydsge.runtime import RuntimeStatus
+from nydsge.vv import load_sampler_fixture_result
 
 
 def test_doctor_json() -> None:
@@ -1017,6 +1020,213 @@ def test_vv_sampler_diagnostics_reports_archive_metrics(tmp_path) -> None:
     assert payload["parameters"][0]["split_rhat"] is None
 
 
+def test_vv_sampler_fixture_summary_reports_julia_hdf5_metadata(tmp_path) -> None:
+    h5py = pytest.importorskip("h5py")
+    oracle = tmp_path / "oracle"
+    oracle.mkdir()
+    path = oracle / "m1002_sampler.h5"
+    with h5py.File(path, "w") as handle:
+        handle["sampler/mhparams"] = np.array([[0.1, 1.1, 2.1], [0.2, 1.2, 2.2]])
+        handle["sampler/proposal_covariance"] = np.diag([0.5, 2.0])
+        handle["sampler/input_proposal_covariance"] = 1.0e-8 * np.eye(2)
+        handle["sampler/accepted"] = np.array([1, 0, 1], dtype=np.int8)
+        handle["sampler/log_posterior"] = np.array([-3.0, -2.5, -2.0])
+        handle["sampler/proposal_parameters"] = np.array([[0.15, 1.15, 2.15], [0.25, 1.25, 2.25]])
+        handle["sampler/previous_parameters"] = np.array([[0.05, 1.05, 2.05], [0.15, 1.15, 2.15]])
+        handle["sampler/proposal_log_posterior"] = np.array([-2.8, -2.6, -1.9])
+        handle["sampler/previous_log_posterior"] = np.array([-3.1, -2.7, -2.1])
+        handle["sampler/uniform_draw"] = np.array([0.2, 0.6, 0.4])
+        handle["sampler/log_acceptance"] = np.array([0.3, -0.1, 0.2])
+        handle.attrs["sampler_parameter_names"] = "alpha,beta"
+        handle.attrs["sampler_draws"] = 3
+        handle.attrs["sampler_proposal_scale"] = "1.0e-8"
+        handle.attrs["sampler_covariance_source"] = "saved_draw_covariance"
+        handle.attrs["sampler_trace_available"] = "true"
+        handle.attrs["sampler_proposal_trace_available"] = "true"
+        handle.attrs["sampler_acceptance_rate"] = "0.6666666666666666"
+        handle.attrs["sampler_block_acceptance_rates"] = "0.6666666666666666"
+        handle.attrs["sampler_input_proposal_covariance_available"] = "true"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "vv",
+            "sampler-fixture-summary",
+            "--sampler",
+            str(oracle),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["fixture_path"] == str(path)
+    assert payload["parameter_names"] == ["alpha", "beta"]
+    assert payload["mhparams_shape"] == [2, 3]
+    assert payload["parameter_axis"] == 0
+    assert payload["draw_axis"] == 1
+    assert payload["draws"] == 3
+    assert payload["covariance_shape"] == [2, 2]
+    assert payload["covariance_source"] == "saved_draw_covariance"
+    assert payload["covariance_positive_semidefinite"] is True
+    assert payload["input_proposal_covariance_available"] is True
+    assert payload["trace_available"] is True
+    assert payload["accepted_shape"] == [3]
+    assert payload["log_posterior_shape"] == [3]
+    assert payload["accepted_draws"] == 2
+    assert payload["realized_acceptance_rate"] == 2 / 3
+    assert payload["log_posterior_minimum"] == -3.0
+    assert payload["log_posterior_maximum"] == -2.0
+    assert payload["proposal_trace_available"] is True
+    assert payload["proposal_parameters_shape"] == [2, 3]
+    assert payload["previous_parameters_shape"] == [2, 3]
+    assert payload["proposal_log_posterior_shape"] == [3]
+    assert payload["uniform_draw_shape"] == [3]
+    assert payload["log_acceptance_shape"] == [3]
+    assert payload["proposal_log_posterior_minimum"] == -2.8
+    assert payload["proposal_log_posterior_maximum"] == -1.9
+    assert payload["log_acceptance_minimum"] == -0.1
+    assert payload["log_acceptance_maximum"] == 0.3
+    assert payload["metadata"]["proposal_scale"] == 1.0e-8
+    assert payload["metadata"]["trace_available"] is True
+    assert payload["metadata"]["proposal_trace_available"] is True
+    assert payload["metadata"]["acceptance_rate"] == 2 / 3
+    assert payload["metadata"]["block_acceptance_rates"] == 2 / 3
+    assert payload["unavailable_diagnostics"] == []
+    assert payload["unavailable_proposal_diagnostics"] == []
+
+
+def test_vv_sampler_compare_reports_matching_trace_archive(tmp_path) -> None:
+    h5py = pytest.importorskip("h5py")
+    oracle_path = tmp_path / "oracle_sampler.h5"
+    with h5py.File(oracle_path, "w") as handle:
+        handle["sampler/mhparams"] = np.array([[0.1, 1.1, 2.1], [0.2, 1.2, 2.2]])
+        handle["sampler/proposal_covariance"] = np.diag([0.5, 2.0])
+        handle["sampler/accepted"] = np.array([1, 0, 1], dtype=np.int8)
+        handle["sampler/log_posterior"] = np.array([-3.0, -2.5, -2.0])
+        handle.attrs["sampler_parameter_names"] = "alpha,beta"
+        handle.attrs["sampler_draws"] = 3
+        handle.attrs["sampler_blocks"] = 1
+        handle.attrs["sampler_param_blocks"] = 1
+        handle.attrs["sampler_thin"] = 1
+        handle.attrs["sampler_burnin"] = 0
+        handle.attrs["sampler_acceptance_rate"] = "0.6666666666666666"
+        handle.attrs["sampler_seed"] = 123
+    candidate_path = save_sampler_result(
+        load_sampler_fixture_result(oracle_path),
+        tmp_path / "candidate_sampler.npz",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "vv",
+            "sampler-compare",
+            "--oracle-sampler",
+            str(oracle_path),
+            "--candidate-sampler",
+            str(candidate_path),
+            "--windows",
+            "2",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["oracle_sampler"] == str(oracle_path)
+    assert payload["candidate_sampler"] == str(candidate_path)
+    assert payload["passed"] is True
+    assert {item["name"] for item in payload["comparisons"]} == {
+        "parameter_draws",
+        "log_posterior",
+        "accepted",
+        "proposal_covariance",
+        "diagnostics/core",
+        "diagnostics/acceptance_windows",
+        "diagnostics/parameters",
+    }
+
+
+def test_vv_sampler_proposal_trace_check_replays_julia_hdf5_trace(tmp_path) -> None:
+    sampler_path = _write_sampler_proposal_trace_hdf5(tmp_path)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "vv",
+            "sampler-proposal-trace-check",
+            "--sampler",
+            str(sampler_path),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["sampler_path"] == str(sampler_path)
+    assert payload["passed"] is True
+    assert payload["tolerance_profile"]["name"] == "strict"
+    assert {item["name"] for item in payload["comparisons"]} == {
+        "proposal_trace/log_acceptance",
+        "proposal_trace/accepted",
+        "proposal_trace/retained_log_posterior",
+        "proposal_trace/retained_parameters",
+    }
+
+
+def test_vv_sampler_posterior_replay_compares_model_value_trace(tmp_path) -> None:
+    data_path = _write_observable_csv(tmp_path, periods=1)
+    model = Model1002()
+    observations = np.zeros((1, len(model.observables)), dtype=np.float64)
+    sampler_path = _write_sampler_posterior_replay_hdf5(tmp_path, model, observations)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "vv",
+            "sampler-posterior-replay",
+            "--sampler",
+            str(sampler_path),
+            "--data",
+            str(data_path),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["sampler_path"] == str(sampler_path)
+    assert payload["data"] == str(data_path)
+    assert payload["passed"] is True
+    assert payload["draws"] == 2
+    assert payload["tolerance_profile"]["name"] == "strict"
+    assert {item["name"] for item in payload["comparisons"]} == {
+        "proposal_trace/proposal_log_posterior",
+        "proposal_trace/previous_log_posterior",
+        "proposal_trace/log_acceptance_from_replay",
+        "proposal_trace/proposal_log_likelihood",
+        "proposal_trace/previous_log_likelihood",
+        "proposal_trace/proposal_log_prior",
+        "proposal_trace/previous_log_prior",
+    }
+
+
+def test_presample_period_count_normalizes_timestamp_settings() -> None:
+    model = Model1002()
+    model.set_setting("date_presample_start", "2017-Q4")
+    model.set_setting("date_mainsample_start", pd.Timestamp("2018-04-01"))
+    model.set_setting("date_forecast_start", "2018-Q4")
+    data = pd.DataFrame(
+        {
+            "date": ["2017-Q4", "2018-Q1", "2018-Q2"],
+            next(iter(model.observables)): [1.0, 2.0, 3.0],
+        }
+    )
+
+    assert cli._presample_period_count(model, data) == 2
+
+
 def test_forecast_command_reports_model1002_forecast_shape() -> None:
     result = CliRunner().invoke(app, ["forecast", "--horizon", "3", "--json"])
 
@@ -1589,6 +1799,118 @@ def _write_sampler_archive(tmp_path: Path) -> Path:
         burnin=0,
     )
     return save_sampler_result(sampler, tmp_path / "sampler.npz")
+
+
+def _write_sampler_proposal_trace_hdf5(tmp_path: Path) -> Path:
+    h5py = pytest.importorskip("h5py")
+    path = tmp_path / "sampler_proposal_trace.h5"
+    proposal_log_posterior = np.array([-3.0, -3.2, -2.0], dtype=np.float64)
+    previous_log_posterior = np.array([-3.4, -2.5, -2.2], dtype=np.float64)
+    with h5py.File(path, "w") as handle:
+        handle["sampler/mhparams"] = np.array(
+            [[0.1, 1.1, 2.1], [0.2, 1.2, 2.2]],
+            dtype=np.float64,
+        )
+        handle["sampler/proposal_covariance"] = np.diag([0.5, 2.0])
+        handle["sampler/accepted"] = np.array([1, 0, 1], dtype=np.int8)
+        handle["sampler/log_posterior"] = np.array([-3.0, -2.5, -2.0])
+        handle["sampler/proposal_parameters"] = np.array(
+            [[0.1, 1.3, 2.1], [0.2, 1.4, 2.2]],
+            dtype=np.float64,
+        )
+        handle["sampler/previous_parameters"] = np.array(
+            [[0.0, 1.1, 2.0], [0.1, 1.2, 2.1]],
+            dtype=np.float64,
+        )
+        handle["sampler/proposal_log_posterior"] = proposal_log_posterior
+        handle["sampler/previous_log_posterior"] = previous_log_posterior
+        handle["sampler/uniform_draw"] = np.array([0.2, 0.8, 0.9], dtype=np.float64)
+        handle["sampler/log_acceptance"] = proposal_log_posterior - previous_log_posterior
+        handle.attrs["sampler_parameter_names"] = "alpha,beta"
+        handle.attrs["sampler_draws"] = 3
+        handle.attrs["sampler_blocks"] = 1
+        handle.attrs["sampler_param_blocks"] = 1
+        handle.attrs["sampler_thin"] = 1
+        handle.attrs["sampler_burnin"] = 0
+        handle.attrs["sampler_trace_available"] = "true"
+        handle.attrs["sampler_proposal_trace_available"] = "true"
+    return path
+
+
+def _write_sampler_posterior_replay_hdf5(
+    tmp_path: Path,
+    model: Model1002,
+    observations: np.ndarray,
+) -> Path:
+    h5py = pytest.importorskip("h5py")
+    path = tmp_path / "sampler_posterior_replay.h5"
+    parameter_names = tuple(model.parameters)
+    current_values = np.asarray(
+        [parameter.value for parameter in model.parameters.values()],
+        dtype=np.float64,
+    )
+    proposal_draws = np.vstack([current_values, current_values])
+    previous_draws = np.vstack([current_values, current_values])
+    fixed_index = next(
+        index for index, parameter in enumerate(model.parameters.values()) if parameter.fixed
+    )
+    proposal_draws[0, fixed_index] += 1.0e-3
+    proposal_components = np.asarray(
+        [
+            evaluate_log_posterior_for_parameter_values(
+                model,
+                observations,
+                parameter_names,
+                draw,
+                update_fixed_parameters=False,
+            )[:3]
+            for draw in proposal_draws
+        ],
+        dtype=np.float64,
+    )
+    previous_components = np.asarray(
+        [
+            evaluate_log_posterior_for_parameter_values(
+                model,
+                observations,
+                parameter_names,
+                draw,
+                update_fixed_parameters=False,
+            )[:3]
+            for draw in previous_draws
+        ],
+        dtype=np.float64,
+    )
+    proposal_log_posterior = proposal_components[:, 0]
+    proposal_log_likelihood = proposal_components[:, 1]
+    proposal_log_prior = proposal_components[:, 2]
+    previous_log_posterior = previous_components[:, 0]
+    previous_log_likelihood = previous_components[:, 1]
+    previous_log_prior = previous_components[:, 2]
+    with h5py.File(path, "w") as handle:
+        handle["sampler/mhparams"] = proposal_draws.T
+        handle["sampler/proposal_covariance"] = np.eye(len(parameter_names), dtype=np.float64)
+        handle["sampler/accepted"] = np.array([1, 1], dtype=np.int8)
+        handle["sampler/log_posterior"] = proposal_log_posterior
+        handle["sampler/proposal_parameters"] = proposal_draws.T
+        handle["sampler/previous_parameters"] = previous_draws.T
+        handle["sampler/proposal_log_posterior"] = proposal_log_posterior
+        handle["sampler/previous_log_posterior"] = previous_log_posterior
+        handle["sampler/proposal_log_likelihood"] = proposal_log_likelihood
+        handle["sampler/previous_log_likelihood"] = previous_log_likelihood
+        handle["sampler/proposal_log_prior"] = proposal_log_prior
+        handle["sampler/previous_log_prior"] = previous_log_prior
+        handle["sampler/uniform_draw"] = np.array([0.2, 0.3], dtype=np.float64)
+        handle["sampler/log_acceptance"] = proposal_log_posterior - previous_log_posterior
+        handle.attrs["sampler_parameter_names"] = ",".join(parameter_names)
+        handle.attrs["sampler_draws"] = 2
+        handle.attrs["sampler_blocks"] = 1
+        handle.attrs["sampler_param_blocks"] = 1
+        handle.attrs["sampler_thin"] = 1
+        handle.attrs["sampler_burnin"] = 0
+        handle.attrs["sampler_trace_available"] = "true"
+        handle.attrs["sampler_proposal_trace_available"] = "true"
+    return path
 
 
 def _write_shock_samples_archive(tmp_path: Path, *, horizon: int) -> Path:

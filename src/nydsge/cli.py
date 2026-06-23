@@ -32,6 +32,7 @@ from nydsge.data import (
     download_current_fred_source_csv,
     download_fred_api_source_csv,
     load_data,
+    quarter_label,
     quarter_labels_from_start,
 )
 from nydsge.estimate import (
@@ -88,8 +89,12 @@ from nydsge.runtime import (
 from nydsge.solve import CanonicalSolveMethod, compute_system, solve_canonical
 from nydsge.vv import (
     check_fixture_coverage,
+    check_sampler_proposal_trace,
     compare_fixture_dirs,
+    compare_sampler_results,
     load_canonical_fixture,
+    load_sampler_fixture_result,
+    replay_sampler_proposal_posteriors,
     required_fixture_arrays,
     resolve_tolerance_profile,
     save_canonical_fixture,
@@ -102,6 +107,7 @@ from nydsge.vv import (
     save_steady_state_fixture,
     save_system_fixture,
     save_transition_fixture,
+    summarize_sampler_fixture,
 )
 
 app = typer.Typer(help="Native Python tools for the NY Fed DSGE model port.")
@@ -1915,6 +1921,410 @@ def vv_sampler_diagnostics(
             "-" if parameter.split_rhat is None else f"{parameter.split_rhat:.6g}",
         )
     console.print(table)
+
+
+@vv_app.command("sampler-fixture-summary")
+def vv_sampler_fixture_summary(
+    sampler_path: Annotated[
+        Path,
+        typer.Option("--sampler", help="Julia HDF5 sampler fixture file or directory."),
+    ],
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit JSON instead of a table."),
+    ] = False,
+) -> None:
+    """Summarize a Julia sampler oracle fixture for sampler parity work."""
+    try:
+        summary = summarize_sampler_fixture(sampler_path)
+    except (
+        FileNotFoundError,
+        ImportError,
+        KeyError,
+        NotADirectoryError,
+        OSError,
+        ValueError,
+        np.linalg.LinAlgError,
+    ) as err:
+        console.print(f"[yellow]{err}[/yellow]")
+        raise typer.Exit(code=2) from err
+    payload = summary.to_dict()
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    table = Table(title="Sampler fixture summary")
+    table.add_column("Metric")
+    table.add_column("Value")
+    table.add_row("fixture", str(summary.fixture_path))
+    table.add_row("parameters", str(summary.parameter_count))
+    table.add_row("draws", str(summary.draws))
+    table.add_row("mhparams_shape", str(summary.mhparams_shape))
+    table.add_row("parameter_axis", str(summary.parameter_axis))
+    table.add_row("draw_axis", str(summary.draw_axis))
+    table.add_row("covariance_shape", str(summary.covariance_shape))
+    table.add_row("covariance_source", summary.covariance_source)
+    table.add_row("covariance_condition", f"{summary.covariance_condition_number:.4g}")
+    table.add_row("covariance_min_eigenvalue", f"{summary.covariance_min_eigenvalue:.4g}")
+    table.add_row("covariance_max_eigenvalue", f"{summary.covariance_max_eigenvalue:.4g}")
+    table.add_row("covariance_psd", str(summary.covariance_positive_semidefinite))
+    table.add_row(
+        "input_proposal_covariance",
+        str(summary.input_proposal_covariance_available),
+    )
+    table.add_row("trace_available", str(summary.trace_available))
+    table.add_row(
+        "accepted_draws",
+        "-" if summary.accepted_draws is None else str(summary.accepted_draws),
+    )
+    table.add_row(
+        "realized_acceptance",
+        "-"
+        if summary.realized_acceptance_rate is None
+        else f"{summary.realized_acceptance_rate:.4f}",
+    )
+    table.add_row(
+        "log_posterior_min",
+        "-" if summary.log_posterior_minimum is None else f"{summary.log_posterior_minimum:.6g}",
+    )
+    table.add_row(
+        "log_posterior_max",
+        "-" if summary.log_posterior_maximum is None else f"{summary.log_posterior_maximum:.6g}",
+    )
+    table.add_row("proposal_trace_available", str(summary.proposal_trace_available))
+    table.add_row(
+        "proposal_log_posterior_min",
+        "-"
+        if summary.proposal_log_posterior_minimum is None
+        else f"{summary.proposal_log_posterior_minimum:.6g}",
+    )
+    table.add_row(
+        "proposal_log_posterior_max",
+        "-"
+        if summary.proposal_log_posterior_maximum is None
+        else f"{summary.proposal_log_posterior_maximum:.6g}",
+    )
+    table.add_row(
+        "log_acceptance_min",
+        "-" if summary.log_acceptance_minimum is None else f"{summary.log_acceptance_minimum:.6g}",
+    )
+    table.add_row(
+        "log_acceptance_max",
+        "-" if summary.log_acceptance_maximum is None else f"{summary.log_acceptance_maximum:.6g}",
+    )
+    table.add_row("unavailable_diagnostics", ", ".join(summary.unavailable_diagnostics))
+    table.add_row(
+        "unavailable_proposal_diagnostics",
+        ", ".join(summary.unavailable_proposal_diagnostics),
+    )
+    console.print(table)
+
+
+@vv_app.command("sampler-proposal-trace-check")
+def vv_sampler_proposal_trace_check(
+    sampler_path: Annotated[
+        Path,
+        typer.Option(
+            "--sampler", help="Julia HDF5 sampler proposal trace fixture file or directory."
+        ),
+    ],
+    tolerance_profile: Annotated[
+        str,
+        typer.Option(
+            "--tolerance-profile",
+            help="Named tolerance profile: strict, cpu-oracle, forecast, or accelerator.",
+        ),
+    ] = "strict",
+    atol: Annotated[
+        float | None,
+        typer.Option(help="Absolute tolerance override for the selected profile."),
+    ] = None,
+    rtol: Annotated[
+        float | None,
+        typer.Option(help="Relative tolerance override for the selected profile."),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit JSON instead of a table."),
+    ] = False,
+) -> None:
+    """Replay Julia sampler proposal-trace accept/reject bookkeeping."""
+    try:
+        profile = resolve_tolerance_profile(tolerance_profile, atol=atol, rtol=rtol)
+        report = check_sampler_proposal_trace(
+            sampler_path,
+            atol=profile.atol,
+            rtol=profile.rtol,
+        )
+    except (
+        FileNotFoundError,
+        ImportError,
+        KeyError,
+        NotADirectoryError,
+        OSError,
+        ValueError,
+        np.linalg.LinAlgError,
+    ) as err:
+        console.print(f"[yellow]{err}[/yellow]")
+        raise typer.Exit(code=2) from err
+    payload = {
+        **report.to_dict(),
+        "tolerance_profile": profile.to_dict(),
+    }
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2))
+    else:
+        table = Table(title=f"Sampler proposal trace check ({profile.name})")
+        table.add_column("Metric")
+        table.add_column("Status")
+        table.add_column("Max abs")
+        table.add_column("Max rel")
+        table.add_column("Worst", overflow="fold")
+        table.add_column("Message")
+        for item in report.comparisons:
+            table.add_row(
+                item.name,
+                item.status,
+                "" if item.max_abs_diff is None else f"{item.max_abs_diff:.3e}",
+                "" if item.max_rel_diff is None else f"{item.max_rel_diff:.3e}",
+                _format_comparison_location(item.max_abs_index, item.max_abs_label),
+                item.message,
+            )
+        console.print(table)
+    if not report.passed:
+        raise typer.Exit(code=1)
+
+
+@vv_app.command("sampler-posterior-replay")
+def vv_sampler_posterior_replay(
+    sampler_path: Annotated[
+        Path,
+        typer.Option(
+            "--sampler", help="Julia HDF5 sampler proposal trace fixture file or directory."
+        ),
+    ],
+    data_path: Annotated[
+        Path,
+        typer.Option("--data", help="Transformed observable CSV used by the Julia sampler."),
+    ] = Path("observables.csv"),
+    model: Annotated[
+        str,
+        typer.Option("--model", help="Model name from available model registry."),
+    ] = "m1002",
+    subspec: Annotated[str, typer.Option(help="Model1002 subspec to replay.")] = "ss10",
+    data_vintage: Annotated[
+        str,
+        typer.Option("--data-vintage", help="Model data vintage setting."),
+    ] = "181115",
+    forecast_start: Annotated[
+        str,
+        typer.Option("--forecast-start", help="First forecast quarter, e.g. 2018-Q4."),
+    ] = "2018-Q4",
+    tolerance_profile: Annotated[
+        str,
+        typer.Option(
+            "--tolerance-profile",
+            help="Named tolerance profile: strict, cpu-oracle, forecast, or accelerator.",
+        ),
+    ] = "strict",
+    atol: Annotated[
+        float | None,
+        typer.Option(help="Absolute tolerance override for the selected profile."),
+    ] = None,
+    rtol: Annotated[
+        float | None,
+        typer.Option(help="Relative tolerance override for the selected profile."),
+    ] = None,
+    allow_empty_data_columns: Annotated[
+        bool,
+        typer.Option(
+            "--allow-empty-data-columns",
+            help="Allow all-empty optional columns in transformed vintage data.",
+        ),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit JSON instead of a table."),
+    ] = False,
+) -> None:
+    """Replay Julia sampler proposal vectors through Python posterior evaluation."""
+    model_obj = _resolve_model(
+        model_name=model,
+        subspec=subspec,
+        settings=_model1002_settings(
+            data_vintage=data_vintage,
+            forecast_start=forecast_start,
+        ),
+    )
+    try:
+        profile = resolve_tolerance_profile(tolerance_profile, atol=atol, rtol=rtol)
+        data = _load_cli_data(
+            model_obj,
+            data_path,
+            allow_empty_data_columns=allow_empty_data_columns,
+        )
+        if data is None:
+            msg = "--data is required for sampler posterior replay."
+            raise ValueError(msg)
+        start_date = _sample_start_date(
+            model_obj,
+            data,
+            in_sample=True,
+            include_presample=True,
+        )
+        log_likelihood_start = _presample_period_count(model_obj, data)
+        observations = df_to_matrix(
+            model_obj,
+            cast(Any, data),
+            in_sample=True,
+            include_presample=True,
+        )
+        report = replay_sampler_proposal_posteriors(
+            model_obj,
+            observations,
+            sampler_path,
+            start_date=start_date,
+            log_likelihood_start=log_likelihood_start,
+            atol=profile.atol,
+            rtol=profile.rtol,
+        )
+    except (
+        FileNotFoundError,
+        ImportError,
+        KeyError,
+        NotADirectoryError,
+        OSError,
+        UnsupportedRuntimeError,
+        ValueError,
+        np.linalg.LinAlgError,
+    ) as err:
+        console.print(f"[yellow]{err}[/yellow]")
+        raise typer.Exit(code=2) from err
+    payload = {
+        **report.to_dict(),
+        "data": str(data_path),
+        "subspec": subspec,
+        "data_vintage": data_vintage,
+        "forecast_start": forecast_start,
+        "tolerance_profile": profile.to_dict(),
+    }
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2))
+    else:
+        table = Table(title=f"Sampler posterior replay ({profile.name})")
+        table.add_column("Metric")
+        table.add_column("Status")
+        table.add_column("Max abs")
+        table.add_column("Max rel")
+        table.add_column("Worst", overflow="fold")
+        table.add_column("Message")
+        for item in report.comparisons:
+            table.add_row(
+                item.name,
+                item.status,
+                "" if item.max_abs_diff is None else f"{item.max_abs_diff:.3e}",
+                "" if item.max_rel_diff is None else f"{item.max_rel_diff:.3e}",
+                _format_comparison_location(item.max_abs_index, item.max_abs_label),
+                item.message,
+            )
+        console.print(table)
+    if not report.passed:
+        raise typer.Exit(code=1)
+
+
+@vv_app.command("sampler-compare")
+def vv_sampler_compare(
+    oracle_sampler: Annotated[
+        Path,
+        typer.Option(
+            "--oracle-sampler",
+            help="Julia HDF5 sampler trace fixture file or directory.",
+        ),
+    ],
+    candidate_sampler: Annotated[
+        Path,
+        typer.Option("--candidate-sampler", help="Python Metropolis-Hastings .npz archive."),
+    ],
+    windows: Annotated[
+        int,
+        typer.Option("--windows", help="Number of acceptance-rate windows to compare."),
+    ] = 4,
+    tolerance_profile: Annotated[
+        str,
+        typer.Option(
+            "--tolerance-profile",
+            help="Named tolerance profile: strict, cpu-oracle, forecast, or accelerator.",
+        ),
+    ] = "strict",
+    atol: Annotated[
+        float | None,
+        typer.Option(help="Absolute tolerance override for the selected profile."),
+    ] = None,
+    rtol: Annotated[
+        float | None,
+        typer.Option(help="Relative tolerance override for the selected profile."),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit JSON instead of a table."),
+    ] = False,
+) -> None:
+    """Compare Julia sampler trace diagnostics against a Python sampler archive."""
+    try:
+        profile = resolve_tolerance_profile(tolerance_profile, atol=atol, rtol=rtol)
+        oracle_result = load_sampler_fixture_result(oracle_sampler)
+        candidate_result = load_sampler_result(candidate_sampler)
+        report = compare_sampler_results(
+            oracle_sampler,
+            candidate_sampler,
+            oracle_result=oracle_result,
+            candidate_result=candidate_result,
+            windows=windows,
+            atol=profile.atol,
+            rtol=profile.rtol,
+        )
+    except (
+        FileNotFoundError,
+        ImportError,
+        KeyError,
+        NotADirectoryError,
+        OSError,
+        ValueError,
+        np.linalg.LinAlgError,
+    ) as err:
+        console.print(f"[yellow]{err}[/yellow]")
+        raise typer.Exit(code=2) from err
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    **report.to_dict(),
+                    "tolerance_profile": profile.to_dict(),
+                    "windows": windows,
+                },
+                indent=2,
+            )
+        )
+    else:
+        table = Table(title=f"Sampler comparison ({profile.name})")
+        table.add_column("Metric")
+        table.add_column("Status")
+        table.add_column("Max abs")
+        table.add_column("Max rel")
+        table.add_column("Worst", overflow="fold")
+        table.add_column("Message")
+        for item in report.comparisons:
+            table.add_row(
+                item.name,
+                item.status,
+                "" if item.max_abs_diff is None else f"{item.max_abs_diff:.3e}",
+                "" if item.max_rel_diff is None else f"{item.max_rel_diff:.3e}",
+                _format_comparison_location(item.max_abs_index, item.max_abs_label),
+                item.message,
+            )
+        console.print(table)
+    if not report.passed:
+        raise typer.Exit(code=1)
 
 
 @vv_app.command("export-financial-frictions")
@@ -4880,13 +5290,42 @@ def _forecast_date_labels(model: Model1002, periods: int, *, offset: int = 0) ->
     return labels[offset:]
 
 
-def _sample_start_date(model: Model1002, data: Any, *, in_sample: bool) -> str | None:
+def _sample_start_date(
+    model: Model1002,
+    data: Any,
+    *,
+    in_sample: bool,
+    include_presample: bool = False,
+) -> str | None:
     if not hasattr(data, "columns"):
         return None
-    labels = date_labels_for_sample(model, data, in_sample=in_sample)
+    labels = date_labels_for_sample(
+        model,
+        data,
+        in_sample=in_sample,
+        include_presample=include_presample,
+    )
     if not labels:
         return None
     return labels[0]
+
+
+def _presample_period_count(model: Model1002, data: Any) -> int:
+    if not hasattr(data, "columns"):
+        return 0
+    labels = date_labels_for_sample(
+        model,
+        data,
+        in_sample=True,
+        include_presample=True,
+    )
+    try:
+        mainsample_start = quarter_label(model.get_setting("date_mainsample_start", ""))
+    except (TypeError, ValueError):
+        mainsample_start = str(model.get_setting("date_mainsample_start", ""))
+    if mainsample_start in labels:
+        return labels.index(mainsample_start)
+    return 0
 
 
 def _history_date_labels(
