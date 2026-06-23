@@ -1067,6 +1067,20 @@ def estimate(
             help="Adaptive proposal scale multiplier in mixed Gaussian component.",
         ),
     ] = 0.5,
+    mh_cc: Annotated[
+        float,
+        typer.Option(
+            "--mh-cc",
+            help="Metropolis-Hastings cc proposal-distribution scale parameter.",
+        ),
+    ] = 0.09,
+    mh_cc0: Annotated[
+        float,
+        typer.Option(
+            "--mh-cc0",
+            help="Metropolis-Hastings cc0 proposal-distribution scale parameter.",
+        ),
+    ] = 0.01,
     proposal_covariance_path: Annotated[
         Path | None,
         typer.Option(
@@ -1125,6 +1139,8 @@ def estimate(
             mh_target_accept=mh_target_accept,
             mh_alpha=mh_alpha,
             mh_c=mh_c,
+            mh_cc=mh_cc,
+            mh_cc0=mh_cc0,
             proposal_covariance=_load_proposal_covariance(proposal_covariance_path),
             seed=seed,
             mode=mode_result,
@@ -1195,6 +1211,14 @@ def estimate(
                 "mh_target_accept": result.sampler.target_accept,
                 "mh_alpha": result.sampler.alpha,
                 "mh_c": result.sampler.c,
+                "sampling_method": result.sampler.sampling_method,
+                "mode_in": result.sampler.mode_in,
+                "hessian_in": result.sampler.hessian_in,
+                "calculate_hessian": result.sampler.calculate_hessian,
+                "reoptimize": result.sampler.reoptimize,
+                "run_csminwel": result.sampler.run_csminwel,
+                "cc": result.sampler.cc,
+                "cc0": result.sampler.cc0,
             }
         ),
     }
@@ -4671,9 +4695,54 @@ def _matrix_manifest(
                         len(model.observables),
                         _max_name_width(tuple(model.observables)),
                     ],
+                    "observable_sources": [
+                        len(model.observables),
+                        _max_name_width(
+                            tuple(
+                                "|".join(mapping.source_names)
+                                for mapping in model.observable_mappings.values()
+                            )
+                        ),
+                    ],
+                    "observable_forward_transforms": [
+                        len(model.observables),
+                        _max_name_width(
+                            tuple(
+                                mapping.forward_transform
+                                for mapping in model.observable_mappings.values()
+                            )
+                        ),
+                    ],
+                    "observable_reverse_transforms": [
+                        len(model.observables),
+                        _max_name_width(
+                            tuple(
+                                mapping.reverse_transform
+                                for mapping in model.observable_mappings.values()
+                            )
+                        ),
+                    ],
                     "pseudo_observable_names": [
                         len(model.pseudo_observables),
                         _max_name_width(tuple(model.pseudo_observables)),
+                    ],
+                    "pseudo_observable_reverse_transforms": [
+                        len(model.pseudo_observables),
+                        _max_name_width(
+                            tuple(
+                                mapping.reverse_transform
+                                for mapping in model.pseudo_observable_mappings.values()
+                            )
+                        ),
+                    ],
+                    "pseudo_observable_forward_transforms": [
+                        len(model.pseudo_observables),
+                        _max_name_width(
+                            tuple(
+                                mapping.forward_transform
+                                for mapping in model.pseudo_observable_mappings.values()
+                            )
+                        ),
                     ],
                 },
                 "transition": {name: list(shape) for name, shape in transition_shapes.items()},
@@ -4803,6 +4872,21 @@ def _parameter_manifest(model: Model1002, *, parameter_path: Path) -> dict[str, 
 def _metadata_manifest(model: Model1002, *, metadata_path: Path) -> dict[str, object]:
     observable_labels = list(model.observables)
     pseudo_labels = list(model.pseudo_observables)
+    observable_sources = [
+        "|".join(mapping.source_names) for mapping in model.observable_mappings.values()
+    ]
+    observable_forward_transforms = [
+        mapping.forward_transform for mapping in model.observable_mappings.values()
+    ]
+    observable_reverse_transforms = [
+        mapping.reverse_transform for mapping in model.observable_mappings.values()
+    ]
+    pseudo_observable_forward_transforms = [
+        mapping.forward_transform for mapping in model.pseudo_observable_mappings.values()
+    ]
+    pseudo_observable_reverse_transforms = [
+        mapping.reverse_transform for mapping in model.pseudo_observable_mappings.values()
+    ]
     labels: dict[str, dict[str, list[str]]] = {}
     _add_array_labels(
         labels,
@@ -4812,9 +4896,51 @@ def _metadata_manifest(model: Model1002, *, metadata_path: Path) -> dict[str, ob
     )
     _add_array_labels(
         labels,
+        "metadata/observable_sources",
+        (len(observable_sources), _max_name_width(tuple(observable_sources))),
+        {0: observable_sources, 1: _char_labels(observable_sources)},
+    )
+    _add_array_labels(
+        labels,
+        "metadata/observable_forward_transforms",
+        (len(observable_forward_transforms), _max_name_width(tuple(observable_forward_transforms))),
+        {0: observable_forward_transforms, 1: _char_labels(observable_forward_transforms)},
+    )
+    _add_array_labels(
+        labels,
+        "metadata/observable_reverse_transforms",
+        (len(observable_reverse_transforms), _max_name_width(tuple(observable_reverse_transforms))),
+        {0: observable_reverse_transforms, 1: _char_labels(observable_reverse_transforms)},
+    )
+    _add_array_labels(
+        labels,
         "metadata/pseudo_observable_names",
         (len(pseudo_labels), _max_name_width(tuple(pseudo_labels))),
         {0: pseudo_labels, 1: _char_labels(pseudo_labels)},
+    )
+    _add_array_labels(
+        labels,
+        "metadata/pseudo_observable_reverse_transforms",
+        (
+            len(pseudo_observable_reverse_transforms),
+            _max_name_width(tuple(pseudo_observable_reverse_transforms)),
+        ),
+        {
+            0: pseudo_observable_reverse_transforms,
+            1: _char_labels(pseudo_observable_reverse_transforms),
+        },
+    )
+    _add_array_labels(
+        labels,
+        "metadata/pseudo_observable_forward_transforms",
+        (
+            len(pseudo_observable_forward_transforms),
+            _max_name_width(tuple(pseudo_observable_forward_transforms)),
+        ),
+        {
+            0: pseudo_observable_forward_transforms,
+            1: _char_labels(pseudo_observable_forward_transforms),
+        },
     )
     return {
         "kind": "model1002_metadata_candidate",

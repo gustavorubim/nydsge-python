@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -9,7 +10,7 @@ import pandas as pd
 import pytest
 from typer.testing import CliRunner
 
-from nydsge.cli import app
+from nydsge.cli import _parameter_manifest, app
 from nydsge.estimate import (
     MetropolisHastingsResult,
     evaluate_log_posterior_for_parameter_values,
@@ -19,6 +20,9 @@ from nydsge.forecast import ForecastOutput, MeansBands
 from nydsge.models import Model1002
 from nydsge.solve import build_system, solve_canonical
 from nydsge.vv import (
+    _name_code_matrix,
+    _resolve_model_parameter_names,
+    _safe_model_value_posterior_components,
     check_fixture_coverage,
     check_sampler_proposal_trace,
     compare_arrays,
@@ -99,7 +103,12 @@ def test_required_fixture_arrays_profiles() -> None:
 
     assert model_metadata == (
         "metadata/observable_names",
+        "metadata/observable_sources",
+        "metadata/observable_forward_transforms",
+        "metadata/observable_reverse_transforms",
         "metadata/pseudo_observable_names",
+        "metadata/pseudo_observable_reverse_transforms",
+        "metadata/pseudo_observable_forward_transforms",
     )
     assert parameters == (
         "parameters/values",
@@ -319,6 +328,11 @@ def test_load_fixture_labels_reads_julia_hdf5_metadata(tmp_path) -> None:
         handle.attrs["equation_names"] = "eq_y,eq_pi"
         handle.attrs["observable_names"] = "obs_gdp"
         handle.attrs["pseudo_observable_names"] = "y_t,\u03c0_t"
+        handle.attrs["observable_sources"] = "GDP__FRED"
+        handle.attrs["observable_forward_transforms"] = "identity"
+        handle.attrs["observable_reverse_transforms"] = "loggrowth_to_pct_annualized"
+        handle.attrs["pseudo_observable_reverse_transforms"] = "identity,identity"
+        handle.attrs["pseudo_observable_forward_transforms"] = "identity,identity"
 
     labels = load_fixture_labels(oracle)
     arrays = load_fixture_arrays(oracle)
@@ -327,6 +341,19 @@ def test_load_fixture_labels_reads_julia_hdf5_metadata(tmp_path) -> None:
     assert arrays["metadata/observable_names"][0, 0] == ord("o")
     assert arrays["metadata/pseudo_observable_names"].shape == (2, 3)
     assert arrays["metadata/pseudo_observable_names"][1, 0] == ord("\u03c0")
+    assert arrays["metadata/observable_sources"].shape == (1, len("GDP__FRED"))
+    assert arrays["metadata/observable_sources"][0, 0] == ord("G")
+    assert arrays["metadata/observable_forward_transforms"].shape == (1, len("identity"))
+    assert arrays["metadata/observable_forward_transforms"][0, 0] == ord("i")
+    assert arrays["metadata/observable_reverse_transforms"].shape == (
+        1,
+        len("loggrowth_to_pct_annualized"),
+    )
+    assert arrays["metadata/observable_reverse_transforms"][0, 0] == ord("l")
+    assert arrays["metadata/pseudo_observable_reverse_transforms"].shape == (2, len("identity"))
+    assert arrays["metadata/pseudo_observable_reverse_transforms"][0, 0] == ord("i")
+    assert arrays["metadata/pseudo_observable_forward_transforms"].shape == (2, len("identity"))
+    assert arrays["metadata/pseudo_observable_forward_transforms"][0, 0] == ord("i")
     assert labels["metadata/observable_names"] == {
         0: ("obs_gdp",),
         1: tuple(f"char_{index}" for index in range(len("obs_gdp"))),
@@ -334,6 +361,26 @@ def test_load_fixture_labels_reads_julia_hdf5_metadata(tmp_path) -> None:
     assert labels["metadata/pseudo_observable_names"] == {
         0: ("y_t", "\u03c0_t"),
         1: ("char_0", "char_1", "char_2"),
+    }
+    assert labels["metadata/observable_sources"] == {
+        0: ("GDP__FRED",),
+        1: tuple(f"char_{index}" for index in range(len("GDP__FRED"))),
+    }
+    assert labels["metadata/observable_forward_transforms"] == {
+        0: ("identity",),
+        1: tuple(f"char_{index}" for index in range(len("identity"))),
+    }
+    assert labels["metadata/observable_reverse_transforms"] == {
+        0: ("loggrowth_to_pct_annualized",),
+        1: tuple(f"char_{index}" for index in range(len("loggrowth_to_pct_annualized"))),
+    }
+    assert labels["metadata/pseudo_observable_reverse_transforms"] == {
+        0: ("identity", "identity"),
+        1: tuple(f"char_{index}" for index in range(len("identity"))),
+    }
+    assert labels["metadata/pseudo_observable_forward_transforms"] == {
+        0: ("identity", "identity"),
+        1: tuple(f"char_{index}" for index in range(len("identity"))),
     }
     assert labels["parameters/values"] == {0: ("alpha", "beta")}
     assert labels["parameters/scaled_values"] == {0: ("alpha", "beta")}
@@ -547,6 +594,73 @@ def test_summarize_sampler_fixture_reads_julia_hdf5_sampler_metadata(tmp_path) -
     assert payload["unavailable_proposal_diagnostics"] == []
 
 
+def test_summarize_sampler_fixture_prefers_ascii_parameter_names(tmp_path) -> None:
+    h5py = pytest.importorskip("h5py")
+    path = tmp_path / "sampler.h5"
+    with h5py.File(path, "w") as handle:
+        handle["sampler/mhparams"] = np.array(
+            [[0.1, 1.1, 2.1], [0.2, 1.2, 2.2]],
+            dtype=np.float64,
+        )
+        handle["sampler/proposal_covariance"] = np.eye(2, dtype=np.float64)
+        handle.attrs["sampler_parameter_names_ascii"] = "alpha,beta"
+        handle.attrs["sampler_parameter_names"] = "\u03b1,\u03b2"
+        handle.attrs["sampler_draws"] = 3
+        handle.attrs["sampler_burnin"] = 0
+
+    summary = summarize_sampler_fixture(path)
+
+    assert summary.parameter_names == ("alpha", "beta")
+
+
+def test_resolve_model_parameter_names_translates_unicode_names() -> None:
+    model = Model1002()
+
+    resolved = _resolve_model_parameter_names(model, ("\u03b1", "\u03b2", "\u03b3"))
+
+    assert resolved == ("alpha", "beta", "gamma")
+
+
+def test_safe_model_value_posterior_components_does_not_update_fixed_parameters(
+    monkeypatch,
+) -> None:
+    model = Model1002()
+    observations = np.zeros((1, len(model.observables)))
+    parameter_names = ("alpha", "beta", "gamma")
+    fixed_mask = np.array([True, False, False], dtype=bool)
+
+    def fake_evaluate(
+        _model: Model1002,
+        _observations: np.ndarray,
+        _parameter_names: tuple[str, ...],
+        _values: np.ndarray,
+        *,
+        start_date: Any | None = None,
+        log_likelihood_start: int = 0,
+        update_fixed_parameters: bool = False,
+    ) -> tuple[float, float, float, Any]:
+        assert update_fixed_parameters is False
+        return (1.0, 2.0, 3.0, None)
+
+    monkeypatch.setattr(
+        "nydsge.vv.evaluate_log_posterior_for_parameter_values",
+        fake_evaluate,
+    )
+
+    values = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+    components = _safe_model_value_posterior_components(
+        model,
+        observations,
+        parameter_names,
+        values,
+        fixed_mask,
+        start_date=None,
+        log_likelihood_start=0,
+    )
+
+    assert components.tolist() == [1.0, 2.0, 3.0]
+
+
 def test_summarize_sampler_fixture_rejects_ambiguous_square_draws(tmp_path) -> None:
     h5py = pytest.importorskip("h5py")
     oracle = tmp_path / "oracle"
@@ -609,6 +723,18 @@ def test_load_sampler_fixture_result_converts_julia_trace_to_sampler_result(tmp_
     assert result.n_param_blocks == 1
     assert result.mhthin == 1
     assert result.proposal_scale == 1.0e-8
+    assert result.sampling_method == "MH"
+    assert result.adaptive_accept is False
+    assert result.target_accept == 0.25
+    assert result.alpha == 1.0
+    assert result.c == 0.5
+    assert result.mode_in is False
+    assert result.hessian_in is False
+    assert result.calculate_hessian is True
+    assert result.reoptimize is False
+    assert result.run_csminwel is False
+    assert result.cc == 0.09
+    assert result.cc0 == 0.01
 
 
 def test_compare_sampler_results_passes_matching_julia_trace_and_python_archive(
@@ -635,11 +761,145 @@ def test_compare_sampler_results_passes_matching_julia_trace_and_python_archive(
         "diagnostics/core",
         "diagnostics/acceptance_windows",
         "diagnostics/parameters",
+        "metadata/adaptive_accept",
+        "metadata/target_accept",
+        "metadata/alpha",
+        "metadata/c",
+        "metadata/proposal_scale",
+        "metadata/sampling_method",
+        "metadata/mode_in",
+        "metadata/hessian_in",
+        "metadata/calculate_hessian",
+        "metadata/reoptimize",
+        "metadata/run_csminwel",
+        "metadata/cc",
+        "metadata/cc0",
     }
     payload = report.to_dict()
     assert payload["oracle_sampler"] == str(oracle_path)
     assert payload["candidate_sampler"] == str(candidate_path)
     assert payload["passed"] is True
+
+
+def test_compare_sampler_results_includes_matching_sampler_metadata_fields(
+    tmp_path,
+) -> None:
+    oracle_path = _write_sampler_trace_hdf5(tmp_path)
+    oracle_result = load_sampler_fixture_result(oracle_path)
+    oracle_result = replace(
+        oracle_result,
+        sampling_method="MH",
+        mode_in=False,
+        hessian_in=False,
+        calculate_hessian=False,
+        reoptimize=False,
+        run_csminwel=False,
+        cc=0.5,
+        cc0=0.0,
+    )
+    candidate_path = save_sampler_result(oracle_result, tmp_path / "candidate_sampler.npz")
+
+    report = compare_sampler_results(
+        oracle_path,
+        candidate_path,
+        oracle_result=oracle_result,
+        candidate_result=oracle_result,
+        windows=2,
+    )
+
+    comparisons = {item.name: item.status for item in report.comparisons}
+    assert report.passed
+    assert comparisons["metadata/adaptive_accept"] == "passed"
+    assert comparisons["metadata/target_accept"] == "passed"
+    assert comparisons["metadata/alpha"] == "passed"
+    assert comparisons["metadata/c"] == "passed"
+    assert comparisons["metadata/proposal_scale"] == "passed"
+    assert comparisons["metadata/sampling_method"] == "passed"
+    assert comparisons["metadata/mode_in"] == "passed"
+    assert comparisons["metadata/hessian_in"] == "passed"
+    assert comparisons["metadata/calculate_hessian"] == "passed"
+    assert comparisons["metadata/reoptimize"] == "passed"
+    assert comparisons["metadata/run_csminwel"] == "passed"
+    assert comparisons["metadata/cc"] == "passed"
+    assert comparisons["metadata/cc0"] == "passed"
+
+
+def test_compare_sampler_results_flags_mismatched_sampler_metadata_fields(
+    tmp_path,
+) -> None:
+    oracle_path = _write_sampler_trace_hdf5(tmp_path)
+    oracle_result = load_sampler_fixture_result(oracle_path)
+    oracle_result = replace(
+        oracle_result,
+        sampling_method="MH",
+        mode_in=False,
+    )
+    candidate_result = replace(
+        oracle_result,
+        sampling_method="HMC",
+        mode_in=False,
+    )
+    candidate_path = save_sampler_result(candidate_result, tmp_path / "candidate_sampler.npz")
+
+    report = compare_sampler_results(
+        oracle_path,
+        candidate_path,
+        oracle_result=oracle_result,
+        candidate_result=candidate_result,
+        windows=2,
+    )
+
+    comparisons = {item.name: item.status for item in report.comparisons}
+    assert not report.passed
+    assert comparisons["metadata/sampling_method"] == "label_mismatch"
+    assert comparisons["metadata/mode_in"] == "passed"
+
+
+def test_compare_sampler_results_flags_mismatched_sampler_cc_metadata(tmp_path) -> None:
+    oracle_path = _write_sampler_trace_hdf5(tmp_path)
+    oracle_result = load_sampler_fixture_result(oracle_path)
+    candidate_result = replace(
+        oracle_result,
+        cc=0.1,
+        cc0=0.01,
+    )
+    candidate_path = save_sampler_result(candidate_result, tmp_path / "candidate_sampler.npz")
+
+    report = compare_sampler_results(
+        oracle_path,
+        candidate_path,
+        oracle_result=oracle_result,
+        candidate_result=candidate_result,
+        windows=2,
+    )
+
+    comparisons = {item.name: item.status for item in report.comparisons}
+    assert not report.passed
+    assert comparisons["metadata/cc"] == "failed"
+    assert comparisons["metadata/cc0"] == "passed"
+
+
+def test_compare_sampler_results_flags_mismatched_sampler_adaptive_metadata(tmp_path) -> None:
+    oracle_path = _write_sampler_trace_hdf5(tmp_path)
+    oracle_result = load_sampler_fixture_result(oracle_path)
+    candidate_result = replace(oracle_result, target_accept=0.35)
+    candidate_path = save_sampler_result(candidate_result, tmp_path / "candidate_sampler.npz")
+
+    report = compare_sampler_results(
+        oracle_path,
+        candidate_path,
+        oracle_result=oracle_result,
+        candidate_result=candidate_result,
+        windows=2,
+    )
+
+    comparisons = {item.name: item.status for item in report.comparisons}
+    assert not report.passed
+    assert comparisons["metadata/target_accept"] == "failed"
+    assert comparisons["metadata/adaptive_accept"] == "passed"
+    assert comparisons["metadata/alpha"] == "passed"
+    assert comparisons["metadata/c"] == "passed"
+    assert comparisons["metadata/proposal_scale"] == "passed"
 
 
 def test_check_sampler_proposal_trace_replays_acceptance_bookkeeping(
@@ -916,6 +1176,53 @@ def test_save_steady_state_fixture_writes_numeric_values(tmp_path) -> None:
     assert arrays["steady_state/values"].shape == (22,)
     z_star_row = list(steady_state).index("z_star")
     assert arrays["steady_state/values"][z_star_row] == steady_state["z_star"]
+
+
+def test_save_model_metadata_fixture_writes_source_and_transform_arrays(tmp_path) -> None:
+    model = Model1002()
+    path = save_model_metadata_fixture(model, tmp_path)
+    arrays = load_fixture_arrays(tmp_path)
+    observable_mappings = tuple(model.observable_mappings[name] for name in model.observables)
+    pseudo_observable_mappings = tuple(
+        model.pseudo_observable_mappings[name] for name in model.pseudo_observables
+    )
+
+    assert path == tmp_path / "metadata.npz"
+    assert set(arrays).issuperset(
+        {
+            "metadata/observable_names",
+            "metadata/observable_sources",
+            "metadata/observable_forward_transforms",
+            "metadata/observable_reverse_transforms",
+            "metadata/pseudo_observable_names",
+            "metadata/pseudo_observable_reverse_transforms",
+            "metadata/pseudo_observable_forward_transforms",
+        }
+    )
+    np.testing.assert_allclose(
+        arrays["metadata/observable_sources"],
+        _name_code_matrix(tuple("|".join(mapping.source_names) for mapping in observable_mappings)),
+    )
+    np.testing.assert_allclose(
+        arrays["metadata/observable_forward_transforms"],
+        _name_code_matrix(tuple(mapping.forward_transform for mapping in observable_mappings)),
+    )
+    np.testing.assert_allclose(
+        arrays["metadata/observable_reverse_transforms"],
+        _name_code_matrix(tuple(mapping.reverse_transform for mapping in observable_mappings)),
+    )
+    np.testing.assert_allclose(
+        arrays["metadata/pseudo_observable_reverse_transforms"],
+        _name_code_matrix(
+            tuple(mapping.reverse_transform for mapping in pseudo_observable_mappings)
+        ),
+    )
+    np.testing.assert_allclose(
+        arrays["metadata/pseudo_observable_forward_transforms"],
+        _name_code_matrix(
+            tuple(mapping.forward_transform for mapping in pseudo_observable_mappings)
+        ),
+    )
 
 
 def test_save_forecast_fixture_writes_reloadable_archive(tmp_path) -> None:
@@ -1246,18 +1553,46 @@ def test_compare_fixture_dirs_compares_hdf5_model_metadata_attributes(tmp_path) 
     with h5py.File(oracle / "m1002_ss10.h5", "w") as handle:
         handle.attrs["observable_names"] = ",".join(model.observables)
         handle.attrs["pseudo_observable_names"] = ",".join(model.pseudo_observables)
+        handle.attrs["observable_sources"] = ",".join(
+            "|".join(mapping.source_names) for mapping in model.observable_mappings.values()
+        )
+        handle.attrs["observable_forward_transforms"] = ",".join(
+            mapping.forward_transform for mapping in model.observable_mappings.values()
+        )
+        handle.attrs["observable_reverse_transforms"] = ",".join(
+            mapping.reverse_transform for mapping in model.observable_mappings.values()
+        )
+        handle.attrs["pseudo_observable_reverse_transforms"] = ",".join(
+            mapping.reverse_transform for mapping in model.pseudo_observable_mappings.values()
+        )
+        handle.attrs["pseudo_observable_forward_transforms"] = ",".join(
+            mapping.forward_transform for mapping in model.pseudo_observable_mappings.values()
+        )
     save_model_metadata_fixture(model, candidate)
 
     report = compare_fixture_dirs(
         oracle,
         candidate,
-        array_names=required_fixture_arrays("model-metadata"),
+        array_names=(
+            "metadata/observable_names",
+            "metadata/observable_sources",
+            "metadata/observable_forward_transforms",
+            "metadata/observable_reverse_transforms",
+            "metadata/pseudo_observable_names",
+            "metadata/pseudo_observable_reverse_transforms",
+            "metadata/pseudo_observable_forward_transforms",
+        ),
     )
 
     assert report.passed
     assert {item.name for item in report.comparisons} == {
         "metadata/observable_names",
+        "metadata/observable_sources",
+        "metadata/observable_forward_transforms",
+        "metadata/observable_reverse_transforms",
         "metadata/pseudo_observable_names",
+        "metadata/pseudo_observable_reverse_transforms",
+        "metadata/pseudo_observable_forward_transforms",
     }
 
 
@@ -1756,6 +2091,26 @@ def test_vv_export_parameters_cli_writes_model1002_candidate_fixture(tmp_path) -
     assert alpha_metadata["prior"]["std"] == 0.05
 
 
+def test_vv_export_parameters_cli_preserves_expected_ffr_regime_overlaps(tmp_path) -> None:
+    output_dir = tmp_path / "candidate"
+    model = Model1002(
+        settings={
+            "expected_ffr": {"baseline": (4, 1), "shock": [3, 1]},
+            "n_mon_anticipated_shocks": 0,
+        }
+    )
+    path = save_parameter_fixture(model.parameters, output_dir, filename="parameters.npz")
+    manifest_path = save_fixture_manifest(
+        output_dir,
+        _parameter_manifest(model, parameter_path=path),
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    parameter_metadata = {entry["name"]: entry for entry in manifest["parameter_metadata"]}
+    assert parameter_metadata["sigma_exp_rm1"]["regime"] == "expected_ffr_spd[baseline,shock]"
+    assert parameter_metadata["sigma_exp_rm3"]["regime"] == "expected_ffr_spd[shock]"
+    assert parameter_metadata["sigma_exp_rm4"]["regime"] == "expected_ffr_spd[baseline]"
+
+
 def test_vv_export_steady_state_cli_writes_model1002_candidate_fixture(tmp_path) -> None:
     output_dir = tmp_path / "candidate"
     model = Model1002()
@@ -1802,10 +2157,45 @@ def test_vv_export_matrices_cli_writes_model1002_candidate_fixtures(tmp_path) ->
     arrays = load_fixture_arrays(output_dir)
     observable_width = max(len(name) for name in model.observables)
     pseudo_width = max(len(name) for name in model.pseudo_observables)
+    observable_source_width = max(
+        len("|".join(mapping.source_names)) for mapping in model.observable_mappings.values()
+    )
+    observable_forward_transform_width = max(
+        len(mapping.forward_transform) for mapping in model.observable_mappings.values()
+    )
+    observable_reverse_transform_width = max(
+        len(mapping.reverse_transform) for mapping in model.observable_mappings.values()
+    )
+    pseudo_observable_forward_transform_width = max(
+        len(mapping.forward_transform) for mapping in model.pseudo_observable_mappings.values()
+    )
+    pseudo_observable_reverse_transform_width = max(
+        len(mapping.reverse_transform) for mapping in model.pseudo_observable_mappings.values()
+    )
     assert arrays["parameters/values"].shape == (95,)
     assert arrays["parameters/scaled_values"].shape == (95,)
     assert arrays["metadata/observable_names"].shape == (19, observable_width)
+    assert arrays["metadata/observable_sources"].shape == (
+        19,
+        observable_source_width,
+    )
+    assert arrays["metadata/observable_forward_transforms"].shape == (
+        19,
+        observable_forward_transform_width,
+    )
+    assert arrays["metadata/observable_reverse_transforms"].shape == (
+        19,
+        observable_reverse_transform_width,
+    )
     assert arrays["metadata/pseudo_observable_names"].shape == (21, pseudo_width)
+    assert arrays["metadata/pseudo_observable_reverse_transforms"].shape == (
+        21,
+        pseudo_observable_reverse_transform_width,
+    )
+    assert arrays["metadata/pseudo_observable_forward_transforms"].shape == (
+        21,
+        pseudo_observable_forward_transform_width,
+    )
     assert arrays["steady_state/values"].shape == (22,)
     assert arrays["canonical/Gamma0"].shape == (68, 68)
     assert arrays["canonical/Gamma1"].shape == (68, 68)
@@ -1818,9 +2208,24 @@ def test_vv_export_matrices_cli_writes_model1002_candidate_fixtures(tmp_path) ->
     manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["labels"]["parameters/values"]["axis0"] == list(model.parameters)
     assert manifest["labels"]["metadata/observable_names"]["axis0"] == list(model.observables)
+    assert manifest["labels"]["metadata/observable_sources"]["axis0"] == [
+        "|".join(mapping.source_names) for mapping in model.observable_mappings.values()
+    ]
+    assert manifest["labels"]["metadata/observable_forward_transforms"]["axis0"] == [
+        mapping.forward_transform for mapping in model.observable_mappings.values()
+    ]
+    assert manifest["labels"]["metadata/observable_reverse_transforms"]["axis0"] == [
+        mapping.reverse_transform for mapping in model.observable_mappings.values()
+    ]
     assert manifest["labels"]["metadata/pseudo_observable_names"]["axis0"] == list(
         model.pseudo_observables
     )
+    assert manifest["labels"]["metadata/pseudo_observable_reverse_transforms"]["axis0"] == [
+        mapping.reverse_transform for mapping in model.pseudo_observable_mappings.values()
+    ]
+    assert manifest["labels"]["metadata/pseudo_observable_forward_transforms"]["axis0"] == [
+        mapping.forward_transform for mapping in model.pseudo_observable_mappings.values()
+    ]
     assert manifest["labels"]["steady_state/values"]["axis0"] == list(model.steadystate())
     assert manifest["labels"]["canonical/Gamma0"]["axis0"] == list(
         model.indexes.equilibrium_conditions
@@ -1835,7 +2240,27 @@ def test_vv_export_matrices_cli_writes_model1002_candidate_fixtures(tmp_path) ->
     ) + list(model.indexes.endogenous_states_augmented)
     assert manifest["shapes"]["canonical"]["Gamma0"] == [68, 68]
     assert manifest["shapes"]["metadata"]["observable_names"] == [19, observable_width]
+    assert manifest["shapes"]["metadata"]["observable_sources"] == [
+        19,
+        observable_source_width,
+    ]
+    assert manifest["shapes"]["metadata"]["observable_forward_transforms"] == [
+        19,
+        observable_forward_transform_width,
+    ]
+    assert manifest["shapes"]["metadata"]["observable_reverse_transforms"] == [
+        19,
+        observable_reverse_transform_width,
+    ]
     assert manifest["shapes"]["metadata"]["pseudo_observable_names"] == [21, pseudo_width]
+    assert manifest["shapes"]["metadata"]["pseudo_observable_reverse_transforms"] == [
+        21,
+        pseudo_observable_reverse_transform_width,
+    ]
+    assert manifest["shapes"]["metadata"]["pseudo_observable_forward_transforms"] == [
+        21,
+        pseudo_observable_forward_transform_width,
+    ]
     assert manifest["shapes"]["transition"]["TTT"] == [68, 68]
     assert manifest["shapes"]["transition"]["eu"] == [2]
     assert manifest["shapes"]["system"]["TTT"] == [84, 84]
@@ -1875,6 +2300,7 @@ def test_julia_oracle_export_script_includes_sampler_flags() -> None:
     assert '"sampler-mode-in"' in script
     assert '"sampler-hessian-in"' in script
     assert 'Symbol("mh_", string(Char(0x03b1)))' in script
+    assert '"observable_sources"' in script
     assert '"sampler/fixed"' in script
     assert '"sampler/proposal_parameters"' in script
     assert '"sampler/previous_parameters"' in script
@@ -2874,6 +3300,18 @@ def _write_sampler_trace_hdf5(tmp_path: Path) -> Path:
         handle.attrs["sampler_param_blocks"] = 1
         handle.attrs["sampler_thin"] = 1
         handle.attrs["sampler_burnin"] = 0
+        handle.attrs["sampler_adaptive_accept"] = "false"
+        handle.attrs["sampler_target_accept"] = "0.25"
+        handle.attrs["sampler_alpha"] = "1.0"
+        handle.attrs["sampler_c"] = "0.5"
+        handle.attrs["sampler_sampling_method"] = "MH"
+        handle.attrs["sampler_mode_in"] = "false"
+        handle.attrs["sampler_hessian_in"] = "false"
+        handle.attrs["sampler_calculate_hessian"] = "true"
+        handle.attrs["sampler_reoptimize"] = "false"
+        handle.attrs["sampler_run_csminwel"] = "false"
+        handle.attrs["sampler_cc"] = "0.09"
+        handle.attrs["sampler_cc0"] = "0.01"
         handle.attrs["sampler_proposal_scale"] = "1.0e-8"
         handle.attrs["sampler_acceptance_rate"] = "0.6666666666666666"
         handle.attrs["sampler_trace_available"] = "true"

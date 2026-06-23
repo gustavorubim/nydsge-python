@@ -291,7 +291,12 @@ TOLERANCE_PROFILES: dict[str, ToleranceProfile] = {
 
 MODEL_METADATA_FIXTURE_REQUIREMENTS: tuple[str, ...] = (
     "metadata/observable_names",
+    "metadata/observable_sources",
+    "metadata/observable_forward_transforms",
+    "metadata/observable_reverse_transforms",
     "metadata/pseudo_observable_names",
+    "metadata/pseudo_observable_reverse_transforms",
+    "metadata/pseudo_observable_forward_transforms",
 )
 
 MODEL_SETUP_FIXTURE_REQUIREMENTS: tuple[str, ...] = (
@@ -526,7 +531,15 @@ def summarize_sampler_fixture(path: Path | str) -> SamplerFixtureSummary:
             msg = f"sampler/proposal_covariance must be square, got {covariance_shape}."
             raise ValueError(msg)
 
-        parameter_names = _parse_hdf5_name_attr(handle.attrs.get("sampler_parameter_names"))
+        parameter_names = _parse_hdf5_name_attr(
+            handle.attrs.get("sampler_parameter_names_ascii"),
+        )
+        if not parameter_names:
+            parameter_names = _parse_hdf5_name_attr(
+                handle.attrs.get("sampler_parameter_names"),
+            )
+            if parameter_names:
+                parameter_names = _normalize_sampler_parameter_names(parameter_names)
         if not parameter_names:
             parameter_names = tuple(f"parameter_{index}" for index in range(covariance_shape[0]))
         parameter_count = len(parameter_names)
@@ -779,6 +792,14 @@ def load_sampler_fixture_result(path: Path | str) -> MetropolisHastingsResult:
         ),
         alpha=_metadata_float_or_default(metadata.get("alpha"), None, default=1.0),
         c=_metadata_float_or_default(metadata.get("c"), None, default=0.5),
+        sampling_method=_metadata_optional_str(metadata.get("sampling_method")),
+        mode_in=_metadata_optional_bool(metadata.get("mode_in")),
+        hessian_in=_metadata_optional_bool(metadata.get("hessian_in")),
+        calculate_hessian=_metadata_optional_bool(metadata.get("calculate_hessian")),
+        reoptimize=_metadata_optional_bool(metadata.get("reoptimize")),
+        run_csminwel=_metadata_optional_bool(metadata.get("run_csminwel")),
+        cc=_metadata_optional_float(metadata.get("cc")),
+        cc0=_metadata_optional_float(metadata.get("cc0")),
     )
     validate_sampler_result(result)
     return result
@@ -1076,6 +1097,47 @@ def replay_sampler_proposal_posteriors(
     )
 
 
+def _compare_sampler_metadata_scalar(
+    *,
+    name: str,
+    oracle_value: Any,
+    candidate_value: Any,
+    atol: float,
+    rtol: float,
+) -> ArrayComparison | None:
+    if oracle_value is None or candidate_value is None:
+        return None
+    if isinstance(oracle_value, str) or isinstance(candidate_value, str):
+        oracle_text = str(oracle_value)
+        candidate_text = str(candidate_value)
+        return ArrayComparison(
+            name=name,
+            status="passed" if oracle_text == candidate_text else "label_mismatch",
+            expected_shape=(1,),
+            actual_shape=(1,),
+            max_abs_diff=None,
+            max_rel_diff=None,
+            atol=atol,
+            rtol=rtol,
+            message=(
+                ""
+                if oracle_text == candidate_text
+                else (
+                    "Sampler metadata mismatch: "
+                    f"expected {oracle_text!r} but got {candidate_text!r}."
+                )
+            ),
+        )
+
+    return compare_arrays(
+        name,
+        np.asarray([oracle_value], dtype=np.float64),
+        np.asarray([candidate_value], dtype=np.float64),
+        atol=atol,
+        rtol=rtol,
+    )
+
+
 def compare_sampler_results(
     oracle_sampler: Path,
     candidate_sampler: Path,
@@ -1168,6 +1230,43 @@ def compare_sampler_results(
             ),
         ]
     )
+    metadata_checks = (
+        (
+            "metadata/sampling_method",
+            oracle_result.sampling_method,
+            candidate_result.sampling_method,
+        ),
+        (
+            "metadata/adaptive_accept",
+            oracle_result.adaptive_accept,
+            candidate_result.adaptive_accept,
+        ),
+        ("metadata/target_accept", oracle_result.target_accept, candidate_result.target_accept),
+        ("metadata/alpha", oracle_result.alpha, candidate_result.alpha),
+        ("metadata/c", oracle_result.c, candidate_result.c),
+        ("metadata/proposal_scale", oracle_result.proposal_scale, candidate_result.proposal_scale),
+        ("metadata/mode_in", oracle_result.mode_in, candidate_result.mode_in),
+        ("metadata/hessian_in", oracle_result.hessian_in, candidate_result.hessian_in),
+        (
+            "metadata/calculate_hessian",
+            oracle_result.calculate_hessian,
+            candidate_result.calculate_hessian,
+        ),
+        ("metadata/reoptimize", oracle_result.reoptimize, candidate_result.reoptimize),
+        ("metadata/run_csminwel", oracle_result.run_csminwel, candidate_result.run_csminwel),
+        ("metadata/cc", oracle_result.cc, candidate_result.cc),
+        ("metadata/cc0", oracle_result.cc0, candidate_result.cc0),
+    )
+    for name, oracle_value, candidate_value in metadata_checks:
+        comparison = _compare_sampler_metadata_scalar(
+            name=name,
+            oracle_value=oracle_value,
+            candidate_value=candidate_value,
+            atol=atol,
+            rtol=rtol,
+        )
+        if comparison is not None:
+            comparisons.append(comparison)
     return SamplerComparisonReport(
         oracle_sampler=oracle_sampler,
         candidate_sampler=candidate_sampler,
@@ -1383,11 +1482,30 @@ def save_model_metadata_fixture(
 
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / filename
+    observable_mappings = tuple(model.observable_mappings[name] for name in model.observables)
+    pseudo_observable_mappings = tuple(
+        model.pseudo_observable_mappings[name] for name in model.pseudo_observables
+    )
     _write_npz_fixture(
         path,
         {
             "observable_names": _name_code_matrix(tuple(model.observables)),
+            "observable_sources": _name_code_matrix(
+                tuple("|".join(mapping.source_names) for mapping in observable_mappings)
+            ),
+            "observable_forward_transforms": _name_code_matrix(
+                tuple(mapping.forward_transform for mapping in observable_mappings)
+            ),
+            "observable_reverse_transforms": _name_code_matrix(
+                tuple(mapping.reverse_transform for mapping in observable_mappings)
+            ),
             "pseudo_observable_names": _name_code_matrix(tuple(model.pseudo_observables)),
+            "pseudo_observable_reverse_transforms": _name_code_matrix(
+                tuple(mapping.reverse_transform for mapping in pseudo_observable_mappings)
+            ),
+            "pseudo_observable_forward_transforms": _name_code_matrix(
+                tuple(mapping.forward_transform for mapping in pseudo_observable_mappings)
+            ),
         },
     )
     return path
@@ -1821,6 +1939,54 @@ def _metadata_optional_int(value: Any) -> int | None:
     return None
 
 
+def _metadata_optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        value = value.decode()
+    text = str(value).strip()
+    return text if text else None
+
+
+def _metadata_optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        if float(value) == 0.0:
+            return False
+        if float(value) == 1.0:
+            return True
+    if isinstance(value, bytes):
+        text = value.decode().strip().casefold()
+    else:
+        text = str(value).strip().casefold()
+    if text in {"true", "1"}:
+        return True
+    if text in {"false", "0"}:
+        return False
+    return None
+
+
+def _metadata_optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, bytes):
+        text = value.decode().strip()
+    else:
+        text = str(value).strip()
+    try:
+        parsed = float(text)
+    except ValueError:
+        return None
+    return parsed if np.isfinite(parsed) else None
+
+
 def _metadata_int_or_default(value: Any, *, default: int) -> int:
     parsed = _metadata_optional_int(value)
     return default if parsed is None else parsed
@@ -1954,6 +2120,9 @@ def _resolve_model_parameter_names(
     model_names = tuple(model.parameters)
     if all(name in model.parameters for name in fixture_names):
         return fixture_names
+    normalized_names = _normalize_sampler_parameter_names(fixture_names)
+    if all(name in model.parameters for name in normalized_names):
+        return normalized_names
     if len(fixture_names) == len(model_names):
         return model_names
     missing = [name for name in fixture_names if name not in model.parameters]
@@ -1989,7 +2158,7 @@ def _safe_model_value_posterior_components(
             replay_values,
             start_date=start_date,
             log_likelihood_start=log_likelihood_start,
-            update_fixed_parameters=True,
+            update_fixed_parameters=False,
         )
         if not np.isfinite(log_posterior):
             return np.asarray([float("-inf"), float("-inf"), float("-inf")], dtype=np.float64)
@@ -2109,9 +2278,40 @@ def _load_hdf5_arrays(path: Path) -> dict[str, np.ndarray]:
         observable_names = _parse_hdf5_name_attr(handle.attrs.get("observable_names"))
         if observable_names:
             arrays["metadata/observable_names"] = _name_code_matrix(observable_names)
+        observable_sources = _parse_hdf5_name_attr(handle.attrs.get("observable_sources"))
+        if observable_sources:
+            arrays["metadata/observable_sources"] = _name_code_matrix(observable_sources)
+        observable_forward_transforms = _parse_hdf5_name_attr(
+            handle.attrs.get("observable_forward_transforms")
+        )
+        if observable_forward_transforms:
+            arrays["metadata/observable_forward_transforms"] = _name_code_matrix(
+                observable_forward_transforms
+            )
+        observable_reverse_transforms = _parse_hdf5_name_attr(
+            handle.attrs.get("observable_reverse_transforms")
+        )
+        if observable_reverse_transforms:
+            arrays["metadata/observable_reverse_transforms"] = _name_code_matrix(
+                observable_reverse_transforms
+            )
         pseudo_observable_names = _parse_hdf5_name_attr(handle.attrs.get("pseudo_observable_names"))
         if pseudo_observable_names:
             arrays["metadata/pseudo_observable_names"] = _name_code_matrix(pseudo_observable_names)
+        pseudo_observable_reverse_transforms = _parse_hdf5_name_attr(
+            handle.attrs.get("pseudo_observable_reverse_transforms")
+        )
+        if pseudo_observable_reverse_transforms:
+            arrays["metadata/pseudo_observable_reverse_transforms"] = _name_code_matrix(
+                pseudo_observable_reverse_transforms
+            )
+        pseudo_observable_forward_transforms = _parse_hdf5_name_attr(
+            handle.attrs.get("pseudo_observable_forward_transforms")
+        )
+        if pseudo_observable_forward_transforms:
+            arrays["metadata/pseudo_observable_forward_transforms"] = _name_code_matrix(
+                pseudo_observable_forward_transforms
+            )
 
         def visit(name: str, obj: Any) -> None:
             if isinstance(obj, h5py.Dataset):
@@ -2203,18 +2403,73 @@ def _load_hdf5_labels(path: Path) -> FixtureLabels:
         expected_shock_names = _parse_hdf5_name_attr(handle.attrs.get("expected_shock_names"))
         equation_names = _parse_hdf5_name_attr(handle.attrs.get("equation_names"))
         observable_names = _parse_hdf5_name_attr(handle.attrs.get("observable_names"))
+        observable_sources = _parse_hdf5_name_attr(handle.attrs.get("observable_sources"))
+        observable_forward_transforms = _parse_hdf5_name_attr(
+            handle.attrs.get("observable_forward_transforms")
+        )
+        observable_reverse_transforms = _parse_hdf5_name_attr(
+            handle.attrs.get("observable_reverse_transforms")
+        )
         pseudo_observable_names = _parse_hdf5_name_attr(handle.attrs.get("pseudo_observable_names"))
+        pseudo_observable_reverse_transforms = _parse_hdf5_name_attr(
+            handle.attrs.get("pseudo_observable_reverse_transforms")
+        )
+        pseudo_observable_forward_transforms = _parse_hdf5_name_attr(
+            handle.attrs.get("pseudo_observable_forward_transforms")
+        )
         if observable_names:
             observable_width = _name_code_matrix(observable_names).shape[1]
             labels["metadata/observable_names"] = {
                 0: observable_names,
                 1: tuple(f"char_{index}" for index in range(observable_width)),
             }
+        if observable_sources:
+            observable_source_width = _name_code_matrix(observable_sources).shape[1]
+            labels["metadata/observable_sources"] = {
+                0: observable_sources,
+                1: tuple(f"char_{index}" for index in range(observable_source_width)),
+            }
+        if observable_forward_transforms:
+            observable_forward_transform_width = _name_code_matrix(
+                observable_forward_transforms
+            ).shape[1]
+            labels["metadata/observable_forward_transforms"] = {
+                0: observable_forward_transforms,
+                1: tuple(f"char_{index}" for index in range(observable_forward_transform_width)),
+            }
+        if observable_reverse_transforms:
+            observable_reverse_transform_width = _name_code_matrix(
+                observable_reverse_transforms
+            ).shape[1]
+            labels["metadata/observable_reverse_transforms"] = {
+                0: observable_reverse_transforms,
+                1: tuple(f"char_{index}" for index in range(observable_reverse_transform_width)),
+            }
         if pseudo_observable_names:
             pseudo_width = _name_code_matrix(pseudo_observable_names).shape[1]
             labels["metadata/pseudo_observable_names"] = {
                 0: pseudo_observable_names,
                 1: tuple(f"char_{index}" for index in range(pseudo_width)),
+            }
+        if pseudo_observable_reverse_transforms:
+            pseudo_observable_reverse_transform_width = _name_code_matrix(
+                pseudo_observable_reverse_transforms
+            ).shape[1]
+            labels["metadata/pseudo_observable_reverse_transforms"] = {
+                0: pseudo_observable_reverse_transforms,
+                1: tuple(
+                    f"char_{index}" for index in range(pseudo_observable_reverse_transform_width)
+                ),
+            }
+        if pseudo_observable_forward_transforms:
+            pseudo_observable_forward_transform_width = _name_code_matrix(
+                pseudo_observable_forward_transforms
+            ).shape[1]
+            labels["metadata/pseudo_observable_forward_transforms"] = {
+                0: pseudo_observable_forward_transforms,
+                1: tuple(
+                    f"char_{index}" for index in range(pseudo_observable_forward_transform_width)
+                ),
             }
         if endogenous_state_names and equation_names:
             _add_hdf5_dataset_labels(
@@ -2734,6 +2989,73 @@ def _hdf5_dataset_shape(
     if not isinstance(dataset, dataset_type):
         return None
     return tuple(int(item) for item in dataset.shape)
+
+
+_SAMPLER_PARAMETER_NAME_MAP: dict[str, str] = {
+    "\u03b1": "alpha",
+    "\u03b2": "beta",
+    "\u03b3": "gamma",
+    "\u03b4": "delta",
+    "\u03b5": "epsilon",
+    "\u03f5": "epsilon",
+    "\u03b6": "zeta",
+    "\u03b7": "eta",
+    "\u03b8": "theta",
+    "\u03b9": "iota",
+    "\u03ba": "kappa",
+    "\u03bb": "lambda",
+    "\u03bc": "mu",
+    "\u03bd": "nu",
+    "\u03be": "xi",
+    "\u03bf": "o",
+    "\u03c0": "pi",
+    "\u03c1": "rho",
+    "\u03c3": "sigma",
+    "\u03c4": "tau",
+    "\u03c5": "upsilon",
+    "\u03c6": "phi",
+    "\u03c7": "chi",
+    "\u03c8": "psi",
+    "\u03c9": "omega",
+    "\u0391": "Alpha",
+    "\u0392": "Beta",
+    "\u0393": "Gamma",
+    "\u0394": "Delta",
+    "\u0395": "Epsilon",
+    "\u0396": "Zeta",
+    "\u0397": "Eta",
+    "\u0398": "Theta",
+    "\u0399": "Iota",
+    "\u039a": "Kappa",
+    "\u039b": "Lambda",
+    "\u039c": "Mu",
+    "\u039d": "Nu",
+    "\u039e": "Xi",
+    "\u039f": "O",
+    "\u03a0": "Pi",
+    "\u03a1": "Rho",
+    "\u03a3": "Sigma",
+    "\u03a4": "Tau",
+    "\u03a5": "Upsilon",
+    "\u03a6": "Phi",
+    "\u03a7": "Chi",
+    "\u03a8": "Psi",
+    "\u03a9": "Omega",
+    "\u2032": "p",
+    "\u2033": "p",
+    "\u02b9": "p",
+    "\u2035": "p",
+}
+
+
+def _normalize_sampler_parameter_name(name: str) -> str:
+    return "".join(_SAMPLER_PARAMETER_NAME_MAP.get(char, char) for char in name)
+
+
+def _normalize_sampler_parameter_names(
+    names: tuple[str, ...],
+) -> tuple[str, ...]:
+    return tuple(_normalize_sampler_parameter_name(name) for name in names)
 
 
 def _parse_hdf5_name_attr(value: Any) -> tuple[str, ...]:

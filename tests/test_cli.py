@@ -834,6 +834,73 @@ def test_estimate_command_can_load_mode_input_for_sampler(tmp_path) -> None:
     assert '"proposal_covariance_shape": [' in result.stdout
 
 
+def test_estimate_command_writes_sampler_metadata_for_mode_input(tmp_path) -> None:
+    data_path = _write_observable_csv(tmp_path, periods=1)
+    mode_path = _write_mode_archive(tmp_path)
+    sampler_path = tmp_path / "chains" / "sampler.npz"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "estimate",
+            "--data",
+            str(data_path),
+            "--mode-input",
+            str(mode_path),
+            "--mh-draws",
+            "2",
+            "--seed",
+            "7",
+            "--sampler-output",
+            str(sampler_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert sampler_path.exists()
+    with np.load(sampler_path) as archive:
+        assert bool(archive["mode_in"][0]) is True
+        assert bool(archive["hessian_in"][0]) is True
+        assert bool(archive["calculate_hessian"][0]) is False
+        assert bool(archive["reoptimize"][0]) is False
+        assert bool(archive["run_csminwel"][0]) is False
+        assert float(archive["cc"][0]) == 0.09
+        assert float(archive["cc0"][0]) == 0.01
+
+
+def test_estimate_command_writes_custom_cc_sampler_metadata(tmp_path) -> None:
+    data_path = _write_observable_csv(tmp_path, periods=1)
+    mode_path = _write_mode_archive(tmp_path)
+    sampler_path = tmp_path / "chains" / "sampler.npz"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "estimate",
+            "--data",
+            str(data_path),
+            "--mode-input",
+            str(mode_path),
+            "--mh-draws",
+            "2",
+            "--seed",
+            "7",
+            "--mh-cc",
+            "0.13",
+            "--mh-cc0",
+            "0.03",
+            "--sampler-output",
+            str(sampler_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert sampler_path.exists()
+    with np.load(sampler_path) as archive:
+        assert float(archive["cc"][0]) == 0.13
+        assert float(archive["cc0"][0]) == 0.03
+
+
 def test_estimate_command_can_seed_sampler_from_hessian(tmp_path) -> None:
     data_path = _write_dated_observable_csv(tmp_path, dates=["2018-Q3"])
 
@@ -1142,6 +1209,11 @@ def test_vv_sampler_compare_reports_matching_trace_archive(tmp_path) -> None:
         "log_posterior",
         "accepted",
         "proposal_covariance",
+        "metadata/adaptive_accept",
+        "metadata/target_accept",
+        "metadata/alpha",
+        "metadata/c",
+        "metadata/proposal_scale",
         "diagnostics/core",
         "diagnostics/acceptance_windows",
         "diagnostics/parameters",

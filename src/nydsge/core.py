@@ -67,6 +67,7 @@ class PseudoObservable:
     name: str
     description: str
     reverse_transform: str = "identity"
+    forward_transform: str = "identity"
 
 
 @dataclass
