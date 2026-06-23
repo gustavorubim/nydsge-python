@@ -21,6 +21,10 @@ build/
 *.jld
 *.jld2
 tests/fixtures/oracle/*.csv
+!tests/fixtures/smoke/**/*.npz
+!tests/fixtures/smoke/**/*.h5
+!tests/fixtures/smoke/**/*.csv
+!tests/fixtures/smoke/**/*.json
 # Generated forecast/report run artifacts (figures, npz, scripts) are not source.
 outputs/
 mcps/
