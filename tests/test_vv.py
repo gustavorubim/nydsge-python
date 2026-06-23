@@ -1515,6 +1515,64 @@ def test_vv_oracle_coverage_cli_passes_complete_matrix_profile(tmp_path) -> None
     assert payload["missing"] == []
 
 
+def test_vv_oracle_coverage_cli_passes_financial_frictions_profile(tmp_path) -> None:
+    oracle = tmp_path / "oracle"
+    oracle.mkdir()
+    _write_required_arrays(oracle, required_fixture_arrays("financial-frictions"))
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "vv",
+            "oracle-coverage",
+            "--oracle-dir",
+            str(oracle),
+            "--profile",
+            "financial-frictions",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["passed"] is True
+    assert payload["missing"] == []
+
+
+def test_vv_compare_cli_compares_financial_frictions_profile(tmp_path) -> None:
+    oracle = tmp_path / "oracle"
+    candidate = tmp_path / "candidate"
+    oracle.mkdir()
+    candidate.mkdir()
+    _write_required_arrays(oracle, required_fixture_arrays("financial-frictions"))
+    _write_required_arrays(candidate, required_fixture_arrays("financial-frictions"))
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "vv",
+            "compare",
+            "--oracle-dir",
+            str(oracle),
+            "--candidate-dir",
+            str(candidate),
+            "--profile",
+            "financial-frictions",
+            "--tolerance-profile",
+            "strict",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["passed"] is True
+    assert payload["coverage_profile"] == "financial-frictions"
+    assert len(payload["comparisons"]) == 2
+    assert payload["comparisons"][0]["name"] == "financial_frictions/inputs"
+    assert payload["comparisons"][1]["name"] == "financial_frictions/values"
+
+
 def test_vv_solve_canonical_cli_writes_transition_fixture(tmp_path) -> None:
     canonical_dir = tmp_path / "canonical"
     output_dir = tmp_path / "candidate"
