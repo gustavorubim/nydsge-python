@@ -1,0 +1,185 @@
+{
+  "observables": {
+    "obs_gdp": {
+      "sources": "GDP__FRED|CNP16OV__FRED|GDPDEF__FRED",
+      "forward": "gdp_growth",
+      "reverse": "loggrowth_to_pct_annualized_percapita"
+    },
+    "obs_hours": {
+      "sources": "AWHNONAG__FRED|CE16OV__FRED",
+      "forward": "hours_per_capita",
+      "reverse": "identity"
+    },
+    "obs_wages": {
+      "sources": "COMPNFB__FRED|GDPDEF__FRED",
+      "forward": "real_wage_growth",
+      "reverse": "loggrowth_to_pct_annualized"
+    },
+    "obs_gdpdeflator": {
+      "sources": "GDPDEF__FRED",
+      "forward": "gdp_deflator_growth",
+      "reverse": "loggrowth_to_pct_annualized"
+    },
+    "obs_corepce": {
+      "sources": "PCEPILFE__FRED",
+      "forward": "core_pce_growth",
+      "reverse": "loggrowth_to_pct_annualized"
+    },
+    "obs_nominalrate": {
+      "sources": "DFF__FRED",
+      "forward": "nominal_rate",
+      "reverse": "quarter_to_annual"
+    },
+    "obs_consumption": {
+      "sources": "PCE__FRED|CNP16OV__FRED|GDPDEF__FRED",
+      "forward": "consumption_growth",
+      "reverse": "loggrowth_to_pct_annualized_percapita"
+    },
+    "obs_investment": {
+      "sources": "FPI__FRED|CNP16OV__FRED|GDPDEF__FRED",
+      "forward": "investment_growth",
+      "reverse": "loggrowth_to_pct_annualized_percapita"
+    },
+    "obs_spread": {
+      "sources": "BAA__FRED|BAMLC8A0C15PYEY__FRED|GS10__FRED",
+      "forward": "baa_10y_spread",
+      "reverse": "quarter_to_annual"
+    },
+    "obs_longinflation": {
+      "sources": "ASACX10__DLX",
+      "forward": "long_inflation_expectations",
+      "reverse": "loggrowth_to_pct_annualized"
+    },
+    "obs_longrate": {
+      "sources": "FYCCZA__DLX",
+      "forward": "long_rate",
+      "reverse": "quarter_to_annual"
+    },
+    "obs_tfp": {
+      "sources": "TFPKQ__DLX|TFPJQ__DLX",
+      "forward": "fernald_tfp",
+      "reverse": "quarter_to_annual"
+    },
+    "obs_gdi": {
+      "sources": "GDI__FRED|CNP16OV__FRED|GDPDEF__FRED",
+      "forward": "gdi_growth",
+      "reverse": "loggrowth_to_pct_annualized_percapita"
+    },
+    "obs_nominalrate1": {
+      "sources": "ant1__OIS",
+      "forward": "anticipated_rate",
+      "reverse": "quarter_to_annual"
+    },
+    "obs_nominalrate2": {
+      "sources": "ant2__OIS",
+      "forward": "anticipated_rate",
+      "reverse": "quarter_to_annual"
+    },
+    "obs_nominalrate3": {
+      "sources": "ant3__OIS",
+      "forward": "anticipated_rate",
+      "reverse": "quarter_to_annual"
+    },
+    "obs_nominalrate4": {
+      "sources": "ant4__OIS",
+      "forward": "anticipated_rate",
+      "reverse": "quarter_to_annual"
+    },
+    "obs_nominalrate5": {
+      "sources": "ant5__OIS",
+      "forward": "anticipated_rate",
+      "reverse": "quarter_to_annual"
+    },
+    "obs_nominalrate6": {
+      "sources": "ant6__OIS",
+      "forward": "anticipated_rate",
+      "reverse": "quarter_to_annual"
+    }
+  },
+  "pseudo_observables": {
+    "y_t": {
+      "forward": "identity",
+      "reverse": "identity"
+    },
+    "y_f_t": {
+      "forward": "identity",
+      "reverse": "identity"
+    },
+    "NaturalRate": {
+      "forward": "identity",
+      "reverse": "quarter_to_annual"
+    },
+    "π_t": {
+      "forward": "identity",
+      "reverse": "quarter_to_annual"
+    },
+    "OutputGap": {
+      "forward": "identity",
+      "reverse": "identity"
+    },
+    "ExAnteRealRate": {
+      "forward": "identity",
+      "reverse": "quarter_to_annual"
+    },
+    "LongRunInflation": {
+      "forward": "identity",
+      "reverse": "quarter_to_annual"
+    },
+    "MarginalCost": {
+      "forward": "identity",
+      "reverse": "identity"
+    },
+    "Wages": {
+      "forward": "identity",
+      "reverse": "identity"
+    },
+    "FlexibleWages": {
+      "forward": "identity",
+      "reverse": "identity"
+    },
+    "Hours": {
+      "forward": "identity",
+      "reverse": "identity"
+    },
+    "FlexibleHours": {
+      "forward": "identity",
+      "reverse": "identity"
+    },
+    "z_t": {
+      "forward": "identity",
+      "reverse": "identity"
+    },
+    "Expected10YearRateGap": {
+      "forward": "identity",
+      "reverse": "quarter_to_annual"
+    },
+    "NominalFFR": {
+      "forward": "identity",
+      "reverse": "quarter_to_annual"
+    },
+    "Expected10YearRate": {
+      "forward": "identity",
+      "reverse": "quarter_to_annual"
+    },
+    "Expected10YearNaturalRate": {
+      "forward": "identity",
+      "reverse": "quarter_to_annual"
+    },
+    "ExpectedNominalNaturalRate": {
+      "forward": "identity",
+      "reverse": "quarter_to_annual"
+    },
+    "NominalRateGap": {
+      "forward": "identity",
+      "reverse": "quarter_to_annual"
+    },
+    "LaborProductivityGrowth": {
+      "forward": "identity",
+      "reverse": "quarter_to_annual"
+    },
+    "u_t": {
+      "forward": "identity",
+      "reverse": "identity"
+    }
+  }
+}

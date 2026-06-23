@@ -12,6 +12,7 @@ using CSV
 using DataFrames
 using DSGE
 using HDF5
+using JSON
 using LinearAlgebra
 using ModelConstructors
 using Random
@@ -34,6 +35,7 @@ function parse_args(args)
         "include-financial-frictions" => "false",
         "include-sampler" => "false",
         "sampler-seed" => "",
+        "seed" => "",
         "sampler-draws" => "5000",
         "sampler-burnin" => "2",
         "sampler-blocks" => "22",
@@ -350,7 +352,69 @@ function forecast_date_labels(forecast_start::String, horizon::Int)
     return [quarter_label(start_date + Dates.Month(3 * offset)) for offset in 0:(horizon - 1)]
 end
 
+const PYTHON_METADATA_PATH = joinpath(@__DIR__, "python_metadata_ss10.json")
+
+function load_python_metadata()
+    if !isfile(PYTHON_METADATA_PATH)
+        error("Python metadata contract is missing: $(PYTHON_METADATA_PATH)")
+    end
+    return JSON.parsefile(PYTHON_METADATA_PATH)
+end
+
+function ordered_observable_keys(model)
+    items = sort(collect(model.observables); by = item -> item.second)
+    return [string(item.first) for item in items]
+end
+
+function ordered_pseudo_observable_keys(model)
+    items = sort(collect(model.pseudo_observables); by = item -> item.second)
+    return [string(item.first) for item in items]
+end
+
+function python_metadata_lookup(metadata, section::String, key::String, field::String)
+    section_data = get(metadata, section, nothing)
+    section_data === nothing && return nothing
+    entry = get(section_data, key, nothing)
+    entry === nothing && return nothing
+    return get(entry, field, nothing)
+end
+
 function export_label_attributes(file, model)
+    metadata = load_python_metadata()
+    observable_keys = ordered_observable_keys(model)
+    pseudo_keys = ordered_pseudo_observable_keys(model)
+    observable_sources = String[]
+    observable_forward_transforms = String[]
+    observable_reverse_transforms = String[]
+    for key in observable_keys
+        entry_sources = python_metadata_lookup(metadata, "observables", key, "sources")
+        entry_forward = python_metadata_lookup(metadata, "observables", key, "forward")
+        entry_reverse = python_metadata_lookup(metadata, "observables", key, "reverse")
+        push!(observable_sources, entry_sources === nothing ? "" : string(entry_sources))
+        push!(
+            observable_forward_transforms,
+            entry_forward === nothing ? "identity" : string(entry_forward),
+        )
+        push!(
+            observable_reverse_transforms,
+            entry_reverse === nothing ? "identity" : string(entry_reverse),
+        )
+    end
+    pseudo_reverse_transforms = String[]
+    pseudo_forward_transforms = String[]
+    for key in pseudo_keys
+        entry_forward = python_metadata_lookup(metadata, "pseudo_observables", key, "forward")
+        entry_reverse = python_metadata_lookup(metadata, "pseudo_observables", key, "reverse")
+        push!(
+            pseudo_forward_transforms,
+            entry_forward === nothing ? "identity" : string(entry_forward),
+        )
+        push!(
+            pseudo_reverse_transforms,
+            entry_reverse === nothing ? "identity" : string(entry_reverse),
+        )
+    end
+
     endogenous_state_names = ordered_mapping_names(model.endogenous_states)
     augmented_state_names = ordered_mapping_names(model.endogenous_states_augmented)
     write_file_attribute(file, "endogenous_state_names", join(endogenous_state_names, ","))
@@ -371,41 +435,28 @@ function export_label_attributes(file, model)
         ordered_mapping_names(model.equilibrium_conditions),
         ",",
     ))
-    write_file_attribute(file, "observable_names", join(ordered_mapping_names(model.observables), ","))
-    write_file_attribute(
-        file,
-        "observable_sources",
-        join(ordered_mapping_source_names(model.observables), ","),
-    )
+    write_file_attribute(file, "observable_names", join(observable_keys, ","))
+    write_file_attribute(file, "observable_sources", join(observable_sources, ","))
     write_file_attribute(
         file,
         "observable_forward_transforms",
-        join(ordered_mapping_transform_values(model.observables, :forward_transform), ","),
+        join(observable_forward_transforms, ","),
     )
     write_file_attribute(
         file,
         "observable_reverse_transforms",
-        join(ordered_mapping_transform_values(model.observables, :reverse_transform), ","),
+        join(observable_reverse_transforms, ","),
     )
-    write_file_attribute(file, "pseudo_observable_names", join(
-        ordered_mapping_names(model.pseudo_observables),
-        ",",
-    ))
+    write_file_attribute(file, "pseudo_observable_names", join(pseudo_keys, ","))
     write_file_attribute(
         file,
         "pseudo_observable_reverse_transforms",
-        join(
-            ordered_mapping_transform_values(model.pseudo_observables, :reverse_transform),
-            ",",
-        ),
+        join(pseudo_reverse_transforms, ","),
     )
     write_file_attribute(
         file,
         "pseudo_observable_forward_transforms",
-        join(
-            ordered_mapping_transform_values(model.pseudo_observables, :forward_transform),
-            ",",
-        ),
+        join(pseudo_forward_transforms, ","),
     )
 end
 
@@ -492,13 +543,34 @@ function normalize_shock_samples(raw_samples; nshocks::Int, horizon::Int)
     return normalized
 end
 
-function full_forecast_shock_samples(model; horizon::Int, full_draws::Int, shock_samples_in::String)
+function full_forecast_shock_samples(
+    model;
+    horizon::Int,
+    full_draws::Int,
+    shock_samples_in::String,
+    seed::Union{Int,Nothing} = nothing,
+)
     nshocks = n_shocks_exogenous(model)
     if isempty(shock_samples_in)
         if full_draws <= 0
             error("--include-full-forecast true requires --full-draws or --shock-samples-in")
         end
-        return zeros(Float64, nshocks, horizon, full_draws)
+        if seed === nothing
+            return zeros(Float64, nshocks, horizon, full_draws)
+        end
+        system = compute_system(model)
+        qq = Matrix{Float64}(system[:QQ])
+        rng = MersenneTwister(seed)
+        eigvals, eigvecs = eigen(Symmetric(qq))
+        shock_scale = sqrt.(max.(eigvals, 0.0))
+        samples = zeros(Float64, nshocks, horizon, full_draws)
+        for draw in 1:full_draws
+            for period in 1:horizon
+                samples[:, period, draw] =
+                    eigvecs * (shock_scale .* randn(rng, nshocks))
+            end
+        end
+        return samples
     end
     shock_samples = normalize_shock_samples(
         read_hdf5_shock_samples(shock_samples_in);
@@ -531,6 +603,7 @@ function export_full_forecast(
     horizon::Int,
     full_draws::Int,
     shock_samples_in::String,
+    seed::Union{Int,Nothing} = nothing,
     history_observables = nothing,
     initial_state = nothing,
 )
@@ -545,6 +618,7 @@ function export_full_forecast(
         horizon = horizon,
         full_draws = full_draws,
         shock_samples_in = shock_samples_in,
+        seed = seed,
     )
     draws = size(shock_samples, 3)
     nstates = size(system[:TTT], 1)
@@ -1486,6 +1560,7 @@ function export_model1002(;
     include_full_forecast,
     full_draws,
     shock_samples_in,
+    forecast_seed,
     include_kalman,
     include_posterior,
     include_history,
@@ -1636,6 +1711,7 @@ function export_model1002(;
                 horizon = horizon,
                 full_draws = full_draws,
                 shock_samples_in = shock_samples_in,
+                seed = forecast_seed,
                 history_observables = history_observables,
                 initial_state = forecast_initial_state,
             )
@@ -1656,6 +1732,7 @@ function export_model1002_main(args = ARGS)
         include_full_forecast = parse_bool(options["include-full-forecast"]),
         full_draws = parse(Int, options["full-draws"]),
         shock_samples_in = options["shock-samples-in"],
+        forecast_seed = parse_optional_int(options["seed"]),
         include_kalman = parse_bool(options["include-kalman"]),
         include_posterior = parse_bool(options["include-posterior"]),
         include_history = parse_bool(options["include-history"]),
