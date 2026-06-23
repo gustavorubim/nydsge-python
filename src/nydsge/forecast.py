@@ -1173,6 +1173,212 @@ def _normalize_shock_samples(
     return normalized
 
 
+@dataclass(frozen=True)
+class ImpulseResponse:
+    """Impulse responses of states/observables to each structural shock.
+
+    Axis convention for every array is ``(horizon, variable, shock)`` where
+    ``horizon`` index ``h`` is the response ``h`` quarters after a one-time shock
+    in period 0. ``normalization`` documents the impulse magnitude applied to
+    each shock and ``shock_scales`` records the per-shock magnitude actually used.
+    """
+
+    states: np.ndarray
+    observables: np.ndarray
+    pseudo_observables: np.ndarray | None
+    shock_scales: np.ndarray
+    normalization: str
+
+
+def observable_irf(
+    system: System,
+    *,
+    horizon: int,
+    normalization: str = "unit",
+) -> ImpulseResponse:
+    """Compute impulse responses from the solved state-space system.
+
+    The response of the state vector to shock ``j`` is
+    ``s_h = TTT^h @ (RRR[:, j] * scale[j])`` with ``s_0 = RRR[:, j] * scale[j]``;
+    observable and pseudo-observable responses apply ``ZZ`` / ``ZZ_pseudo`` (the
+    constant ``DD`` / ``DD_pseudo`` cancels since responses are deviations).
+
+    ``normalization``:
+
+    - ``"unit"`` applies a unit (``1.0``) impulse to each shock.
+    - ``"one_sd"`` applies a one-standard-deviation impulse, ``sqrt(diag(QQ))``.
+    """
+
+    if horizon < 0:
+        msg = "Impulse response horizon must be nonnegative."
+        raise ValueError(msg)
+    key = str(normalization).lower()
+    transition = system.transition
+    measurement = system.measurement
+    n_shocks = transition.RRR.shape[1]
+    if key == "unit":
+        scales = np.ones(n_shocks, dtype=np.float64)
+    elif key == "one_sd":
+        scales = np.sqrt(np.clip(np.diag(np.asarray(measurement.QQ, dtype=np.float64)), 0.0, None))
+    else:
+        msg = "Impulse response normalization must be 'unit' or 'one_sd'."
+        raise ValueError(msg)
+    n_states = transition.TTT.shape[0]
+    states = np.zeros((horizon, n_states, n_shocks), dtype=np.float64)
+    current = np.asarray(transition.RRR, dtype=np.float64) * scales[np.newaxis, :]
+    for step in range(horizon):
+        states[step] = current
+        current = transition.TTT @ current
+    observables = np.einsum("on,hnj->hoj", measurement.ZZ, states)
+    pseudo_observables = None
+    if system.pseudo_measurement is not None:
+        pseudo_observables = np.einsum(
+            "pn,hnj->hpj",
+            system.pseudo_measurement.ZZ_pseudo,
+            states,
+        )
+    return ImpulseResponse(
+        states=states,
+        observables=observables,
+        pseudo_observables=pseudo_observables,
+        shock_scales=scales,
+        normalization=key,
+    )
+
+
+@dataclass(frozen=True)
+class HistoricalDecomposition:
+    """True historical shock decomposition of the in-sample observable path.
+
+    Contributions reconcile exactly (up to ``reconciliation_max_abs_error``) to
+    the model-implied smoothed observable path:
+    ``sum_j observable_contributions[:, :, j] + observable_baseline ==
+    smoothed_observables``. The ``observable_baseline`` carries the initial-state
+    and deterministic (``CCC`` drift + ``DD`` constant) contribution.
+    ``residual = observed - smoothed_observables`` is the measurement-error gap
+    not attributable to structural shocks.
+    """
+
+    state_contributions: np.ndarray  # (T, n_states, n_shocks)
+    observable_contributions: np.ndarray  # (T, n_observables, n_shocks)
+    state_baseline: np.ndarray  # (T, n_states)
+    observable_baseline: np.ndarray  # (T, n_observables)
+    smoothed_states: np.ndarray  # (T, n_states)
+    smoothed_observables: np.ndarray  # (T, n_observables)
+    smoothed_shocks: np.ndarray  # (T, n_shocks)
+    observed: np.ndarray  # (T, n_observables)
+    residual: np.ndarray  # (T, n_observables)
+    reconciliation_max_abs_error: float
+
+
+def historical_decomposition(
+    model: DSGEModel,
+    *,
+    data: Any | None = None,
+    initial_state: np.ndarray | None = None,
+    check_empty_columns: bool = True,
+) -> HistoricalDecomposition:
+    """Decompose the in-sample observable path into per-shock contributions.
+
+    Smoothed states are obtained from the RTS smoother. Smoothed structural
+    shocks are recovered from the transition identity
+    ``RRR @ eps_t = s_t - TTT @ s_{t-1} - CCC`` via ``pinv(RRR)`` (the smoothed
+    state innovation lies in the column space of ``RRR``). Each shock's
+    contribution is then propagated through the state recursion and mapped to
+    observables, yielding a decomposition that reconciles to the smoothed path.
+    """
+
+    system = compute_system(model)
+    if data is None:
+        data = load_data(model, check_empty_columns=check_empty_columns)
+    split = _forecast_data_split(
+        model,
+        data,
+        check_empty_columns=check_empty_columns,
+        cond_type="none",
+        conditional_periods=None,
+    )
+    observations = np.asarray(split.observations, dtype=np.float64)
+    periods = observations.shape[0]
+    if periods == 0:
+        msg = "Historical decomposition requires at least one in-sample observation."
+        raise ValueError(msg)
+    filtered = kalman_log_likelihood(
+        system,
+        observations,
+        process_covariances=model_process_covariances(
+            model,
+            system,
+            periods,
+            start_date=split.start_date,
+        ),
+        backend=get_backend(model.runtime),
+    )
+    smoothed = smooth_kalman_result(system, filtered)
+    if smoothed.smoothed_states is None:
+        msg = "Kalman smoother did not return smoothed states."
+        raise RuntimeError(msg)
+    smoothed_states = np.asarray(smoothed.smoothed_states, dtype=np.float64)
+    transition = system.transition
+    measurement = system.measurement
+    ttt = np.asarray(transition.TTT, dtype=np.float64)
+    rrr = np.asarray(transition.RRR, dtype=np.float64)
+    ccc = np.asarray(transition.CCC, dtype=np.float64).reshape(-1)
+    zz = np.asarray(measurement.ZZ, dtype=np.float64)
+    dd = np.asarray(measurement.DD, dtype=np.float64).reshape(-1)
+    n_states = ttt.shape[0]
+    n_shocks = rrr.shape[1]
+    rrr_pinv = np.linalg.pinv(rrr)
+    # The decomposition anchors on an initial state and attributes structural
+    # shocks to each subsequent period via the transition identity
+    # ``RRR @ eps_t = s_t - TTT @ s_{t-1} - CCC``. With no explicit initial state
+    # the first in-sample smoothed state is the anchor (initial condition) and
+    # shocks are attributed from the second period onward; the first period then
+    # carries no shock contribution and the full first state sits in the baseline.
+    if initial_state is None:
+        anchor = smoothed_states[0]
+        baseline_seed = smoothed_states[0]
+        first_shock_period = 1
+    else:
+        anchor = np.asarray(initial_state, dtype=np.float64).reshape(-1)
+        baseline_seed = ttt @ anchor + ccc
+        first_shock_period = 0
+    smoothed_shocks = np.zeros((periods, n_shocks), dtype=np.float64)
+    state_contributions = np.zeros((periods, n_states, n_shocks), dtype=np.float64)
+    running = np.zeros((n_states, n_shocks), dtype=np.float64)
+    previous = anchor
+    for period in range(first_shock_period, periods):
+        state_innovation = smoothed_states[period] - ttt @ previous - ccc
+        smoothed_shocks[period] = rrr_pinv @ state_innovation
+        running = ttt @ running + rrr * smoothed_shocks[period][np.newaxis, :]
+        state_contributions[period] = running
+        previous = smoothed_states[period]
+    state_baseline = np.zeros((periods, n_states), dtype=np.float64)
+    drift = baseline_seed
+    state_baseline[0] = drift
+    for period in range(1, periods):
+        drift = ttt @ drift + ccc
+        state_baseline[period] = drift
+    observable_contributions = np.einsum("on,tnj->toj", zz, state_contributions)
+    observable_baseline = state_baseline @ zz.T + dd[np.newaxis, :]
+    smoothed_observables = smoothed_states @ zz.T + dd[np.newaxis, :]
+    reconstructed = observable_contributions.sum(axis=2) + observable_baseline
+    reconciliation = float(np.max(np.abs(reconstructed - smoothed_observables)))
+    residual = observations - smoothed_observables
+    return HistoricalDecomposition(
+        state_contributions=state_contributions,
+        observable_contributions=observable_contributions,
+        state_baseline=state_baseline,
+        observable_baseline=observable_baseline,
+        smoothed_states=smoothed_states,
+        smoothed_observables=smoothed_observables,
+        smoothed_shocks=smoothed_shocks,
+        observed=observations,
+        residual=residual,
+        reconciliation_max_abs_error=reconciliation,
+    )
+
+
 def _observable_shock_design(system: System, *, horizon: int) -> np.ndarray:
     if horizon < 0:
         msg = "Forecast horizon must be nonnegative."
