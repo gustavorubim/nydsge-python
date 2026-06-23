@@ -969,6 +969,12 @@ def replay_sampler_proposal_posteriors(
     offset_mean = float(np.mean(finite_offsets)) if finite_offsets.size else None
     offset_std = float(np.std(finite_offsets)) if finite_offsets.size else None
     draw_labels = {0: _sampler_draw_labels(summary.draws)}
+    log_acceptance_atol = _propagated_difference_atol(
+        proposal_log_posterior,
+        previous_log_posterior,
+        atol=atol,
+        rtol=rtol,
+    )
     comparisons = [
         compare_arrays(
             "proposal_trace/proposal_log_posterior",
@@ -990,7 +996,7 @@ def replay_sampler_proposal_posteriors(
             "proposal_trace/log_acceptance_from_replay",
             log_acceptance,
             proposal_replay - previous_replay,
-            atol=atol,
+            atol=log_acceptance_atol,
             rtol=rtol,
             labels=draw_labels,
         ),
@@ -1918,6 +1924,22 @@ def _safe_model_value_posterior_components(
 
 def _sampler_draw_labels(draws: int) -> tuple[str, ...]:
     return tuple(f"draw_{index}" for index in range(draws))
+
+
+def _propagated_difference_atol(
+    left: np.ndarray,
+    right: np.ndarray,
+    *,
+    atol: float,
+    rtol: float,
+) -> float:
+    left_arr = np.asarray(left, dtype=np.float64)
+    right_arr = np.asarray(right, dtype=np.float64)
+    if left_arr.size == 0 and right_arr.size == 0:
+        return atol
+    left_scale = float(np.nanmax(np.abs(left_arr))) if left_arr.size else 0.0
+    right_scale = float(np.nanmax(np.abs(right_arr))) if right_arr.size else 0.0
+    return max(atol, 2.0 * atol + rtol * (left_scale + right_scale))
 
 
 def _infer_sampler_mhparams_axes(
