@@ -1753,6 +1753,35 @@ def test_vv_export_financial_frictions_cli_writes_helper_fixture(tmp_path) -> No
     assert labels["financial_frictions/values"][1][-1] == "zeta_spb"
 
 
+def test_vv_export_financial_frictions_preserves_existing_manifest_metadata(tmp_path) -> None:
+    output_dir = tmp_path / "candidate"
+    save_fixture_manifest(
+        output_dir,
+        {
+            "kind": "model1002_candidate",
+            "shapes": {"canonical": {"Gamma0": [1, 1]}},
+        },
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "vv",
+            "export-financial-frictions",
+            "--output-dir",
+            str(output_dir),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["kind"] == "model1002_candidate"
+    assert manifest["shapes"]["canonical"]["Gamma0"] == [1, 1]
+    assert manifest["shapes"]["financial_frictions"]["inputs"] == [3, 3]
+    assert manifest["shapes"]["financial_frictions"]["values"] == [3, 16]
+
+
 def test_vv_export_suite_cli_writes_standard_candidate_suite(tmp_path) -> None:
     output_dir = tmp_path / "candidate"
 

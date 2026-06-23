@@ -555,6 +555,43 @@
         "rm_shl6"
       ]
     },
+    "financial_frictions/inputs": {
+      "axis0": [
+        "default",
+        "lower_sigma",
+        "wide_spread"
+      ],
+      "axis1": [
+        "z",
+        "sigma",
+        "spr"
+      ]
+    },
+    "financial_frictions/values": {
+      "axis0": [
+        "default",
+        "lower_sigma",
+        "wide_spread"
+      ],
+      "axis1": [
+        "omega",
+        "G",
+        "Gamma",
+        "dG_domega",
+        "d2G_domega2",
+        "dGamma_domega",
+        "d2Gamma_domega2",
+        "dG_dsigma",
+        "d2G_domega_dsigma",
+        "dGamma_dsigma",
+        "d2Gamma_domega_dsigma",
+        "mu",
+        "nk",
+        "zeta_bomega",
+        "zeta_zomega",
+        "zeta_spb"
+      ]
+    },
     "forecast_mode/observables": {
       "axis0": [
         "2018-Q4",
@@ -4404,6 +4441,16 @@
       "Psi": [
         68,
         24
+      ]
+    },
+    "financial_frictions": {
+      "inputs": [
+        3,
+        3
+      ],
+      "values": [
+        3,
+        16
       ]
     },
     "system": {

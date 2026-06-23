@@ -2664,9 +2664,22 @@ def _merge_manifest(path: Path, metadata: dict[str, Any]) -> dict[str, Any]:
         if isinstance(metadata_labels, dict):
             labels.update(metadata_labels)
         merged["labels"] = labels
+    existing_shapes = existing.get("shapes", {})
+    metadata_shapes = metadata.get("shapes", {})
+    if isinstance(existing_shapes, dict) or isinstance(metadata_shapes, dict):
+        shapes: dict[str, Any] = {}
+        if isinstance(existing_shapes, dict):
+            shapes.update(existing_shapes)
+        if isinstance(metadata_shapes, dict):
+            for group, group_shapes in metadata_shapes.items():
+                if isinstance(group_shapes, dict) and isinstance(shapes.get(group), dict):
+                    shapes[group] = {**shapes[group], **group_shapes}
+                else:
+                    shapes[group] = group_shapes
+        merged["shapes"] = shapes
     existing_samplers = existing.get("samplers", {})
     metadata_samplers = metadata.get("samplers", {})
-    if isinstance(existing_samplers, dict) or isinstance(metadata_samplers, dict):
+    if "samplers" in existing or "samplers" in metadata:
         samplers: dict[str, Any] = {}
         if isinstance(existing_samplers, dict):
             samplers.update(existing_samplers)
@@ -2675,7 +2688,7 @@ def _merge_manifest(path: Path, metadata: dict[str, Any]) -> dict[str, Any]:
         merged["samplers"] = samplers
     existing_shock_samples = existing.get("shock_samples", {})
     metadata_shock_samples = metadata.get("shock_samples", {})
-    if isinstance(existing_shock_samples, dict) or isinstance(metadata_shock_samples, dict):
+    if "shock_samples" in existing or "shock_samples" in metadata:
         shock_samples: dict[str, Any] = {}
         if isinstance(existing_shock_samples, dict):
             shock_samples.update(existing_shock_samples)

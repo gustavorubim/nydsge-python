@@ -2346,7 +2346,6 @@ def vv_export_financial_frictions(
     manifest_path = save_fixture_manifest(
         output_dir,
         {
-            "fixture_kind": "financial_frictions",
             "shapes": {
                 "financial_frictions": {
                     "inputs": list(inputs.shape),
