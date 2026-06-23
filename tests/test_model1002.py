@@ -651,6 +651,51 @@ def test_model1002_equilibrium_supports_altpolicy_pgap_smooth_ait_gdp_alt_refere
     assert math.isclose(canonical.Gamma1[eq["eq_pgap"] - 1, endo["pgap_t"] - 1], rho_pgap)
 
 
+def test_model1002_equilibrium_supports_altpolicy_pgap_ait_reference_equations() -> None:
+    model = Model1002(
+        settings={
+            "add_altpolicy_pgap": True,
+            "n_mon_anticipated_shocks": 0,
+            "regime_eqcond_info": {1: 1},
+            "pgap_type": "ait",
+            "ait_Thalf": 8.0,
+        }
+    )
+
+    canonical = model.equilibrium_matrices()
+    eq = model.indexes.equilibrium_conditions
+    endo = model.indexes.endogenous_states
+    rho_pgap = math.exp(math.log(0.5) / 8.0)
+
+    assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["pgap_t"] - 1] == 1.0
+    assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["pi_t"] - 1] == -1.0
+    assert math.isclose(canonical.Gamma1[eq["eq_pgap"] - 1, endo["pgap_t"] - 1], rho_pgap)
+
+
+def test_model1002_equilibrium_supports_altpolicy_pgap_ngdp_reference_equations() -> None:
+    model = Model1002(
+        settings={
+            "add_altpolicy_pgap": True,
+            "n_mon_anticipated_shocks": 0,
+            "regime_eqcond_info": {1: 1},
+            "pgap_type": "ngdp",
+            "ait_Thalf": 8.0,
+        }
+    )
+
+    canonical = model.equilibrium_matrices()
+    eq = model.indexes.equilibrium_conditions
+    endo = model.indexes.endogenous_states
+    rho_pgap = math.exp(math.log(0.5) / 8.0)
+
+    assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["pgap_t"] - 1] == 1.0
+    assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["pi_t"] - 1] == -1.0
+    assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["y_t"] - 1] == -1.0
+    assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["z_t"] - 1] == -1.0
+    assert math.isclose(canonical.Gamma1[eq["eq_pgap"] - 1, endo["pgap_t"] - 1], 1.0)
+    assert math.isclose(canonical.Gamma1[eq["eq_pgap"] - 1, endo["y_t"] - 1], -1.0)
+
+
 def test_model1002_equilibrium_supports_altpolicy_ygap_smooth_ait_reference_equations() -> None:
     model = Model1002(
         settings={
@@ -732,6 +777,48 @@ def test_model1002_equilibrium_supports_add_pgap_rw_reference_equations() -> Non
             "n_mon_anticipated_shocks": 0,
             "regime_eqcond_info": {1: 1},
             "pgap_type": "rw",
+            "ait_Thalf": 8.0,
+        }
+    )
+
+    canonical = model.equilibrium_matrices()
+    eq = model.indexes.equilibrium_conditions
+    endo = model.indexes.endogenous_states
+    rho_pgap = math.exp(math.log(0.5) / 8.0)
+
+    assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["pgap_t"] - 1] == 1.0
+    assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["pi_t"] - 1] == -1.0
+    assert math.isclose(canonical.Gamma1[eq["eq_pgap"] - 1, endo["pgap_t"] - 1], rho_pgap)
+
+
+def test_model1002_equilibrium_supports_add_pgap_ait_reference_equations() -> None:
+    model = Model1002(
+        settings={
+            "add_pgap": True,
+            "n_mon_anticipated_shocks": 0,
+            "regime_eqcond_info": {1: 1},
+            "pgap_type": "ait",
+            "ait_Thalf": 8.0,
+        }
+    )
+
+    canonical = model.equilibrium_matrices()
+    eq = model.indexes.equilibrium_conditions
+    endo = model.indexes.endogenous_states
+    rho_pgap = math.exp(math.log(0.5) / 8.0)
+
+    assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["pgap_t"] - 1] == 1.0
+    assert canonical.Gamma0[eq["eq_pgap"] - 1, endo["pi_t"] - 1] == -1.0
+    assert math.isclose(canonical.Gamma1[eq["eq_pgap"] - 1, endo["pgap_t"] - 1], rho_pgap)
+
+
+def test_model1002_equilibrium_supports_add_pgap_smooth_ait_gdp_reference_equations() -> None:
+    model = Model1002(
+        settings={
+            "add_pgap": True,
+            "n_mon_anticipated_shocks": 0,
+            "regime_eqcond_info": {1: 1},
+            "pgap_type": "smooth_ait_gdp",
             "ait_Thalf": 8.0,
         }
     )
@@ -858,6 +945,29 @@ def test_model1002_equilibrium_supports_add_ygap_flexible_ait_reference_equation
     assert math.isclose(canonical.Gamma1[eq["eq_ygap"] - 1, endo["y_t"] - 1], -rho_ygap)
 
 
+def test_model1002_equilibrium_supports_add_ygap_smooth_ait_gdp_reference_equations() -> None:
+    model = Model1002(
+        settings={
+            "add_ygap": True,
+            "n_mon_anticipated_shocks": 0,
+            "regime_eqcond_info": {1: 1},
+            "ygap_type": "smooth_ait_gdp",
+            "gdp_Thalf": 6.0,
+        }
+    )
+
+    canonical = model.equilibrium_matrices()
+    eq = model.indexes.equilibrium_conditions
+    endo = model.indexes.endogenous_states
+    rho_ygap = math.exp(math.log(0.5) / 6.0)
+
+    assert canonical.Gamma0[eq["eq_ygap"] - 1, endo["ygap_t"] - 1] == 1.0
+    assert canonical.Gamma0[eq["eq_ygap"] - 1, endo["y_t"] - 1] == -1.0
+    assert canonical.Gamma0[eq["eq_ygap"] - 1, endo["z_t"] - 1] == -1.0
+    assert math.isclose(canonical.Gamma1[eq["eq_ygap"] - 1, endo["ygap_t"] - 1], rho_ygap)
+    assert math.isclose(canonical.Gamma1[eq["eq_ygap"] - 1, endo["y_t"] - 1], -rho_ygap)
+
+
 def test_model1002_equilibrium_supports_rw_reference_equations() -> None:
     model = Model1002(
         settings={
@@ -903,6 +1013,39 @@ def test_model1002_equilibrium_supports_rw_reference_equations() -> None:
     assert math.isclose(
         canonical.Gamma0[eq["eq_Rref"] - 1, endo["ygap_t"] - 1],
         -2.0 * (1.0 - rho_ygap) * (1.0 - rho_smooth),
+    )
+
+
+def test_model1002_equilibrium_supports_rw_reference_ait_rref_type_equations() -> None:
+    model = Model1002(
+        settings={
+            "add_rw": True,
+            "add_altpolicy_pgap": True,
+            "n_mon_anticipated_shocks": 0,
+            "regime_eqcond_info": {1: 1},
+            "Rref_type": "ait",
+            "pgap_type": "smooth_ait",
+            "ait_Thalf": 8.0,
+            "ait_phi": 0.25,
+        }
+    )
+
+    canonical = model.equilibrium_matrices()
+    eq = model.indexes.equilibrium_conditions
+    endo = model.indexes.endogenous_states
+    c = canonical.C
+    rho_rw = 0.93
+    rho_pgap = math.exp(math.log(0.5) / 8.0)
+
+    assert canonical.Gamma0[eq["eq_rw"] - 1, endo["rw_t"] - 1] == 1.0
+    assert math.isclose(canonical.Gamma1[eq["eq_rw"] - 1, endo["rw_t"] - 1], rho_rw)
+    assert canonical.Gamma0[eq["eq_Rref"] - 1, endo["Rref_t"] - 1] == 1.0
+    assert math.isclose(canonical.Gamma1[eq["eq_Rref"] - 1, endo["Rref_t"] - 1], 0.0)
+    assert math.isclose(c[eq["eq_Rref"] - 1], 0.0)
+    assert canonical.Gamma0[eq["eq_Rref"] - 1, endo["rw_t"] - 1] == -1.0
+    assert math.isclose(
+        canonical.Gamma0[eq["eq_Rref"] - 1, endo["pgap_t"] - 1],
+        -0.25 / (1.0 - rho_pgap),
     )
 
 

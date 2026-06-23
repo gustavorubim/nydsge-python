@@ -18,12 +18,13 @@ Only this capture/report/compare set is part of the active workflow.
 
 Current real-machine baseline status:
 
-- `windows-cpu`, `macos-cpu`, `linux-cpu`: captured when available from each target machine.
-- `windows-cuda`: **pending** on real-machine baseline capture.
+- `windows-cpu`: captured for `windows-cpu_forecast_2026-06-23_local.json` with Julia baseline `windows-cpu_julia_forecast_2026-06-23.json` and speedup report `windows-cpu_forecast_vs_julia_2026-06-23.json`.
+- `macos-cpu`, `linux-cpu`: captured when available from each target machine.
+- `windows-cuda`: **captured** with native PyTorch CUDA available in `.venv313`; run produced `windows-cuda_all_2026-06-23_local.json`, `windows-cuda_all_vs_julia_2026-06-23.json`, and shared Julia baseline `windows-cuda_julia_forecast_2026-06-23.json`.
 - `macos-mps`: **pending** on real-machine baseline capture.
 - `linux-cuda`: **pending** on real-machine CUDA/JAX baseline capture.
 
-Real-machine baselines are pending for Windows CUDA, macOS MPS, and Linux CUDA/JAX.
+Real-machine baselines are pending for macOS MPS and Linux CUDA/JAX.
 
 Keep all pending real-machine baselines out of the repository source tree until they
 are intentionally curated under `reports/benchmarks/`.
