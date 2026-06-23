@@ -1573,6 +1573,59 @@ def test_vv_compare_cli_compares_financial_frictions_profile(tmp_path) -> None:
     assert payload["comparisons"][1]["name"] == "financial_frictions/values"
 
 
+def test_vv_financial_frictions_oracle_coverage_uses_committed_fixture() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    oracle_dir = repo_root / "tests" / "fixtures" / "oracle"
+    result = CliRunner().invoke(
+        app,
+        [
+            "vv",
+            "oracle-coverage",
+            "--oracle-dir",
+            str(oracle_dir),
+            "--profile",
+            "financial-frictions",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["passed"] is True
+    assert payload["profile"] == "financial-frictions"
+    assert payload["missing"] == []
+
+
+def test_vv_compare_cli_compares_committed_financial_fixtures() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    oracle_dir = repo_root / "tests" / "fixtures" / "oracle"
+    candidate_dir = repo_root / "tests" / "fixtures" / "candidate"
+    result = CliRunner().invoke(
+        app,
+        [
+            "vv",
+            "compare",
+            "--oracle-dir",
+            str(oracle_dir),
+            "--candidate-dir",
+            str(candidate_dir),
+            "--profile",
+            "financial-frictions",
+            "--tolerance-profile",
+            "strict",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["passed"] is True
+    assert payload["coverage_profile"] == "financial-frictions"
+    assert len(payload["comparisons"]) == 2
+    assert payload["comparisons"][0]["name"] == "financial_frictions/inputs"
+    assert payload["comparisons"][1]["name"] == "financial_frictions/values"
+
+
 def test_vv_solve_canonical_cli_writes_transition_fixture(tmp_path) -> None:
     canonical_dir = tmp_path / "canonical"
     output_dir = tmp_path / "candidate"
