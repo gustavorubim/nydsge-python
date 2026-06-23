@@ -35,6 +35,7 @@ from nydsge.vv import (
     save_fixture_manifest,
     save_forecast_fixture,
     save_meansbands_fixture,
+    save_model_metadata_fixture,
     save_parameter_fixture,
     save_steady_state_fixture,
     save_system_fixture,
@@ -79,6 +80,7 @@ def test_resolve_tolerance_profile_rejects_invalid_values() -> None:
 
 
 def test_required_fixture_arrays_profiles() -> None:
+    model_metadata = required_fixture_arrays("model-metadata")
     parameters = required_fixture_arrays("parameters")
     steady_state = required_fixture_arrays("steady-state")
     financial_frictions = required_fixture_arrays("financial-frictions")
@@ -95,6 +97,10 @@ def test_required_fixture_arrays_profiles() -> None:
     sampler_trace = required_fixture_arrays("sampler-trace")
     sampler_proposal_trace = required_fixture_arrays("sampler-proposal-trace")
 
+    assert model_metadata == (
+        "metadata/observable_names",
+        "metadata/pseudo_observable_names",
+    )
     assert parameters == (
         "parameters/values",
         "parameters/scaled_values",
@@ -120,6 +126,7 @@ def test_required_fixture_arrays_profiles() -> None:
     )
     assert "kalman/filtered_states" not in posterior
     assert set(parameters).issubset(set(model_setup))
+    assert set(model_metadata).issubset(set(model_setup))
     assert set(steady_state).issubset(set(model_setup))
     assert set(model_setup).isdisjoint(set(matrix))
     assert "canonical/Gamma0" in matrix
@@ -314,7 +321,20 @@ def test_load_fixture_labels_reads_julia_hdf5_metadata(tmp_path) -> None:
         handle.attrs["pseudo_observable_names"] = "y_t,\u03c0_t"
 
     labels = load_fixture_labels(oracle)
+    arrays = load_fixture_arrays(oracle)
 
+    assert arrays["metadata/observable_names"].shape == (1, len("obs_gdp"))
+    assert arrays["metadata/observable_names"][0, 0] == ord("o")
+    assert arrays["metadata/pseudo_observable_names"].shape == (2, 3)
+    assert arrays["metadata/pseudo_observable_names"][1, 0] == ord("\u03c0")
+    assert labels["metadata/observable_names"] == {
+        0: ("obs_gdp",),
+        1: tuple(f"char_{index}" for index in range(len("obs_gdp"))),
+    }
+    assert labels["metadata/pseudo_observable_names"] == {
+        0: ("y_t", "\u03c0_t"),
+        1: ("char_0", "char_1", "char_2"),
+    }
     assert labels["parameters/values"] == {0: ("alpha", "beta")}
     assert labels["parameters/scaled_values"] == {0: ("alpha", "beta")}
     assert labels["parameters/fixed"] == {0: ("alpha", "beta")}
@@ -701,6 +721,17 @@ def test_check_fixture_coverage_passes_complete_matrix_profile(tmp_path) -> None
     _write_required_arrays(oracle, required_fixture_arrays("matrix"))
 
     report = check_fixture_coverage(oracle, profile="matrix")
+
+    assert report.passed
+    assert report.missing == ()
+
+
+def test_check_fixture_coverage_passes_complete_model_metadata_profile(tmp_path) -> None:
+    oracle = tmp_path / "oracle"
+    oracle.mkdir()
+    _write_required_arrays(oracle, required_fixture_arrays("model-metadata"))
+
+    report = check_fixture_coverage(oracle, profile="model-metadata")
 
     assert report.passed
     assert report.missing == ()
@@ -1206,6 +1237,30 @@ def test_compare_fixture_dirs_can_filter_to_required_arrays(tmp_path) -> None:
     assert [item.name for item in report.comparisons] == ["A"]
 
 
+def test_compare_fixture_dirs_compares_hdf5_model_metadata_attributes(tmp_path) -> None:
+    h5py = pytest.importorskip("h5py")
+    oracle = tmp_path / "oracle"
+    candidate = tmp_path / "candidate"
+    oracle.mkdir()
+    model = Model1002()
+    with h5py.File(oracle / "m1002_ss10.h5", "w") as handle:
+        handle.attrs["observable_names"] = ",".join(model.observables)
+        handle.attrs["pseudo_observable_names"] = ",".join(model.pseudo_observables)
+    save_model_metadata_fixture(model, candidate)
+
+    report = compare_fixture_dirs(
+        oracle,
+        candidate,
+        array_names=required_fixture_arrays("model-metadata"),
+    )
+
+    assert report.passed
+    assert {item.name for item in report.comparisons} == {
+        "metadata/observable_names",
+        "metadata/pseudo_observable_names",
+    }
+
+
 def test_vv_compare_cli_success_and_failure(tmp_path) -> None:
     oracle = tmp_path / "oracle"
     candidate = tmp_path / "candidate"
@@ -1634,8 +1689,12 @@ def test_vv_export_matrices_cli_writes_model1002_candidate_fixtures(tmp_path) ->
     assert '"canonical_shape": [' in result.stdout
     assert (output_dir / "manifest.json").exists()
     arrays = load_fixture_arrays(output_dir)
+    observable_width = max(len(name) for name in model.observables)
+    pseudo_width = max(len(name) for name in model.pseudo_observables)
     assert arrays["parameters/values"].shape == (95,)
     assert arrays["parameters/scaled_values"].shape == (95,)
+    assert arrays["metadata/observable_names"].shape == (19, observable_width)
+    assert arrays["metadata/pseudo_observable_names"].shape == (21, pseudo_width)
     assert arrays["steady_state/values"].shape == (22,)
     assert arrays["canonical/Gamma0"].shape == (68, 68)
     assert arrays["canonical/Gamma1"].shape == (68, 68)
@@ -1647,6 +1706,10 @@ def test_vv_export_matrices_cli_writes_model1002_candidate_fixtures(tmp_path) ->
     assert arrays["system/TTT"].shape == (84, 84)
     manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["labels"]["parameters/values"]["axis0"] == list(model.parameters)
+    assert manifest["labels"]["metadata/observable_names"]["axis0"] == list(model.observables)
+    assert manifest["labels"]["metadata/pseudo_observable_names"]["axis0"] == list(
+        model.pseudo_observables
+    )
     assert manifest["labels"]["steady_state/values"]["axis0"] == list(model.steadystate())
     assert manifest["labels"]["canonical/Gamma0"]["axis0"] == list(
         model.indexes.equilibrium_conditions
@@ -1660,6 +1723,8 @@ def test_vv_export_matrices_cli_writes_model1002_candidate_fixtures(tmp_path) ->
         model.indexes.endogenous_states
     ) + list(model.indexes.endogenous_states_augmented)
     assert manifest["shapes"]["canonical"]["Gamma0"] == [68, 68]
+    assert manifest["shapes"]["metadata"]["observable_names"] == [19, observable_width]
+    assert manifest["shapes"]["metadata"]["pseudo_observable_names"] == [21, pseudo_width]
     assert manifest["shapes"]["transition"]["TTT"] == [68, 68]
     assert manifest["shapes"]["transition"]["eu"] == [2]
     assert manifest["shapes"]["system"]["TTT"] == [84, 84]

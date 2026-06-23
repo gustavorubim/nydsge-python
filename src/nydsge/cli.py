@@ -102,6 +102,7 @@ from nydsge.vv import (
     save_forecast_fixture,
     save_kalman_fixture,
     save_meansbands_fixture,
+    save_model_metadata_fixture,
     save_parameter_fixture,
     save_posterior_fixture,
     save_steady_state_fixture,
@@ -2806,6 +2807,7 @@ def vv_export_matrices(
         solved = solve_canonical(canonical, method=solve_method)
         system = compute_system(model_obj, method=solve_method)
         parameter_path = save_parameter_fixture(model_obj.parameters, output_dir)
+        metadata_path = save_model_metadata_fixture(model_obj, output_dir)
         steady_state_path = save_steady_state_fixture(model_obj.steady_state, output_dir)
         canonical_path = save_canonical_fixture(canonical, output_dir)
         transition_path = save_transition_fixture(solved, output_dir)
@@ -2815,6 +2817,7 @@ def vv_export_matrices(
             _matrix_manifest(
                 model_obj,
                 parameter_path=parameter_path,
+                metadata_path=metadata_path,
                 steady_state_path=steady_state_path,
                 canonical_path=canonical_path,
                 transition_path=transition_path,
@@ -2855,6 +2858,7 @@ def vv_export_matrices(
         "output_dir": str(output_dir),
         "manifest": str(manifest_path),
         "parameters": str(parameter_path),
+        "metadata": str(metadata_path),
         "steady_state": str(steady_state_path),
         "canonical": str(canonical_path),
         "transition": str(transition_path),
@@ -2874,6 +2878,7 @@ def vv_export_matrices(
     table = Table(title="Python matrix fixture export")
     table.add_column("Output")
     table.add_column("Parameters")
+    table.add_column("Metadata")
     table.add_column("Steady state")
     table.add_column("Canonical")
     table.add_column("Transition")
@@ -2881,6 +2886,7 @@ def vv_export_matrices(
     table.add_row(
         str(output_dir),
         str(len(model_obj.parameters)),
+        str(len(model_obj.observables)),
         str(len(model_obj.steady_state)),
         str(canonical.Gamma0.shape),
         str(solved.transition.TTT.shape),
@@ -4243,6 +4249,7 @@ def _export_model1002_candidate_suite(
     solved = solve_canonical(canonical)
     system = compute_system(model)
     parameter_path = save_parameter_fixture(model.parameters, output_dir)
+    metadata_path = save_model_metadata_fixture(model, output_dir)
     steady_state_path = save_steady_state_fixture(model.steady_state, output_dir)
     canonical_path = save_canonical_fixture(canonical, output_dir)
     transition_path = save_transition_fixture(solved, output_dir)
@@ -4252,6 +4259,7 @@ def _export_model1002_candidate_suite(
         _matrix_manifest(
             model,
             parameter_path=parameter_path,
+            metadata_path=metadata_path,
             steady_state_path=steady_state_path,
             canonical_path=canonical_path,
             transition_path=transition_path,
@@ -4287,6 +4295,7 @@ def _export_model1002_candidate_suite(
     exported.extend(
         [
             {"kind": "canonical", "path": str(canonical_path)},
+            {"kind": "metadata", "path": str(metadata_path)},
             {"kind": "parameters", "path": str(parameter_path)},
             {"kind": "steady_state", "path": str(steady_state_path)},
             {"kind": "transition", "path": str(transition_path)},
@@ -4618,6 +4627,7 @@ def _matrix_manifest(
     model: Model1002,
     *,
     parameter_path: Path,
+    metadata_path: Path,
     steady_state_path: Path,
     canonical_path: Path,
     transition_path: Path,
@@ -4631,6 +4641,7 @@ def _matrix_manifest(
     system_shapes: dict[str, tuple[int, ...]],
 ) -> dict[str, object]:
     manifest = _parameter_manifest(model, parameter_path=parameter_path)
+    metadata_manifest = _metadata_manifest(model, metadata_path=metadata_path)
     steady_state_manifest = _steady_state_manifest(model, steady_state_path=steady_state_path)
     system_manifest = _system_manifest(model, backend=backend, device=device)
     manifest.update(
@@ -4638,6 +4649,7 @@ def _matrix_manifest(
     )
     manifest["labels"] = {
         **cast(dict[str, dict[str, list[str]]], manifest["labels"]),
+        **cast(dict[str, dict[str, list[str]]], metadata_manifest["labels"]),
         **cast(dict[str, dict[str, list[str]]], steady_state_manifest["labels"]),
         **cast(dict[str, dict[str, list[str]]], system_manifest["labels"]),
     }
@@ -4647,12 +4659,23 @@ def _matrix_manifest(
             "method": method,
             "eu": list(eu),
             "parameters": str(parameter_path.name),
+            "metadata": str(metadata_path.name),
             "steady_state": str(steady_state_path.name),
             "canonical": str(canonical_path.name),
             "transition": str(transition_path.name),
             "system": str(system_path.name),
             "shapes": {
                 "canonical": {name: list(shape) for name, shape in canonical_shapes.items()},
+                "metadata": {
+                    "observable_names": [
+                        len(model.observables),
+                        _max_name_width(tuple(model.observables)),
+                    ],
+                    "pseudo_observable_names": [
+                        len(model.pseudo_observables),
+                        _max_name_width(tuple(model.pseudo_observables)),
+                    ],
+                },
                 "transition": {name: list(shape) for name, shape in transition_shapes.items()},
                 "system": {name: list(shape) for name, shape in system_shapes.items()},
             },
@@ -4773,6 +4796,35 @@ def _parameter_manifest(model: Model1002, *, parameter_path: Path) -> dict[str, 
             }
             for parameter in model.parameters.values()
         ],
+        "labels": labels,
+    }
+
+
+def _metadata_manifest(model: Model1002, *, metadata_path: Path) -> dict[str, object]:
+    observable_labels = list(model.observables)
+    pseudo_labels = list(model.pseudo_observables)
+    labels: dict[str, dict[str, list[str]]] = {}
+    _add_array_labels(
+        labels,
+        "metadata/observable_names",
+        (len(observable_labels), _max_name_width(tuple(observable_labels))),
+        {0: observable_labels, 1: _char_labels(observable_labels)},
+    )
+    _add_array_labels(
+        labels,
+        "metadata/pseudo_observable_names",
+        (len(pseudo_labels), _max_name_width(tuple(pseudo_labels))),
+        {0: pseudo_labels, 1: _char_labels(pseudo_labels)},
+    )
+    return {
+        "kind": "model1002_metadata_candidate",
+        "model": "Model1002",
+        "subspec": model.subspec,
+        "data_vintage": str(model.get_setting("data_vintage")),
+        "forecast_start": str(model.get_setting("date_forecast_start")),
+        "metadata": str(metadata_path.name),
+        "observable_count": len(observable_labels),
+        "pseudo_observable_count": len(pseudo_labels),
         "labels": labels,
     }
 
@@ -5279,6 +5331,14 @@ def _add_array_labels(
     }
     if valid:
         labels[name] = valid
+
+
+def _max_name_width(names: tuple[str, ...]) -> int:
+    return max((len(name) for name in names), default=0)
+
+
+def _char_labels(names: list[str]) -> list[str]:
+    return [f"char_{index}" for index in range(_max_name_width(tuple(names)))]
 
 
 def _forecast_date_labels(model: Model1002, periods: int, *, offset: int = 0) -> list[str]:

@@ -289,7 +289,13 @@ TOLERANCE_PROFILES: dict[str, ToleranceProfile] = {
 }
 
 
+MODEL_METADATA_FIXTURE_REQUIREMENTS: tuple[str, ...] = (
+    "metadata/observable_names",
+    "metadata/pseudo_observable_names",
+)
+
 MODEL_SETUP_FIXTURE_REQUIREMENTS: tuple[str, ...] = (
+    *MODEL_METADATA_FIXTURE_REQUIREMENTS,
     "parameters/values",
     "parameters/scaled_values",
     "parameters/fixed",
@@ -427,6 +433,7 @@ SAMPLER_PROPOSAL_TRACE_FIXTURE_REQUIREMENTS: tuple[str, ...] = (
 )
 
 FIXTURE_REQUIREMENT_PROFILES: dict[str, tuple[str, ...]] = {
+    "model-metadata": MODEL_METADATA_FIXTURE_REQUIREMENTS,
     "parameters": PARAMETER_FIXTURE_REQUIREMENTS,
     "steady-state": STEADY_STATE_FIXTURE_REQUIREMENTS,
     "financial-frictions": FINANCIAL_FRICTIONS_FIXTURE_REQUIREMENTS,
@@ -1361,6 +1368,31 @@ def save_parameter_fixture(
     return path
 
 
+def save_model_metadata_fixture(
+    model: DSGEModel,
+    directory: Path,
+    *,
+    filename: str = "metadata.npz",
+) -> Path:
+    if Path(filename).name != filename:
+        msg = "Metadata fixture filename must not include a directory."
+        raise ValueError(msg)
+    if not filename.endswith(".npz"):
+        msg = "Metadata fixtures must be written as .npz archives."
+        raise ValueError(msg)
+
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / filename
+    _write_npz_fixture(
+        path,
+        {
+            "observable_names": _name_code_matrix(tuple(model.observables)),
+            "pseudo_observable_names": _name_code_matrix(tuple(model.pseudo_observables)),
+        },
+    )
+    return path
+
+
 def save_steady_state_fixture(
     steady_state: dict[str, float],
     directory: Path,
@@ -2074,6 +2106,12 @@ def _load_hdf5_arrays(path: Path) -> dict[str, np.ndarray]:
     h5py: Any = import_module("h5py")
     arrays: dict[str, np.ndarray] = {}
     with h5py.File(path, "r") as handle:
+        observable_names = _parse_hdf5_name_attr(handle.attrs.get("observable_names"))
+        if observable_names:
+            arrays["metadata/observable_names"] = _name_code_matrix(observable_names)
+        pseudo_observable_names = _parse_hdf5_name_attr(handle.attrs.get("pseudo_observable_names"))
+        if pseudo_observable_names:
+            arrays["metadata/pseudo_observable_names"] = _name_code_matrix(pseudo_observable_names)
 
         def visit(name: str, obj: Any) -> None:
             if isinstance(obj, h5py.Dataset):
@@ -2166,6 +2204,18 @@ def _load_hdf5_labels(path: Path) -> FixtureLabels:
         equation_names = _parse_hdf5_name_attr(handle.attrs.get("equation_names"))
         observable_names = _parse_hdf5_name_attr(handle.attrs.get("observable_names"))
         pseudo_observable_names = _parse_hdf5_name_attr(handle.attrs.get("pseudo_observable_names"))
+        if observable_names:
+            observable_width = _name_code_matrix(observable_names).shape[1]
+            labels["metadata/observable_names"] = {
+                0: observable_names,
+                1: tuple(f"char_{index}" for index in range(observable_width)),
+            }
+        if pseudo_observable_names:
+            pseudo_width = _name_code_matrix(pseudo_observable_names).shape[1]
+            labels["metadata/pseudo_observable_names"] = {
+                0: pseudo_observable_names,
+                1: tuple(f"char_{index}" for index in range(pseudo_width)),
+            }
         if endogenous_state_names and equation_names:
             _add_hdf5_dataset_labels(
                 labels,
@@ -2706,6 +2756,17 @@ def _parse_hdf5_name_attr(value: Any) -> tuple[str, ...]:
         if text:
             names.append(text)
     return tuple(names)
+
+
+def _name_code_matrix(names: tuple[str, ...]) -> np.ndarray:
+    if not names:
+        return np.zeros((0, 0), dtype=np.float64)
+    width = max(len(name) for name in names)
+    encoded = np.zeros((len(names), width), dtype=np.float64)
+    for row, name in enumerate(names):
+        for column, char in enumerate(name):
+            encoded[row, column] = float(ord(char))
+    return encoded
 
 
 def _parse_hdf5_int_attr(value: Any) -> int | None:

@@ -343,6 +343,7 @@ Focused profiles are available when debugging one surface at a time:
 
 ```powershell
 uv run nydsge vv compare --profile model-setup
+uv run nydsge vv compare --profile model-metadata
 uv run nydsge vv compare --profile matrix
 uv run nydsge vv compare --profile financial-frictions
 uv run nydsge vv compare --profile kalman
