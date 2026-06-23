@@ -78,6 +78,7 @@ def test_df_to_matrix_uses_rows_before_forecast_start_for_in_sample_data() -> No
 def test_df_to_matrix_respects_mainsample_start_for_in_sample_data() -> None:
     model = Model1002(
         settings={
+            "date_presample_start": "2018-Q1",
             "date_mainsample_start": "2018-Q2",
             "date_forecast_start": "2018-Q4",
             "n_mon_anticipated_shocks": 0,
@@ -97,6 +98,32 @@ def test_df_to_matrix_respects_mainsample_start_for_in_sample_data() -> None:
 
     assert in_sample.shape == (2, len(model.observables))
     assert in_sample[:, 0].tolist() == [10.0, 20.0]
+
+
+def test_df_to_matrix_can_include_presample_rows_for_sampler_likelihood() -> None:
+    model = Model1002(
+        settings={
+            "date_presample_start": "2018-Q1",
+            "date_mainsample_start": "2018-Q2",
+            "date_forecast_start": "2018-Q4",
+            "n_mon_anticipated_shocks": 0,
+        }
+    )
+    df = pd.DataFrame(
+        {
+            "date": ["2018-Q1", "2018-Q2", "2018-Q3", "2018-Q4"],
+            **{
+                name: [float(idx), 10.0 + idx, 20.0 + idx, 30.0 + idx]
+                for idx, name in enumerate(model.observables)
+            },
+        }
+    )
+
+    in_sample = df_to_matrix(model, df)
+    with_presample = df_to_matrix(model, df, include_presample=True)
+
+    assert in_sample[:, 0].tolist() == [10.0, 20.0]
+    assert with_presample[:, 0].tolist() == [0.0, 10.0, 20.0]
 
 
 def test_filter_data_by_sample_accepts_timestamp_dates() -> None:

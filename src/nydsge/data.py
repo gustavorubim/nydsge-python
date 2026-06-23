@@ -687,6 +687,7 @@ def df_to_matrix(
     *,
     cond_type: str = "none",
     in_sample: bool = True,
+    include_presample: bool = False,
 ) -> np.ndarray:
     del cond_type
     working = _sort_by_date(df.copy())
@@ -694,7 +695,12 @@ def df_to_matrix(
     columns = list(model.observables.keys())
     if any(column not in working.columns for column in columns):
         working = transform_data(model, working)
-    working = filter_data_by_sample(model, working, in_sample=in_sample)
+    working = filter_data_by_sample(
+        model,
+        working,
+        in_sample=in_sample,
+        include_presample=include_presample,
+    )
 
     missing = [column for column in columns if column not in working.columns]
     if missing:
@@ -708,6 +714,7 @@ def filter_data_by_sample(
     df: pd.DataFrame,
     *,
     in_sample: bool = True,
+    include_presample: bool = False,
 ) -> pd.DataFrame:
     if "date" not in df.columns:
         return df
@@ -719,9 +726,10 @@ def filter_data_by_sample(
     date_index = _quarter_index(df["date"])
     mask = date_index < forecast_start_index if in_sample else date_index >= forecast_start_index
     if in_sample:
-        mainsample_start = model.get_setting("date_mainsample_start", None)
-        if mainsample_start is not None:
-            mask &= date_index >= _quarter_to_index(mainsample_start)
+        start_setting = "date_presample_start" if include_presample else "date_mainsample_start"
+        sample_start = model.get_setting(start_setting, None)
+        if sample_start is not None:
+            mask &= date_index >= _quarter_to_index(sample_start)
     return df.loc[mask].reset_index(drop=True)
 
 
@@ -730,10 +738,16 @@ def date_labels_for_sample(
     df: pd.DataFrame,
     *,
     in_sample: bool = True,
+    include_presample: bool = False,
 ) -> list[str]:
     if "date" not in df.columns:
         return []
-    filtered = filter_data_by_sample(model, _sort_by_date(df.copy()), in_sample=in_sample)
+    filtered = filter_data_by_sample(
+        model,
+        _sort_by_date(df.copy()),
+        in_sample=in_sample,
+        include_presample=include_presample,
+    )
     if "date" not in filtered.columns:
         return []
     return [quarter_label(value) for value in filtered["date"]]
