@@ -41,6 +41,40 @@ def test_kalman_log_likelihood_univariate_known_value() -> None:
     assert result.filtered_states.tolist() == [[0.0]]
 
 
+def test_kalman_can_filter_presample_but_score_main_sample_only() -> None:
+    system = System(
+        transition=Transition(
+            TTT=np.array([[1.0]]),
+            RRR=np.array([[0.0]]),
+            CCC=np.array([0.0]),
+        ),
+        measurement=Measurement(
+            ZZ=np.array([[1.0]]),
+            DD=np.array([0.0]),
+            QQ=np.array([[1.0]]),
+            EE=np.array([[1.0]]),
+        ),
+    )
+
+    full = kalman_log_likelihood(
+        system,
+        np.array([[1.0], [0.0]]),
+        initial_state=np.array([0.0]),
+        initial_covariance=np.array([[0.0]]),
+    )
+    main_only = kalman_log_likelihood(
+        system,
+        np.array([[1.0], [0.0]]),
+        initial_state=np.array([0.0]),
+        initial_covariance=np.array([[0.0]]),
+        log_likelihood_start=1,
+    )
+
+    assert full.log_likelihood_by_period.shape == (2,)
+    assert np.isclose(main_only.log_likelihood, full.log_likelihood_by_period[1])
+    assert main_only.filtered_states.shape == full.filtered_states.shape
+
+
 def test_kalman_skips_missing_observations() -> None:
     system = System(
         transition=Transition(

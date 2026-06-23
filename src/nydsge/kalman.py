@@ -46,6 +46,7 @@ def kalman_log_likelihood(
     initial_covariance: np.ndarray | None = None,
     process_covariances: np.ndarray | None = None,
     backend: ArrayBackend | None = None,
+    log_likelihood_start: int = 0,
 ) -> KalmanResult:
     array_backend = backend or NumpyBackend()
     observations = np.asarray(data, dtype=np.float64)
@@ -57,6 +58,9 @@ def kalman_log_likelihood(
     measurement = system.measurement
     n_periods = observations.shape[0]
     n_states = transition.TTT.shape[0]
+    if log_likelihood_start < 0 or log_likelihood_start > n_periods:
+        msg = "log_likelihood_start must be between 0 and the number of periods."
+        raise ValueError(msg)
     if observations.shape[1] != measurement.ZZ.shape[0]:
         msg = (
             "Data observable count does not match measurement matrix rows: "
@@ -147,7 +151,8 @@ def kalman_log_likelihood(
                 array_backend,
             )
             log_likelihood_by_period[period] = period_log_likelihood
-            log_likelihood += period_log_likelihood
+            if period >= log_likelihood_start:
+                log_likelihood += period_log_likelihood
             gain = array_backend.transpose(
                 array_backend.solve(
                     array_backend.transpose(innovation_covariance),
