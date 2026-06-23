@@ -4,6 +4,20 @@
 benchmark curation. The Python runtime still does not call Julia; Julia baseline
 JSON can be attached explicitly with `--baseline`.
 
+Current workflow tools:
+
+- `nydsge bench --output` writes local Python benchmark reports.
+- `tools/oracle_julia/benchmark_model1002.jl` writes migration-only Julia
+  forecast baselines for explicit `--baseline` comparisons.
+- `scripts/capture_benchmarks.py` runs the local Python capture plus optional
+  Julia baseline attachment.
+- `scripts/compare_benchmark_reports.py` compares captured reports across
+  machines.
+
+Current reference state: real-machine baseline JSON files are still pending for
+Windows CUDA, macOS MPS, and Linux CUDA/JAX. Keep those captures out of the
+source tree until they are intentionally curated under `reports/benchmarks/`.
+
 Example local capture:
 
 ```powershell
@@ -82,14 +96,14 @@ uv run python scripts/capture_benchmarks.py `
   --output-dir reports\benchmarks
 ```
 
-The script writes three JSON files per pass:
+The script writes up to three JSON files per pass:
 
 - `<label>_<kernel>_<date>_local.json` with native outputs.
 - `<label>_julia_forecast_<date>.json` for the captured Julia baseline (if requested).
 - `<label>_<kernel>_vs_julia_<date>.json` with baseline speedup fields when a
   baseline is available.
 
-Both files include:
+Benchmark report files include:
 
 - `platform` metadata (OS, machine, processor, Python).
 - `runtime_statuses` for all runtime backends/devices probed on that machine.
