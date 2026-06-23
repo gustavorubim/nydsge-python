@@ -23,6 +23,8 @@ Current real-machine baseline status:
 - `macos-mps`: **pending** on real-machine baseline capture.
 - `linux-cuda`: **pending** on real-machine CUDA/JAX baseline capture.
 
+Real-machine baselines are pending for Windows CUDA, macOS MPS, and Linux CUDA/JAX.
+
 Keep all pending real-machine baselines out of the repository source tree until they
 are intentionally curated under `reports/benchmarks/`.
 

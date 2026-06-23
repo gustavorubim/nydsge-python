@@ -134,6 +134,75 @@ function write_file_attribute(file, name::String, value)
     write_attribute(file, name, value)
 end
 
+const SAMPLER_PARAMETER_NAME_MAP = Dict{Char, String}(
+    'α' => "alpha",
+    'β' => "beta",
+    'γ' => "gamma",
+    'δ' => "delta",
+    'ε' => "epsilon",
+    'ϵ' => "epsilon",
+    'ζ' => "zeta",
+    'η' => "eta",
+    'θ' => "theta",
+    'ι' => "iota",
+    'κ' => "kappa",
+    'λ' => "lambda",
+    'μ' => "mu",
+    'ν' => "nu",
+    'ξ' => "xi",
+    'π' => "pi",
+    'ρ' => "rho",
+    'σ' => "sigma",
+    'τ' => "tau",
+    'ϕ' => "phi",
+    'φ' => "phi",
+    'χ' => "chi",
+    'ψ' => "psi",
+    'ω' => "omega",
+    'Α' => "Alpha",
+    'Δ' => "Delta",
+    'Λ' => "Lambda",
+    'Φ' => "Phi",
+    'Ι' => "Iota",
+    'Ν' => "Nu",
+    'Ω' => "Omega",
+    'Ψ' => "Psi",
+    'Γ' => "Gamma",
+    'Ε' => "Epsilon",
+    'Ζ' => "Zeta",
+    'Η' => "Eta",
+    'Θ' => "Theta",
+    'Κ' => "Kappa",
+    'Μ' => "Mu",
+    'Ο' => "O",
+    'Π' => "Pi",
+    'Ρ' => "Rho",
+    'Σ' => "Sigma",
+    'Τ' => "Tau",
+    'Υ' => "Upsilon",
+    'Χ' => "Chi",
+    'ℵ' => "N",
+    '‵' => "p",
+    '′' => "p",
+    '⸂' => "p",
+)
+
+function sampler_parameter_name_to_ascii(parameter_name::String)::String
+    tokens = String[]
+    for symbol in parameter_name
+        if haskey(SAMPLER_PARAMETER_NAME_MAP, symbol)
+            push!(tokens, SAMPLER_PARAMETER_NAME_MAP[symbol])
+        else
+            push!(tokens, string(symbol))
+        end
+    end
+    return join(tokens)
+end
+
+function ordered_mapping_ascii_names(mapping)
+    return [sampler_parameter_name_to_ascii(name) for name in ordered_mapping_names(mapping)]
+end
+
 function maybe_property(object, names; default = nothing)
     for name in names
         if hasproperty(object, name)
@@ -1218,6 +1287,11 @@ function export_sampler(
         file,
         "sampler_parameter_names",
         join(ordered_mapping_names(model.parameters), ","),
+    )
+    write_file_attribute(
+        file,
+        "sampler_parameter_names_ascii",
+        join(ordered_mapping_ascii_names(model.parameters), ","),
     )
     write_file_attribute(file, "sampler_sampling_method", "MH")
     write_file_attribute(file, "sampler_draws", string(draws))
