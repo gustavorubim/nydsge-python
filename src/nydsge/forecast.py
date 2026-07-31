@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -231,6 +232,8 @@ def solve_shocks_for_observable_targets(
     system: System,
     initial_state: np.ndarray,
     targets: np.ndarray,
+    *,
+    allowed_shock_indices: Sequence[int] | None = None,
 ) -> ShockConditioningResult:
     target_array = np.asarray(targets, dtype=np.float64)
     if target_array.ndim != 2:
@@ -245,6 +248,19 @@ def solve_shocks_for_observable_targets(
 
     horizon = target_array.shape[0]
     n_shocks = system.transition.RRR.shape[1]
+    if allowed_shock_indices is None:
+        selected_shocks = np.arange(n_shocks, dtype=np.int64)
+    else:
+        selected_shocks = np.asarray(tuple(allowed_shock_indices), dtype=np.int64)
+        if selected_shocks.ndim != 1 or selected_shocks.size == 0:
+            msg = "allowed_shock_indices must contain at least one shock index."
+            raise ValueError(msg)
+        if np.any(selected_shocks < 0) or np.any(selected_shocks >= n_shocks):
+            msg = f"allowed_shock_indices must be between 0 and {n_shocks - 1}."
+            raise ValueError(msg)
+        if np.unique(selected_shocks).size != selected_shocks.size:
+            msg = "allowed_shock_indices must not contain duplicates."
+            raise ValueError(msg)
     baseline = forecast_linear_system(system, initial_state, horizon=horizon)
     observed_mask = np.isfinite(target_array)
     if not np.any(observed_mask):
@@ -258,11 +274,12 @@ def solve_shocks_for_observable_targets(
             rank=0,
         )
 
-    design = _observable_shock_design(system, horizon=horizon)
+    design = _observable_shock_design(system, horizon=horizon)[..., selected_shocks]
     rows = design[observed_mask].reshape(int(np.count_nonzero(observed_mask)), -1)
     target_residual = (target_array - baseline.observables)[observed_mask]
     solution, _, rank, _ = np.linalg.lstsq(rows, target_residual, rcond=None)
-    shocks = solution.reshape(horizon, n_shocks)
+    shocks = np.zeros((horizon, n_shocks), dtype=np.float64)
+    shocks[:, selected_shocks] = solution.reshape(horizon, selected_shocks.size)
     conditioned = forecast_linear_system(system, initial_state, horizon=horizon, shocks=shocks)
     residuals = np.full_like(target_array, np.nan, dtype=np.float64)
     residuals[observed_mask] = (conditioned.observables - target_array)[observed_mask]

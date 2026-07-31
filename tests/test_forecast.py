@@ -294,6 +294,63 @@ def test_solve_shocks_for_observable_targets_ignores_missing_targets() -> None:
     np.testing.assert_allclose(result.observables[1], np.array([4.0]))
 
 
+def test_solve_shocks_for_observable_targets_can_restrict_shock_set() -> None:
+    system = System(
+        transition=Transition(
+            TTT=np.zeros((1, 1)),
+            RRR=np.array([[1.0, 2.0]]),
+            CCC=np.zeros(1),
+        ),
+        measurement=Measurement(
+            ZZ=np.ones((1, 1)),
+            DD=np.zeros(1),
+            QQ=np.eye(2),
+            EE=np.eye(1),
+        ),
+    )
+
+    result = solve_shocks_for_observable_targets(
+        system,
+        np.zeros(1),
+        np.array([[4.0]]),
+        allowed_shock_indices=[1],
+    )
+
+    np.testing.assert_allclose(result.shocks, np.array([[0.0, 2.0]]))
+    np.testing.assert_allclose(result.observables, np.array([[4.0]]))
+
+
+def test_solve_shocks_for_observable_targets_validates_restricted_shocks() -> None:
+    system = System(
+        transition=Transition(
+            TTT=np.zeros((1, 1)),
+            RRR=np.ones((1, 1)),
+            CCC=np.zeros(1),
+        ),
+        measurement=Measurement(
+            ZZ=np.ones((1, 1)),
+            DD=np.zeros(1),
+            QQ=np.eye(1),
+            EE=np.eye(1),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="at least one"):
+        solve_shocks_for_observable_targets(
+            system,
+            np.zeros(1),
+            np.array([[1.0]]),
+            allowed_shock_indices=[],
+        )
+    with pytest.raises(ValueError, match="between"):
+        solve_shocks_for_observable_targets(
+            system,
+            np.zeros(1),
+            np.array([[1.0]]),
+            allowed_shock_indices=[1],
+        )
+
+
 def test_build_zlb_conditional_observations_fills_policy_path_and_anticipated_rates() -> None:
     model = Model1002(settings={"n_mon_anticipated_shocks": 2})
 

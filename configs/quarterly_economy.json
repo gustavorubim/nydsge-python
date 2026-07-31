@@ -1,0 +1,109 @@
+{
+  "start_date": "1964-Q1",
+  "model_end_date": "2026-Q2",
+  "horizon": 20,
+  "stochastic_draws": 500,
+  "seed": 20260730,
+  "historical_tail_quarters": 24,
+  "refresh_model": true,
+  "refresh_maxiter": 60,
+  "fred_levels_path": null,
+  "cpi_summary_path": "../data/cpi/bls_table7_quarterly.csv",
+  "cpi_detail_path": "../data/cpi/bls_table7_detail_quarterly.csv",
+  "cpi_goods_path": "../data/cpi/bls_table7_goods_latest.csv",
+  "unemployment_targets": [5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 15.0],
+  "unemployment_bridge_start": "1985-Q1",
+  "policy_scenarios": [
+    {
+      "name": "easing_100bp",
+      "label": "100 bp one-quarter easing",
+      "rate_deviation_pp": [-1.0]
+    },
+    {
+      "name": "tightening_25bp",
+      "label": "25 bp one-quarter tightening",
+      "rate_deviation_pp": [0.25]
+    },
+    {
+      "name": "tightening_50bp",
+      "label": "50 bp one-quarter tightening",
+      "rate_deviation_pp": [0.5]
+    },
+    {
+      "name": "tightening_100bp",
+      "label": "100 bp one-quarter tightening",
+      "rate_deviation_pp": [1.0]
+    },
+    {
+      "name": "tightening_steps_to_100bp",
+      "label": "25 bp steps to 100 bp over four quarters",
+      "rate_deviation_pp": [0.25, 0.5, 0.75, 1.0]
+    },
+    {
+      "name": "tightening_100bp_4q",
+      "label": "100 bp tightening held four quarters",
+      "rate_deviation_pp": [1.0, 1.0, 1.0, 1.0]
+    }
+  ],
+  "structural_scenarios": [
+    {
+      "name": "private_demand_contraction",
+      "label": "Private-demand contraction",
+      "components": [
+        {"shock": "b_sh", "size_sd": -1.0, "start": 0, "duration": 1, "decay": 1.0}
+      ]
+    },
+    {
+      "name": "fiscal_expansion",
+      "label": "Government-spending expansion",
+      "components": [
+        {"shock": "g_sh", "size_sd": 1.0, "start": 0, "duration": 4, "decay": 0.7}
+      ]
+    },
+    {
+      "name": "fiscal_contraction",
+      "label": "Government-spending contraction",
+      "components": [
+        {"shock": "g_sh", "size_sd": -1.0, "start": 0, "duration": 4, "decay": 0.7}
+      ]
+    },
+    {
+      "name": "productivity_acceleration",
+      "label": "Neutral-productivity acceleration",
+      "components": [
+        {"shock": "ztil_sh", "size_sd": 1.0, "start": 0, "duration": 4, "decay": 0.7}
+      ]
+    },
+    {
+      "name": "price_markup_pressure",
+      "label": "Price-markup pressure",
+      "components": [
+        {"shock": "lambda_f_sh", "size_sd": 1.0, "start": 0, "duration": 2, "decay": 0.7}
+      ]
+    },
+    {
+      "name": "ai_capital_productivity_mix",
+      "label": "AI investment plus productivity",
+      "components": [
+        {"shock": "mu_sh", "size_sd": 1.0, "start": 0, "duration": 4, "decay": 0.7},
+        {"shock": "ztil_sh", "size_sd": 1.0, "start": 2, "duration": 6, "decay": 0.8}
+      ]
+    },
+    {
+      "name": "fiscal_monetary_offset",
+      "label": "Fiscal expansion with monetary offset",
+      "components": [
+        {"shock": "g_sh", "size_sd": 1.0, "start": 0, "duration": 4, "decay": 0.7},
+        {"shock": "rm_sh", "size_sd": 0.75, "start": 0, "duration": 4, "decay": 0.7}
+      ]
+    },
+    {
+      "name": "stagflation_mix",
+      "label": "Adverse productivity and markup mix",
+      "components": [
+        {"shock": "ztil_sh", "size_sd": -0.75, "start": 0, "duration": 4, "decay": 0.8},
+        {"shock": "lambda_f_sh", "size_sd": 1.0, "start": 0, "duration": 4, "decay": 0.8}
+      ]
+    }
+  ]
+}

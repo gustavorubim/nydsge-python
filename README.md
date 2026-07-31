@@ -289,6 +289,87 @@ uv run nydsge report irf --horizon 40 --no-plots --json
   IRF accumulation.
 - Reports exit nonzero on inconsistent array dimensions or axis labels.
 
+### AI and labor-market scenario study
+
+`nydsge study ai-economy` downloads the current public FRED inputs, updates the
+filtered/smoothed model state, performs a targeted MAP refresh of the demand,
+marginal-efficiency-of-investment (MEI), and technology shock block, and saves a
+reproducible scenario bundle.
+
+```powershell
+uv run nydsge study ai-economy `
+  --model-end-date 2026-Q1 `
+  --unemployment-targets "5,6,7,8,9,10,15" `
+  --horizon 20 `
+  --output-dir outputs\ai_economy_2026q2 `
+  --json
+```
+
+The bundle includes current raw levels and transformed observables, the updated
+shock-mode archive, baseline and conditional forecasts for every Model1002
+observable, selected structural IRFs, conditional shock sequences, a compact
+scenario summary, PNG figures, JSON metadata, and a Markdown technical report.
+
+Model1002 does not observe unemployment directly. The unemployment scenarios
+therefore use a documented historical bridge from quarterly changes in the
+unemployment rate to log hours per capita, then solve for the minimum-norm shock
+sequence consistent with the imposed labor path. These are conditional stress
+paths, not identified causal estimates of AI. The command keeps unavailable
+survey, Fernald TFP, and expected-rate inputs missing rather than silently using
+non-equivalent proxies. The `ss10` structure is also not represented as the
+private current NY Fed production parameterization; the exact upstream revision
+checked is recorded in `study_metadata.json`.
+
+### Quarterly economic package
+
+`nydsge study economy` is the repeatable quarterly workflow. A versioned JSON
+configuration defines the information cutoff, forecast horizon, exact fed-funds
+rate paths, structural shock components, compound scenarios, unemployment stress
+targets, and CPI input snapshots:
+
+```powershell
+uv run nydsge study economy `
+  --config configs\quarterly_economy.json `
+  --output-dir outputs\quarterly_economy_2026q3 `
+  --json
+```
+
+Each run writes:
+
+- baseline forecasts and 90% future-shock bands for every observable and
+  pseudo-observable;
+- exact policy-rate path ablations, structural scenarios, compound scenarios,
+  and externally conditioned unemployment stresses;
+- reconciled DSGE historical decompositions for all actuals, including grouped
+  fiscal, monetary, inflation, GDP, and labor-productivity views;
+- a separate reconciled BLS CPI decomposition for food, energy, core goods,
+  shelter, other core services, and detailed subcomponents;
+- source data, an updated targeted shock-mode archive when enabled, scenario
+  shocks, data-quality metadata, PNG figures, and a Markdown economic report
+  with dedicated small-multiple baseline panels for every observable and
+  model-implied variable.
+
+Open `quarterly_economic_report.md` as the reader entrypoint. The complete
+machine-readable projection rundown is retained alongside it in
+`baseline_forecast_all_variables.csv`,
+`scenario_forecast_all_variables.csv`, `scenario_summary.csv`,
+`historical_decomposition_grouped.csv`, and `run_metadata.json`.
+
+To roll the package forward, copy the configuration, change
+`model_end_date`, replace the three versioned `data/cpi/bls_table7_*.csv`
+snapshots with the latest quarter-end BLS Table 7 values, and run the command.
+Set `fred_levels_path` to a frozen local vintage for exact replay or leave it
+`null` to fetch the current public FRED panel. The run fails on date-grid
+defects, stale CPI snapshots, duplicate scenario names, unknown shocks, or
+decomposition reconciliation failures.
+
+The package keeps causal concepts separate. The DSGE `g_sh` is a
+government-spending shock, not an identified tax/transfer shock;
+`corepce_sh` is a measurement innovation, not a structural supply shock; BLS
+CPI bars are statistical basket contributions; and unemployment is imposed
+through a documented external hours bridge because it is not a Model1002
+observable.
+
 ---
 
 ## Validation and parity
@@ -336,6 +417,10 @@ Named tolerance profiles keep comparisons explicit:
 | `forecast` | `atol = rtol = 1e-8` | forecast / means-bands accumulation |
 | `accelerator` | `atol = rtol = 1e-5` | Torch / JAX vs NumPy CPU |
 
+See [`docs/translation_validation_2026q2.md`](docs/translation_validation_2026q2.md)
+for the latest pinned-Julia, current-data audit, numeric differences, scenario
+checks, and explicit certification boundaries.
+
 Backend parity and benchmarks:
 
 ```powershell
@@ -358,10 +443,12 @@ src/nydsge/
   cli.py          Typer command surface (data, estimate, forecast, vv, report, bench).
   core.py         Model, setting, parameter, and transform types.
   data.py         Data loading, transforms, and FRED/ALFRED source builders.
+  economy.py      Repeatable quarterly baseline, scenarios, and decompositions.
   estimate.py     Posterior evaluation, optimization, MH sampling.
   forecast.py     Forecasts, means/bands, IRF, historical decomposition.
   kalman.py       Filtering, smoothing, and likelihood kernels.
   report.py       Forecast analysis reports (arrays + figures).
+  scenarios.py    Current-data AI, unemployment, and structural-shock studies.
   runtime.py      Platform, backend, device, and dtype selection.
   solve.py        Gensys and state-space solve helpers.
   vv.py           Fixture export, coverage, and comparison tools.

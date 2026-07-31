@@ -116,6 +116,7 @@ app = typer.Typer(help="Native Python tools for the NY Fed DSGE model port.")
 data_app = typer.Typer(help="Data loading and build commands.")
 vv_app = typer.Typer(help="Verification and validation commands.")
 report_app = typer.Typer(help="Forecast analysis reports: forecast panel, IRFs, decomposition.")
+study_app = typer.Typer(help="Reproducible macroeconomic scenario studies.")
 console = Console()
 
 FINANCIAL_FRICTIONS_INPUT_NAMES = ("z", "sigma", "spr")
@@ -6052,9 +6053,166 @@ def report_historical_decomposition(
     )
 
 
+@study_app.command("ai-economy")
+def study_ai_economy(
+    output_dir: Annotated[
+        Path,
+        typer.Option("--output-dir", help="Directory where study artifacts are written."),
+    ] = Path("outputs/ai_economy_study"),
+    start_date: Annotated[
+        str,
+        typer.Option("--start-date", help="First quarter of the current public data panel."),
+    ] = "1964-Q1",
+    model_end_date: Annotated[
+        str,
+        typer.Option(
+            "--model-end-date",
+            help="Last complete quarter admitted to the DSGE information set.",
+        ),
+    ] = "2026-Q1",
+    horizon: Annotated[int, typer.Option(help="Forecast and IRF horizon in quarters.")] = 20,
+    unemployment_targets: Annotated[
+        str,
+        typer.Option(
+            "--unemployment-targets",
+            help="Comma-separated peak unemployment rates in percent.",
+        ),
+    ] = "5,6,7,8,9,10,15",
+    bridge_start_date: Annotated[
+        str,
+        typer.Option(
+            "--bridge-start-date",
+            help="First quarter used to estimate the unemployment-hours bridge.",
+        ),
+    ] = "1985-Q1",
+    refresh_model: Annotated[
+        bool,
+        typer.Option(
+            "--refresh-model/--no-refresh-model",
+            help="Run a targeted MAP refresh of demand, MEI, and technology shock dynamics.",
+        ),
+    ] = True,
+    refresh_maxiter: Annotated[
+        int,
+        typer.Option("--refresh-maxiter", help="Maximum targeted MAP optimizer iterations."),
+    ] = 60,
+    no_plots: Annotated[
+        bool,
+        typer.Option("--no-plots", help="Save numeric and narrative artifacts without PNGs."),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON output.")] = False,
+) -> None:
+    """Run current-data AI, unemployment-stress, and demand-shock scenarios."""
+
+    from nydsge.scenarios import run_ai_economy_study
+
+    try:
+        targets = tuple(
+            float(value.strip()) for value in unemployment_targets.split(",") if value.strip()
+        )
+        if not targets:
+            raise ValueError("At least one unemployment target is required.")
+        artifacts = run_ai_economy_study(
+            output_dir=output_dir,
+            start_date=start_date,
+            model_end_date=model_end_date,
+            horizon=horizon,
+            unemployment_targets=targets,
+            bridge_start_date=bridge_start_date,
+            refresh_model=refresh_model,
+            refresh_maxiter=refresh_maxiter,
+            make_plots=not no_plots,
+        )
+    except (OSError, RuntimeError, ValueError) as err:
+        raise _not_ported_exit(str(err)) from err
+    payload = {
+        "output_dir": str(artifacts.output_dir),
+        "report": str(artifacts.report),
+        "metadata": str(artifacts.metadata),
+        "forecast_csv": str(artifacts.forecast_csv),
+        "summary_csv": str(artifacts.summary_csv),
+        "irf_csv": str(artifacts.irf_csv),
+        "model_mode": None if artifacts.model_mode is None else str(artifacts.model_mode),
+        "figures": [str(path) for path in artifacts.figures],
+    }
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+    table = Table(title="AI economy scenario study")
+    table.add_column("Artifact")
+    table.add_column("Path")
+    for name, path in payload.items():
+        if name == "figures":
+            table.add_row(name, f"{len(artifacts.figures)} figure(s)")
+        else:
+            table.add_row(name, str(path))
+    console.print(table)
+
+
+@study_app.command("economy")
+def study_quarterly_economy(
+    config: Annotated[
+        Path,
+        typer.Option(
+            "--config",
+            help="Versioned JSON scenario and data-input configuration.",
+        ),
+    ] = Path("configs/quarterly_economy.json"),
+    output_dir: Annotated[
+        Path,
+        typer.Option(
+            "--output-dir",
+            help="Directory where the complete quarterly package is written.",
+        ),
+    ] = Path("outputs/quarterly_economy"),
+    no_plots: Annotated[
+        bool,
+        typer.Option("--no-plots", help="Save data and report artifacts without PNG figures."),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON output.")] = False,
+) -> None:
+    """Build the baseline, scenarios, decompositions, and quarterly macro report."""
+
+    from nydsge.economy import run_quarterly_economy_package
+
+    try:
+        artifacts = run_quarterly_economy_package(
+            config_path=config,
+            output_dir=output_dir,
+            make_plots=not no_plots,
+        )
+    except (FileNotFoundError, OSError, RuntimeError, ValueError) as err:
+        raise _not_ported_exit(str(err)) from err
+    payload = {
+        "output_dir": str(artifacts.output_dir),
+        "report": str(artifacts.report),
+        "metadata": str(artifacts.metadata),
+        "baseline_forecast": str(artifacts.baseline_forecast),
+        "scenario_forecast": str(artifacts.scenario_forecast),
+        "scenario_summary": str(artifacts.scenario_summary),
+        "historical_decomposition": str(artifacts.historical_decomposition),
+        "cpi_decomposition": (
+            None if artifacts.cpi_decomposition is None else str(artifacts.cpi_decomposition)
+        ),
+        "model_mode": None if artifacts.model_mode is None else str(artifacts.model_mode),
+        "figures": [str(path) for path in artifacts.figures],
+    }
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+    table = Table(title="Quarterly economic package")
+    table.add_column("Artifact")
+    table.add_column("Path")
+    for name, path in payload.items():
+        display_path = f"{len(artifacts.figures)} figure(s)" if name == "figures" else str(path)
+        table.add_row(name, display_path)
+    console.print(table)
+
+
 app.add_typer(data_app, name="data")
 app.add_typer(vv_app, name="vv")
 app.add_typer(report_app, name="report")
+app.add_typer(study_app, name="study")
 
 
 if __name__ == "__main__":

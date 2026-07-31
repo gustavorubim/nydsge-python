@@ -318,19 +318,17 @@ def load_fred_api_source(
                 available_dates = _quarter_index(merged["date"])
                 series = _missing_source_series(mnemonic, available_dates)
         if required_dates is not None:
-            _validate_source_date_coverage(f"FRED:{mnemonic}", series["date"], required_dates)
-            if mnemonic not in OPTIONAL_SOURCE_MNEMONICS:
+            if mnemonic in OPTIONAL_SOURCE_MNEMONICS:
+                series = _align_optional_source_to_required_dates(mnemonic, series, required_dates)
+            else:
+                _validate_source_date_coverage(f"FRED:{mnemonic}", series["date"], required_dates)
                 _validate_source_value_coverage(
                     f"FRED:{mnemonic}",
                     series["date"],
                     series[mnemonic],
                     required_dates,
                 )
-            date_index = _quarter_index(series["date"])
-            required_set = set(required_dates.tolist())
-            series = series.loc[[date in required_set for date in date_index]].reset_index(
-                drop=True
-            )
+                series = _filter_source_to_required_dates(series, required_dates)
         merged = series if merged is None else pd.merge(merged, series, on="date", how="outer")
     if merged is None:
         return pd.DataFrame({"date": []})
@@ -399,19 +397,17 @@ def load_current_fred_source(
             fetcher=fetcher,
         )
         if required_dates is not None:
-            _validate_source_date_coverage(f"FRED:{mnemonic}", series["date"], required_dates)
-            if mnemonic not in OPTIONAL_SOURCE_MNEMONICS:
+            if mnemonic in OPTIONAL_SOURCE_MNEMONICS:
+                series = _align_optional_source_to_required_dates(mnemonic, series, required_dates)
+            else:
+                _validate_source_date_coverage(f"FRED:{mnemonic}", series["date"], required_dates)
                 _validate_source_value_coverage(
                     f"FRED:{mnemonic}",
                     series["date"],
                     series[mnemonic],
                     required_dates,
                 )
-            date_index = _quarter_index(series["date"])
-            required_set = set(required_dates.tolist())
-            series = series.loc[[date in required_set for date in date_index]].reset_index(
-                drop=True
-            )
+                series = _filter_source_to_required_dates(series, required_dates)
         merged = series if merged is None else pd.merge(merged, series, on="date", how="outer")
     if merged is None:
         return pd.DataFrame({"date": []})
@@ -959,6 +955,28 @@ def _missing_source_series(mnemonic: str, required_dates: np.ndarray) -> pd.Data
     )
 
 
+def _filter_source_to_required_dates(
+    series: pd.DataFrame,
+    required_dates: np.ndarray,
+) -> pd.DataFrame:
+    date_index = _quarter_index(series["date"])
+    required_set = set(required_dates.tolist())
+    return series.loc[[date in required_set for date in date_index]].reset_index(drop=True)
+
+
+def _align_optional_source_to_required_dates(
+    mnemonic: str,
+    series: pd.DataFrame,
+    required_dates: np.ndarray,
+) -> pd.DataFrame:
+    """Align a partial optional series without requiring full date coverage."""
+
+    _validate_source_date_uniqueness(f"FRED:{mnemonic}", series["date"])
+    grid = _missing_source_series(mnemonic, required_dates).drop(columns=[mnemonic])
+    selected = _filter_source_to_required_dates(series, required_dates)
+    return grid.merge(selected, on="date", how="left", validate="one_to_one")
+
+
 def _fred_realtime_date(value: str) -> str:
     text = str(value)
     if len(text) == 6 and text.isdigit():
@@ -1243,15 +1261,20 @@ def _validate_source_date_coverage(
     dates: pd.Series[Any],
     required_dates: np.ndarray,
 ) -> None:
+    _validate_source_date_uniqueness(source, dates)
     source_dates = _quarter_index(dates)
     unique_dates = set(source_dates.tolist())
-    if len(unique_dates) != len(source_dates):
-        msg = f"{source} source file has duplicate quarterly dates."
-        raise ValueError(msg)
     missing = [date for date in required_dates.tolist() if date not in unique_dates]
     if missing:
         labels = ", ".join(_quarter_label_from_index(date) for date in missing)
         msg = f"{source} source file is missing required quarterly dates: {labels}"
+        raise ValueError(msg)
+
+
+def _validate_source_date_uniqueness(source: str, dates: pd.Series[Any]) -> None:
+    source_dates = _quarter_index(dates)
+    if len(set(source_dates.tolist())) != len(source_dates):
+        msg = f"{source} source file has duplicate quarterly dates."
         raise ValueError(msg)
 
 
@@ -1366,7 +1389,7 @@ def _baa_10y_spread(
     if "date" in levels.columns and _has_column(levels, "BAMLC8A0C15PYEY"):
         replacement = _series(levels, "BAMLC8A0C15PYEY")
         after_splice = _quarter_index(levels["date"]) >= _quarter_to_index("2016-Q4")
-        baa = np.where(after_splice, replacement, baa)
+        baa = np.where(after_splice & np.isfinite(replacement), replacement, baa)
     return annual_to_quarter(baa - _series(levels, "GS10"))
 
 
@@ -1398,6 +1421,8 @@ def _fernald_tfp(
     del model, observable
     tfp = _series(levels, "TFPKQ")
     alpha = _series(levels, "TFPJQ")
+    if not np.isfinite(tfp).any():
+        return np.full_like(tfp, np.nan, dtype=np.float64)
     mean = float(np.nanmean(tfp))
     return (tfp - mean) / (4.0 * (1.0 - alpha))
 

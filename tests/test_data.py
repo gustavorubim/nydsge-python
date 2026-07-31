@@ -21,6 +21,7 @@ from nydsge.data import (
     filter_data_by_sample,
     hpfilter,
     load_current_fred_series,
+    load_current_fred_source,
     load_data,
     load_data_levels_from_sources,
     load_fred_api_series,
@@ -380,6 +381,24 @@ def test_download_current_fred_source_csv_validates_required_quarter_values(tmp_
             end_date="2016-Q4",
             fetcher=fetcher,
         )
+
+
+def test_load_current_fred_source_aligns_partial_optional_series() -> None:
+    def fetcher(url: str) -> bytes:
+        if "BAMLC8A0C15PYEY" in url:
+            return b"DATE,BAMLC8A0C15PYEY\n2016-10-01,7.0\n"
+        return b"DATE,GDP\n2016-07-01,1.0\n2016-10-01,2.0\n"
+
+    levels = load_current_fred_source(
+        ["GDP", "BAMLC8A0C15PYEY"],
+        start_date="2016-Q3",
+        end_date="2016-Q4",
+        fetcher=fetcher,
+    )
+
+    assert list(levels["date"]) == ["2016-Q3", "2016-Q4"]
+    assert np.isnan(levels.loc[0, "BAMLC8A0C15PYEY"])
+    assert levels.loc[1, "BAMLC8A0C15PYEY"] == 7.0
 
 
 def test_load_fred_api_series_uses_realtime_and_observation_parameters() -> None:
@@ -859,6 +878,16 @@ def test_transform_data_builds_model1002_base_observables_from_levels() -> None:
     assert np.isclose(transformed.loc[0, "obs_nominalrate"], 0.5)
     assert np.isclose(transformed.loc[1, "obs_spread"], (8.0 - 1.5) / 4.0)
     assert np.isclose(transformed.loc[1, "obs_longinflation"], (2.5 - 0.5) / 4.0)
+
+
+def test_transform_data_falls_back_to_baa_when_optional_spread_series_is_missing() -> None:
+    model = Model1002(settings={"n_mon_anticipated_shocks": 0})
+    levels = _raw_levels_fixture()
+    levels.loc[levels["date"] == "2016-Q4", "BAMLC8A0C15PYEY"] = np.nan
+
+    transformed = transform_data(model, levels)
+
+    assert np.isclose(transformed.loc[1, "obs_spread"], (20.0 - 1.5) / 4.0)
 
 
 def test_transform_data_builds_anticipated_gdp_observables_from_levels() -> None:
