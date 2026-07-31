@@ -306,6 +306,18 @@ def test_load_fixture_arrays_reads_case_insensitive_hdf5_suffix(tmp_path) -> Non
     assert labels["parameters/values"] == {0: ("alpha",)}
 
 
+def test_load_fixture_arrays_rejects_duplicate_hdf5_dataset_keys(tmp_path) -> None:
+    h5py = pytest.importorskip("h5py")
+    oracle = tmp_path / "oracle"
+    oracle.mkdir()
+    for filename, value in (("first.h5", 1.0), ("second.h5", 2.0)):
+        with h5py.File(oracle / filename, "w") as handle:
+            handle["system/TTT"] = np.array([[value]])
+
+    with pytest.raises(ValueError, match="Duplicate fixture array key 'system/TTT'"):
+        load_fixture_arrays(oracle)
+
+
 def test_load_fixture_labels_reads_julia_hdf5_metadata(tmp_path) -> None:
     h5py = pytest.importorskip("h5py")
     oracle = tmp_path / "oracle"
@@ -1913,7 +1925,7 @@ def test_vv_compare_cli_compares_financial_frictions_profile(tmp_path) -> None:
 
 def test_vv_financial_frictions_oracle_coverage_uses_committed_fixture() -> None:
     repo_root = Path(__file__).resolve().parents[1]
-    oracle_dir = repo_root / "tests" / "fixtures" / "oracle"
+    oracle_dir = repo_root / "tests" / "fixtures" / "smoke" / "oracle"
     result = CliRunner().invoke(
         app,
         [
@@ -1936,8 +1948,8 @@ def test_vv_financial_frictions_oracle_coverage_uses_committed_fixture() -> None
 
 def test_vv_compare_cli_compares_committed_financial_fixtures() -> None:
     repo_root = Path(__file__).resolve().parents[1]
-    oracle_dir = repo_root / "tests" / "fixtures" / "oracle"
-    candidate_dir = repo_root / "tests" / "fixtures" / "candidate"
+    oracle_dir = repo_root / "tests" / "fixtures" / "smoke" / "oracle"
+    candidate_dir = repo_root / "tests" / "fixtures" / "smoke" / "candidate"
     result = CliRunner().invoke(
         app,
         [
@@ -3484,17 +3496,22 @@ def test_mode_compare_passes_matching_archives() -> None:
     assert report.passed
 
 
-def test_vv_compare_cli_reports_missing_oracle_for_hard_target_profile() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
+def test_vv_compare_cli_reports_missing_oracle_for_hard_target_profile(tmp_path) -> None:
+    oracle_dir = tmp_path / "oracle"
+    candidate_dir = tmp_path / "candidate"
+    oracle_dir.mkdir()
+    candidate_dir.mkdir()
+    _write_required_arrays(oracle_dir, required_fixture_arrays("matrix"))
+    _write_required_arrays(candidate_dir, required_fixture_arrays("hard-target"))
     result = CliRunner().invoke(
         app,
         [
             "vv",
             "compare",
             "--oracle-dir",
-            str(repo_root / "tests" / "fixtures" / "oracle"),
+            str(oracle_dir),
             "--candidate-dir",
-            str(repo_root / "tests" / "fixtures" / "candidate"),
+            str(candidate_dir),
             "--profile",
             "hard-target",
             "--tolerance-profile",

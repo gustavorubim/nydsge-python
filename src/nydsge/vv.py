@@ -1999,24 +1999,38 @@ def load_fixture_arrays(directory: Path) -> dict[str, np.ndarray]:
         raise NotADirectoryError(msg)
 
     arrays: dict[str, np.ndarray] = {}
+    sources: dict[str, Path] = {}
+
+    def store(name: str, value: np.ndarray, source: Path) -> None:
+        if name in arrays:
+            previous = sources[name]
+            msg = (
+                f"Duplicate fixture array key '{name}' is defined by both {previous} and {source}."
+            )
+            raise ValueError(msg)
+        arrays[name] = value
+        sources[name] = source
+
     for path in sorted(directory.rglob("*")):
         if not path.is_file():
             continue
         suffix = path.suffix.casefold()
         relative_stem = _relative_stem(directory, path)
         if suffix == ".npy":
-            arrays[relative_stem] = np.load(path)
+            store(relative_stem, np.load(path), path)
         elif suffix == ".npz":
             with np.load(path) as archive:
                 for key in archive.files:
-                    arrays[f"{relative_stem}/{key}"] = archive[key]
+                    store(f"{relative_stem}/{key}", archive[key], path)
         elif suffix == ".csv":
             try:
-                arrays[relative_stem] = pd.read_csv(path, header=None).to_numpy(dtype=np.float64)
+                value = pd.read_csv(path, header=None).to_numpy(dtype=np.float64)
             except ValueError:
                 continue
+            store(relative_stem, value, path)
         elif suffix in {".h5", ".hdf5"}:
-            arrays.update(_load_hdf5_arrays(path))
+            for key, value in _load_hdf5_arrays(path).items():
+                store(key, value, path)
     return arrays
 
 
