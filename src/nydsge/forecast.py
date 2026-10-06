@@ -234,7 +234,16 @@ def solve_shocks_for_observable_targets(
     targets: np.ndarray,
     *,
     allowed_shock_indices: Sequence[int] | None = None,
+    shock_scale: Any | None = None,
 ) -> ShockConditioningResult:
+    """Minimum-norm shocks that hit finite ``targets`` exactly (when feasible).
+
+    With ``shock_scale=None`` the norm is taken in raw shock units (legacy
+    behaviour).  Passing ``shock_scale = sqrt(diag(QQ))`` solves for standardized
+    shocks ``z = eps / sigma`` instead, i.e. the most likely shock path under the
+    model's Gaussian shock distribution (DSGE.jl-style conditioning).  Shocks with
+    a zero scale are excluded from the solve.
+    """
     target_array = np.asarray(targets, dtype=np.float64)
     if target_array.ndim != 2:
         msg = "Conditional targets must have shape (periods, observables)."
@@ -274,12 +283,25 @@ def solve_shocks_for_observable_targets(
             rank=0,
         )
 
+    column_scale = np.ones(selected_shocks.size, dtype=np.float64)
+    if shock_scale is not None:
+        scale = np.asarray(shock_scale, dtype=np.float64)
+        if scale.shape != (n_shocks,) or not np.all(np.isfinite(scale)) or np.any(scale < 0):
+            msg = f"shock_scale must be a finite nonnegative vector of length {n_shocks}."
+            raise ValueError(msg)
+        keep = scale[selected_shocks] > 0.0
+        if not np.any(keep):
+            msg = "shock_scale leaves no admissible shocks."
+            raise ValueError(msg)
+        selected_shocks = selected_shocks[keep]
+        column_scale = scale[selected_shocks]
     design = _observable_shock_design(system, horizon=horizon)[..., selected_shocks]
+    design = design * column_scale
     rows = design[observed_mask].reshape(int(np.count_nonzero(observed_mask)), -1)
     target_residual = (target_array - baseline.observables)[observed_mask]
     solution, _, rank, _ = np.linalg.lstsq(rows, target_residual, rcond=None)
     shocks = np.zeros((horizon, n_shocks), dtype=np.float64)
-    shocks[:, selected_shocks] = solution.reshape(horizon, selected_shocks.size)
+    shocks[:, selected_shocks] = solution.reshape(horizon, selected_shocks.size) * column_scale
     conditioned = forecast_linear_system(system, initial_state, horizon=horizon, shocks=shocks)
     residuals = np.full_like(target_array, np.nan, dtype=np.float64)
     residuals[observed_mask] = (conditioned.observables - target_array)[observed_mask]

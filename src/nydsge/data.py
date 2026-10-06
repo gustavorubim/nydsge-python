@@ -1418,13 +1418,35 @@ def _fernald_tfp(
     observable: Observable,
     levels: pd.DataFrame,
 ) -> np.ndarray:
-    del model, observable
+    del observable
     tfp = _series(levels, "TFPKQ")
     alpha = _series(levels, "TFPJQ")
     if not np.isfinite(tfp).any():
         return np.full_like(tfp, np.nan, dtype=np.float64)
-    mean = float(np.nanmean(tfp))
+    in_range = np.isfinite(tfp) & _tfp_mean_window(model, levels)
+    if not in_range.any():
+        in_range = np.isfinite(tfp)
+    mean = float(np.mean(tfp[in_range]))
     return (tfp - mean) / (4.0 * (1.0 - alpha))
+
+
+def _tfp_mean_window(model: DSGEModel, levels: pd.DataFrame) -> np.ndarray:
+    """DSGE.jl observables.jl: demean TFP over [presample_start - 1Q, mainsample_end].
+
+    ``date_mainsample_end`` is the quarter before ``date_forecast_start``.  Without a
+    date column (or the settings) every finite observation is used, as before.
+    """
+
+    if "date" not in levels.columns:
+        return np.ones(len(levels), dtype=bool)
+    presample = model.get_setting("date_presample_start", None)
+    forecast_start = model.get_setting("date_forecast_start", None)
+    if presample is None or forecast_start is None:
+        return np.ones(len(levels), dtype=bool)
+    quarters = _quarter_index(levels["date"])
+    lower = _quarter_to_index(presample) - 1
+    upper = _quarter_to_index(forecast_start) - 1
+    return (quarters >= lower) & (quarters <= upper)
 
 
 def _gdi_growth(model: DSGEModel, observable: Observable, levels: pd.DataFrame) -> np.ndarray:
