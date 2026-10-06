@@ -85,6 +85,44 @@ def transform_to_estimation_space(
     raise ValueError(msg)
 
 
+def log_abs_jacobian_to_model_space(
+    value: float,
+    transform: TransformName,
+    *,
+    bounds: tuple[float, float] | None = None,
+) -> float:
+    """Return ``log |d theta / d x|`` for ``theta = transform_to_model_space(x)``.
+
+    A density over model-space parameters ``p(theta)`` corresponds to the density
+    ``p(theta(x)) |d theta / d x|`` over estimation-space values ``x``.  Samplers that
+    propose in estimation space must add this term to target the model-space posterior.
+    """
+
+    if transform in {"identity", "untransformed"}:
+        return 0.0
+    if transform == "exponential":
+        return float(value)
+    if transform in {"sqrt", "square_root"}:
+        if bounds is None:
+            magnitude = abs(2.0 * float(value))
+            return float(np.log(magnitude)) if magnitude > 0.0 else float("-inf")
+        lower, upper = bounds
+        # log of (upper - lower) * s * (1 - s) with s = logistic(value), computed stably
+        return float(np.log(upper - lower) - np.logaddexp(0.0, -value) - np.logaddexp(0.0, value))
+    msg = f"Unsupported transform: {transform}"
+    raise ValueError(msg)
+
+
+def parameter_log_abs_jacobian(parameter: Parameter, estimation_space_value: float) -> float:
+    """``log |d theta / d x|`` for one parameter at an estimation-space value."""
+
+    return log_abs_jacobian_to_model_space(
+        estimation_space_value,
+        _parameter_transform(parameter),
+        bounds=parameter.value_bounds,
+    )
+
+
 def update_parameter_value(parameter: Parameter, estimation_space_value: float) -> Parameter:
     model_value = transform_to_model_space(
         estimation_space_value,
