@@ -421,6 +421,15 @@ def run_quarterly_economy_package(
     scenario_summary.to_csv(summary_path, index=False)
     _save_scenario_shocks(destination / "scenario_shocks.npz", scenario_shocks)
 
+    information_set = _information_set_metadata(
+        model,
+        observables,
+        full_information_end=str(estimation_frame["date"].iloc[-1]),
+        first_unconditioned_quarter=dates[0],
+        scenario_start=str(scenario_frame["date"].iloc[0]),
+        requested_observables=config.conditioning_observables,
+    )
+
     historical_frame, historical_quality = _historical_group_decomposition(
         model,
         system,
@@ -482,6 +491,11 @@ def run_quarterly_economy_package(
             },
             "production_model_equivalence": False,
             "refresh": refresh_metadata,
+            "parameter_source": {
+                "kind": refresh_metadata["source"],
+                "label": _parameter_source_label(refresh_metadata),
+            },
+            "information_set": information_set,
         },
         "data": {
             "fred_series": fred_names,
@@ -915,11 +929,24 @@ def _apply_saved_mode(
             raise KeyError(f"Saved mode parameter {name!r} is not a model parameter.")
         model.parameters[name] = replace(model.parameters[name], value=float(values[name]))
     updated = estimate(model, observations, start_date=start_date)
+    estimated_at = next(
+        (
+            payload[key]
+            for key in ("estimated_at", "estimation_date", "generated_at", "created_at")
+            if payload.get(key)
+        ),
+        None,
+    )
     return {
-        "enabled": True,
+        # No estimation runs here: the parameters come from a saved mode file.
+        "enabled": False,
+        "source": "saved_mode",
         "scope": f"Full posterior mode loaded from {mode_path}",
+        "mode_path": str(mode_path),
         "mode_status": payload.get("status"),
         "mode_sample": payload.get("sample"),
+        "mode_optimizer": payload.get("optimizer"),
+        "mode_estimated_at": estimated_at,
         "mode_log_posterior_reported": payload.get("log_posterior"),
         "n_estimated_parameters": len(estimated),
         "parameters": {name: float(model.parameters[name].value) for name in estimated},
@@ -963,6 +990,7 @@ def _refresh_model(
     if not enabled:
         return {
             "enabled": False,
+            "source": "starting_values",
             "baseline_log_posterior": baseline.log_posterior,
             "scope": "fixed published ss10 parameterization",
         }, None
@@ -981,6 +1009,10 @@ def _refresh_model(
     mode_path = save_estimation_mode(mode, output_dir / "updated_shock_mode.npz")
     return {
         "enabled": True,
+        "source": "re_estimated",
+        "estimation_scope": "partial_refresh",
+        "optimizer_method": "Powell",
+        "maxiter": maxiter,
         "scope": (
             "Targeted MAP refresh of persistence and scale for government-spending, "
             "private-demand, MEI, and neutral-technology shocks"
@@ -2164,7 +2196,6 @@ def _report_markdown(
     cpi: pd.DataFrame | None,
     figures: Sequence[Path],
 ) -> str:
-    config = metadata["configuration"]
     data_quality = metadata["data"]["quality"]
     selected = baseline.loc[
         (baseline["variable_kind"] == "observable")
@@ -2219,20 +2250,23 @@ def _report_markdown(
     pseudo_count = baseline.loc[
         baseline["variable_kind"] == "pseudo_observable", "variable"
     ].nunique()
-    conditioning_text = _conditioning_text(config)
+    parameter_source = metadata["model"]["parameter_source"]["label"]
+    run_labels = _run_labels_markdown(parameter_source, metadata["model"]["information_set"])
     n_missing_at_end = len(data_quality["missing_at_model_end"])
     return f"""# Quarterly U.S. Economic Projection and Scenario Package
 
 ## Executive Summary
 
-The information set ends in **{config["model_end_date"]}** and the forecast starts in
-**{metadata["model"]["forecast_start"]}**. The package includes all Model1002 observables and
+{run_labels}
+
+The package includes all Model1002 observables and
 pseudo-observables, 90% future-shock bands, exact fed-funds-rate path ablations, configurable
 structural and compounded scenarios, unemployment stress paths, DSGE historical shock
 decompositions, and a separate CPI basket decomposition.
 
-{conditioning_text}The data panel is **{data_quality["status"]}**: {n_missing_at_end}
-observables are unavailable in the final quarter and remain missing rather than being filled
+The data panel is **{data_quality["status"]}**: {n_missing_at_end}
+observables are unavailable in the final quarter ({data_quality["last_date"]}) and remain
+missing rather than being filled
 with non-equivalent proxies. The model can filter ragged-edge data, but forecasts should be
 read with that reduced final-quarter information set in mind.
 
@@ -2291,15 +2325,15 @@ but are not causal fiscal or monetary estimates and should not be added to the D
 - Observed-cell share: {data_quality["observed_cell_share"]:.3f}
 - Missing at the cutoff: {", ".join(data_quality["missing_at_model_end"])}
 - Julia parity reference: DSGE.jl {REFERENCE_DSGE_VERSION}, tree `{REFERENCE_DSGE_TREE[:12]}`
-- Parameter refresh: `{metadata["model"]["refresh"]["enabled"]}`
+- Parameter source: {parameter_source}
 - Historical report-unit reconciliation error:
   {metadata["historical_decomposition"]["observable_report_unit_reconciliation_max_abs_error"]:.3e}
 
 ## Limitations
 
 This is the public Model1002 `ss10` parity target, not the private current New York Fed
-production model. The targeted MAP refresh is a local Python estimation and is explicitly
-not represented as Julia optimizer parity. The model is linear and representative-agent.
+production model. Any saved or re-estimated parameter mode is a local Python estimation and is
+explicitly not represented as Julia optimizer parity. The model is linear and representative-agent.
 Unemployment is outside its measurement system and is imposed through a descriptive
 hours/unemployment bridge. Large unemployment and policy paths can require implausibly large
 joint shocks; those outputs are stress tests, not probabilities. Historical decompositions
@@ -2322,16 +2356,141 @@ Table 7 snapshot ingestion with source-vintage archiving.
 """
 
 
-def _conditioning_text(config: Mapping[str, Any]) -> str:
-    end = config.get("conditioning_end_date")
-    if not end:
-        return ""
-    names = ", ".join(f"`{name}`" for name in config.get("conditioning_observables", []))
-    return (
-        f"Semi-conditional information: quarter **{end}** enters the Kalman filter with only "
-        f"{names} observed (DSGE.jl `cond_semi_names` treatment); all other observables are "
-        "missing by design in that quarter.\n\n"
+_CONDITIONING_SHORT_LABELS = {
+    "obs_nominalrate": "FFR",
+    "obs_spread": "spread",
+    "obs_longrate": "10y",
+    "obs_longinflation": "SPF10",
+}
+
+
+def _information_set_metadata(
+    model: Model1002,
+    observables: pd.DataFrame,
+    *,
+    full_information_end: str,
+    first_unconditioned_quarter: str,
+    scenario_start: str,
+    requested_observables: Sequence[str] = (),
+    as_of: pd.Timestamp | None = None,
+) -> dict[str, Any]:
+    """Describe the information set from the observables the filter actually received."""
+
+    as_of = pd.Timestamp.now() if as_of is None else as_of
+    names = list(model.observable_mappings)
+    partial = observables.loc[
+        _period_index(observables["date"]) > _period(full_information_end)
+    ].reset_index(drop=True)
+    report_values = reverse_transform_observables(
+        model, partial[names].to_numpy(dtype=np.float64).reshape(len(partial), len(names))
     )
+    quarters: list[dict[str, Any]] = []
+    for row, quarter in enumerate(partial["date"].astype(str)):
+        # Requested conditioning observables first, then anything else the filter saw.
+        order = [*[name for name in requested_observables if name in names], *names]
+        observed = {
+            name: float(report_values[row, names.index(name)])
+            for name in dict.fromkeys(order)
+            if np.isfinite(report_values[row, names.index(name)])
+        }
+        entry: dict[str, Any] = {
+            "quarter": quarter,
+            "quarter_complete_at_run": bool(_period(quarter).end_time < as_of),
+            "observed_report_units": observed,
+            "requested_but_missing": [
+                name for name in requested_observables if name not in observed
+            ],
+        }
+        entry["label"] = _partial_quarter_label(entry)
+        quarters.append(entry)
+    return {
+        "full_information_end": full_information_end,
+        "partial_quarters": quarters,
+        "first_unconditioned_quarter": first_unconditioned_quarter,
+        "scenario_start": scenario_start,
+    }
+
+
+def _partial_quarter_label(entry: Mapping[str, Any]) -> str:
+    parts = []
+    for name, value in entry["observed_report_units"].items():
+        text = f"{_CONDITIONING_SHORT_LABELS.get(name, name)} {value:.3f}"
+        if name == "obs_nominalrate":
+            complete = entry["quarter_complete_at_run"]
+            text += " (actual quarter average)" if complete else " (quarter-to-date average)"
+        elif name == "obs_longinflation":
+            text += " (PCE basis)"
+        parts.append(text)
+    parts.extend(
+        f"{_CONDITIONING_SHORT_LABELS.get(name, name)} not available"
+        for name in entry["requested_but_missing"]
+    )
+    return f"{entry['quarter']}: " + (", ".join(parts) if parts else "no observables")
+
+
+def _parameter_source_label(refresh: Mapping[str, Any]) -> str:
+    """Describe where the run's parameters came from, using what actually executed."""
+
+    source = refresh["source"]
+    if source == "saved_mode":
+        path = Path(str(refresh["mode_path"]))
+        details = []
+        if refresh.get("mode_log_posterior_reported") is not None:
+            details.append(f"saved log posterior {refresh['mode_log_posterior_reported']:.3f}")
+        details.append(
+            f"{refresh['updated_log_posterior']:.3f} re-evaluated on this run's estimation sample"
+        )
+        sample_end = (refresh.get("mode_sample") or {}).get("end")
+        if sample_end:
+            details.append(f"mode sample ends {sample_end}")
+        details.append(
+            f"estimated {refresh['mode_estimated_at']}"
+            if refresh.get("mode_estimated_at")
+            else "estimation date not recorded in the mode file"
+        )
+        return (
+            f"loaded saved posterior mode `{path.name}` (`{path}`); "
+            + "; ".join(details)
+            + "; not re-estimated in this run"
+        )
+    if source == "re_estimated":
+        names = list(refresh.get("parameters", {}))
+        scope = (
+            "full posterior mode"
+            if refresh.get("estimation_scope") == "full_mode"
+            else f"partial {len(names)}-parameter refresh ({', '.join(names)})"
+        )
+        return (
+            f"re-estimated in this run: {scope} via {refresh.get('optimizer_method', 'n/a')}, "
+            f"{refresh.get('iterations', 'n/a')} iterations "
+            f"({refresh.get('function_evaluations', 'n/a')} function evaluations, optimizer "
+            f"success `{refresh.get('optimizer_success')}`); log posterior "
+            f"{refresh['baseline_log_posterior']:.3f} -> {refresh['updated_log_posterior']:.3f} "
+            f"({refresh['updated_log_posterior'] - refresh['baseline_log_posterior']:+.3f})"
+        )
+    return (
+        "DSGE.jl ss10 starting values/calibration; not re-estimated (log posterior "
+        f"{refresh['baseline_log_posterior']:.3f} on this run's estimation sample)"
+    )
+
+
+def _run_labels_markdown(parameter_source: str, information_set: Mapping[str, Any]) -> str:
+    partial = information_set["partial_quarters"]
+    if partial:
+        quarters = ", ".join(entry["quarter"] for entry in partial)
+        conditioning = (
+            "; ".join(entry["label"] for entry in partial)
+            + f". Only these observables enter the Kalman filter in {quarters} (DSGE.jl "
+            "`cond_semi_names` treatment); all other observables are missing by design there."
+        )
+    else:
+        conditioning = "none"
+    return f"""- Parameter source: {parameter_source}
+- Full information set ends: **{information_set["full_information_end"]}** (last quarter with
+  the complete observable set)
+- Partial-quarter conditioning: {conditioning}
+- First unconditioned forecast quarter: **{information_set["first_unconditioned_quarter"]}**
+- Scenarios start: **{information_set["scenario_start"]}**"""
 
 
 def _report_figures_markdown(

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -120,8 +122,10 @@ def test_committed_cpi_snapshots_reconcile_through_2026q2() -> None:
     assert quality["max_abs_food_reconciliation_error_pp"] <= 1.0e-10
 
 
-def test_quarterly_package_smoke_with_frozen_levels(tmp_path) -> None:
-    periods = pd.period_range("2014-Q3", "2026-Q2", freq="Q")
+def _frozen_package_inputs(
+    tmp_path: Path, *, last_quarter: str = "2026-Q2"
+) -> tuple[dict[str, Any], Callable[[str], bytes]]:
+    periods = pd.period_range("2014-Q3", last_quarter, freq="Q")
     steps = np.arange(len(periods), dtype=np.float64)
     dates = [f"{period.year}-Q{period.quarter}" for period in periods]
     levels = pd.DataFrame(
@@ -147,7 +151,7 @@ def test_quarterly_package_smoke_with_frozen_levels(tmp_path) -> None:
     levels.to_csv(levels_path, index=False)
     config = {
         "start_date": dates[0],
-        "model_end_date": dates[-1],
+        "model_end_date": "2026-Q2",
         "horizon": 4,
         "stochastic_draws": 2,
         "seed": 7,
@@ -175,18 +179,38 @@ def test_quarterly_package_smoke_with_frozen_levels(tmp_path) -> None:
             }
         ],
     }
-    config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(config), encoding="utf-8")
     monthly_dates = [f"{period.year}-{3 * period.quarter:02d}-01" for period in periods]
     unemployment = 5.0 + 0.15 * np.sin(steps / 3.0)
     payload = "DATE,UNRATE\n" + "\n".join(
         f"{date},{value}" for date, value in zip(monthly_dates, unemployment, strict=True)
     )
+    return config, lambda _: payload.encode()
+
+
+def _run_frozen_package(
+    tmp_path: Path, config: dict[str, Any], fetcher: Callable[[str], bytes]
+) -> tuple[str, dict[str, Any]]:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    artifacts = run_quarterly_economy_package(
+        config_path=config_path,
+        output_dir=tmp_path / "run",
+        fetcher=fetcher,
+        make_plots=False,
+    )
+    report = artifacts.report.read_text(encoding="utf-8")
+    return report, json.loads(artifacts.metadata.read_text(encoding="utf-8"))
+
+
+def test_quarterly_package_smoke_with_frozen_levels(tmp_path) -> None:
+    config, fetcher = _frozen_package_inputs(tmp_path)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
 
     artifacts = run_quarterly_economy_package(
         config_path=config_path,
         output_dir=tmp_path / "run",
-        fetcher=lambda _: payload.encode(),
+        fetcher=fetcher,
         make_plots=False,
     )
 
@@ -199,9 +223,136 @@ def test_quarterly_package_smoke_with_frozen_levels(tmp_path) -> None:
     assert "all **19 observables**" in report
     assert "**21 model-implied variables**" in report
     assert "Baseline forecast panels were not rendered" in report
+    # No saved mode, no refresh, no partial quarter: the legacy labels.
+    assert "- Parameter source: DSGE.jl ss10 starting values/calibration; not re-estimated" in (
+        report
+    )
+    assert "Parameter refresh" not in report
+    assert "- Full information set ends: **2026-Q2**" in report
+    assert "- Partial-quarter conditioning: none" in report
+    assert "- First unconditioned forecast quarter: **2026-Q3**" in report
+    assert "- Scenarios start: **2026-Q3**" in report
     metadata = json.loads(artifacts.metadata.read_text(encoding="utf-8"))
     assert metadata["data"]["quality"]["last_date"] == "2026-Q2"
+    assert metadata["model"]["parameter_source"]["kind"] == "starting_values"
+    assert metadata["model"]["refresh"]["enabled"] is False
+    assert metadata["model"]["information_set"]["partial_quarters"] == []
     assert (
         metadata["historical_decomposition"]["observable_report_unit_reconciliation_max_abs_error"]
         < 1.0e-5
     )
+
+
+def test_report_labels_saved_mode_with_partial_quarter_conditioning(tmp_path) -> None:
+    config, fetcher = _frozen_package_inputs(tmp_path, last_quarter="2026-Q3")
+    levels = pd.read_csv(config["fred_levels_path"])
+    levels.loc[levels["date"] == "2026-Q3", "DFF"] = 3.667
+    levels.to_csv(config["fred_levels_path"], index=False)
+    public = pd.DataFrame(
+        {
+            "date": levels["date"],
+            "ASACX10": 2.3,
+            "FYCCZA": 4.787,
+            "TFPKQ": 1.0,
+            "TFPJQ": 0.5,
+        }
+    )
+    public_path = tmp_path / "public.csv"
+    public.to_csv(public_path, index=False)
+    defaults = Model1002(subspec="ss10").parameters
+    mode_path = tmp_path / "saved_mode.json"
+    mode_path.write_text(
+        json.dumps(
+            {
+                "status": "converged",
+                "sample": {"end": "2026-Q2"},
+                "log_posterior": -1039.15,
+                "estimated_at": "2026-10-05",
+                "estimated_parameters": ["rho_g", "sigma_g"],
+                "parameter_values": {
+                    "rho_g": float(defaults["rho_g"].value),
+                    "sigma_g": float(defaults["sigma_g"].value),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    config.update(
+        {
+            "refresh_model": False,
+            "mode_path": str(mode_path),
+            "public_sources_path": str(public_path),
+            "n_mon_anticipated_shocks": 0,
+            "conditioning_end_date": "2026-Q3",
+            "conditioning_observables": [
+                "obs_nominalrate",
+                "obs_spread",
+                "obs_longrate",
+                "obs_longinflation",
+            ],
+        }
+    )
+
+    report, metadata = _run_frozen_package(tmp_path, config, fetcher)
+
+    q3_values = metadata["model"]["information_set"]["partial_quarters"][0]["observed_report_units"]
+    spread = q3_values["obs_spread"]
+    spf10 = q3_values["obs_longinflation"]  # SPF CPI 2.3 less the 0.5 pp wedge, PCE basis
+    assert "Parameter refresh" not in report
+    assert "Parameter source: re-estimated" not in report
+    assert (
+        "- Parameter source: loaded saved posterior mode `saved_mode.json` "
+        f"(`{mode_path.resolve()}`); saved log posterior -1039.150;"
+    ) in report
+    assert "mode sample ends 2026-Q2; estimated 2026-10-05; not re-estimated in this run" in report
+    assert "- Full information set ends: **2026-Q2**" in report
+    assert (
+        "- Partial-quarter conditioning: 2026-Q3: FFR 3.667 (actual quarter average), "
+        f"spread {spread:.3f}, 10y 4.787, SPF10 {spf10:.3f} (PCE basis). Only these "
+        "observables enter the Kalman filter in 2026-Q3"
+    ) in " ".join(report.split())
+    assert "- First unconditioned forecast quarter: **2026-Q4**" in report
+    assert "- Scenarios start: **2026-Q4**" in report
+    assert "The information set ends in" not in report
+    assert spf10 == pytest.approx(400.0 * (np.exp(0.45 / 100.0) - 1.0))
+
+    model_meta = metadata["model"]
+    assert model_meta["refresh"]["enabled"] is False
+    assert model_meta["refresh"]["source"] == "saved_mode"
+    assert model_meta["parameter_source"]["kind"] == "saved_mode"
+    assert model_meta["parameter_source"]["label"] in report
+    information = model_meta["information_set"]
+    assert information["full_information_end"] == "2026-Q2"
+    assert information["first_unconditioned_quarter"] == "2026-Q4"
+    assert information["scenario_start"] == "2026-Q4"
+    (q3,) = information["partial_quarters"]
+    assert q3["quarter"] == "2026-Q3"
+    assert set(q3["observed_report_units"]) == set(config["conditioning_observables"])
+    assert q3["observed_report_units"]["obs_nominalrate"] == pytest.approx(3.667)
+    assert q3["requested_but_missing"] == []
+
+
+def test_report_labels_parameter_refresh(tmp_path) -> None:
+    config, fetcher = _frozen_package_inputs(tmp_path)
+    config.update({"refresh_model": True, "refresh_maxiter": 1})
+
+    report, metadata = _run_frozen_package(tmp_path, config, fetcher)
+
+    refresh = metadata["model"]["refresh"]
+    assert refresh["enabled"] is True
+    assert refresh["source"] == "re_estimated"
+    assert metadata["model"]["parameter_source"]["kind"] == "re_estimated"
+    before = refresh["baseline_log_posterior"]
+    after = refresh["updated_log_posterior"]
+    expected = (
+        "- Parameter source: re-estimated in this run: partial 8-parameter refresh "
+        "(rho_g, rho_b, rho_mu, rho_ztil, sigma_g, sigma_b, sigma_mu, sigma_ztil) via Powell, "
+        f"{refresh['iterations']} iterations ({refresh['function_evaluations']} function "
+        f"evaluations, optimizer success `{refresh['optimizer_success']}`); log posterior "
+        f"{before:.3f} -> {after:.3f} ({after - before:+.3f})"
+    )
+    assert expected in report
+    assert report.count(expected) == 2  # executive summary and reproducibility section
+    assert "loaded saved posterior mode" not in report
+    assert "- Partial-quarter conditioning: none" in report
+    assert "- First unconditioned forecast quarter: **2026-Q3**" in report
