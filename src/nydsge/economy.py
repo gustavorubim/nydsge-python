@@ -40,6 +40,7 @@ from nydsge.forecast import (
     solve_shocks_for_observable_targets,
 )
 from nydsge.models import Model1002
+from nydsge.public_sources import load_public_sources_csv, merge_public_sources
 from nydsge.scenarios import (
     DEFAULT_REFRESH_PARAMETERS,
     build_unemployment_scenario_path,
@@ -158,6 +159,15 @@ class QuarterlyEconomyConfig:
     structural_scenarios: tuple[StructuralScenario, ...]
     source_path: Path
     source_sha256: str
+    # Optional C1/C2 extensions; defaults reproduce the original package behaviour.
+    public_sources_path: Path | None = None
+    n_mon_anticipated_shocks: int | None = None
+    mode_path: Path | None = None
+    conditioning_end_date: str | None = None
+    conditioning_observables: tuple[str, ...] = ()
+    conditional_shock_weighting: str = "raw"
+    difference_lead_quarter: bool = False
+    masked_quarters: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -238,6 +248,26 @@ def load_quarterly_economy_config(path: Path | str) -> QuarterlyEconomyConfig:
         structural_scenarios=structural_scenarios,
         source_path=source_path,
         source_sha256=hashlib.sha256(raw_bytes).hexdigest(),
+        public_sources_path=optional_path("public_sources_path"),
+        n_mon_anticipated_shocks=(
+            None
+            if raw.get("n_mon_anticipated_shocks") is None
+            else int(raw["n_mon_anticipated_shocks"])
+        ),
+        mode_path=optional_path("mode_path"),
+        conditioning_end_date=(
+            None
+            if raw.get("conditioning_end_date") in {None, ""}
+            else _quarter_label(_period(str(raw["conditioning_end_date"])))
+        ),
+        conditioning_observables=tuple(
+            str(name) for name in raw.get("conditioning_observables", [])
+        ),
+        conditional_shock_weighting=str(raw.get("conditional_shock_weighting", "raw")),
+        difference_lead_quarter=bool(raw.get("difference_lead_quarter", False)),
+        masked_quarters=tuple(
+            _quarter_label(_period(str(value))) for value in raw.get("masked_quarters", [])
+        ),
     )
     _validate_config(config)
     return config
@@ -255,37 +285,67 @@ def run_quarterly_economy_package(
     config = load_quarterly_economy_config(config_path)
     destination = Path(output_dir).resolve()
     destination.mkdir(parents=True, exist_ok=True)
-    forecast_start = _quarter_label(_period(config.model_end_date) + 1)
-    model = Model1002(
-        subspec="ss10",
-        settings={
-            "data_vintage": config.model_end_date.replace("-Q", "q"),
-            "date_forecast_start": forecast_start,
-        },
-    )
+    last_data_quarter = config.conditioning_end_date or config.model_end_date
+    forecast_start = _quarter_label(_period(last_data_quarter) + 1)
+    model_settings: dict[str, Any] = {
+        "data_vintage": config.model_end_date.replace("-Q", "q"),
+        "date_forecast_start": forecast_start,
+    }
+    if config.n_mon_anticipated_shocks is not None:
+        model_settings["n_mon_anticipated_shocks"] = config.n_mon_anticipated_shocks
+    model = Model1002(subspec="ss10", settings=model_settings)
 
     fred_names = parse_data_sources(model).get("FRED", [])
     fred_levels = _load_fred_levels(config, fred_names, fetcher=fetcher)
+    if config.public_sources_path is not None:
+        fred_levels = merge_public_sources(
+            fred_levels, load_public_sources_csv(config.public_sources_path)
+        )
     observables = current_public_observables(model, fred_levels)
+    if config.difference_lead_quarter:
+        observables = observables.loc[
+            _period_index(observables["date"]) >= _period(config.start_date)
+        ].reset_index(drop=True)
+    if config.masked_quarters:
+        rows = observables["date"].astype(str).isin(config.masked_quarters).to_numpy()
+        observable_columns = [c for c in observables.columns if c.startswith("obs_")]
+        observables.loc[rows, observable_columns] = np.nan
+    if config.conditioning_end_date is not None:
+        observables = _restrict_conditioning_quarters(
+            observables,
+            model_end_date=config.model_end_date,
+            keep=config.conditioning_observables,
+        )
     data_quality = assess_quarterly_data_quality(
         observables,
         start_date=config.start_date,
-        model_end_date=config.model_end_date,
+        model_end_date=last_data_quarter,
     )
     fred_path = destination / "fred_levels.csv"
     observables_path = destination / "observables.csv"
     fred_levels.to_csv(fred_path, index=False)
     observables.to_csv(observables_path, index=False)
 
-    observations = df_to_matrix(model, observables)
-    refresh_metadata, model_mode = _refresh_model(
-        model,
-        observations,
-        output_dir=destination,
-        start_date=config.start_date,
-        enabled=config.refresh_model,
-        maxiter=config.refresh_maxiter,
-    )
+    estimation_frame = observables.loc[
+        _period_index(observables["date"]) <= _period(config.model_end_date)
+    ]
+    observations = df_to_matrix(model, estimation_frame)
+    if config.mode_path is not None:
+        refresh_metadata, model_mode = _apply_saved_mode(
+            model,
+            observations,
+            mode_path=config.mode_path,
+            start_date=config.start_date,
+        )
+    else:
+        refresh_metadata, model_mode = _refresh_model(
+            model,
+            observations,
+            output_dir=destination,
+            start_date=config.start_date,
+            enabled=config.refresh_model,
+            maxiter=config.refresh_maxiter,
+        )
     system = compute_system(model)
     baseline = forecast_one(
         model,
@@ -730,9 +790,22 @@ def _validate_config(config: QuarterlyEconomyConfig) -> None:
         config.cpi_summary_path,
         config.cpi_detail_path,
         config.cpi_goods_path,
+        config.public_sources_path,
+        config.mode_path,
     ):
         if path is not None and not path.exists():
             raise FileNotFoundError(path)
+    if config.conditional_shock_weighting not in {"raw", "qq"}:
+        raise ValueError("conditional_shock_weighting must be 'raw' or 'qq'.")
+    if config.n_mon_anticipated_shocks is not None and config.n_mon_anticipated_shocks < 0:
+        raise ValueError("n_mon_anticipated_shocks must be nonnegative.")
+    if config.mode_path is not None and config.refresh_model:
+        raise ValueError("mode_path and refresh_model are mutually exclusive.")
+    if config.conditioning_end_date is not None:
+        if _period(config.conditioning_end_date).ordinal <= _period(config.model_end_date).ordinal:
+            raise ValueError("conditioning_end_date must be after model_end_date.")
+        if not config.conditioning_observables:
+            raise ValueError("conditioning_end_date requires conditioning_observables.")
 
 
 def _load_fred_levels(
@@ -762,8 +835,7 @@ def _load_fred_levels(
             _validate_ragged_source(mnemonic, series)
             periods = _period_index(series["date"])
             selected = series.loc[
-                (periods >= _period(config.start_date))
-                & (periods <= _period(config.model_end_date)),
+                (periods >= _levels_start(config)) & (periods <= _levels_end(config)),
                 ["date", mnemonic],
             ]
             grid = grid.merge(selected, on="date", how="left", validate="one_to_one")
@@ -772,8 +844,92 @@ def _load_fred_levels(
     if "date" not in frame:
         raise ValueError("Configured FRED levels snapshot must include a date column.")
     periods = _period_index(frame["date"])
-    mask = (periods >= _period(config.start_date)) & (periods <= _period(config.model_end_date))
+    mask = (periods >= _levels_start(config)) & (periods <= _levels_end(config))
     return frame.loc[mask].sort_values("date").reset_index(drop=True)
+
+
+def _levels_start(config: QuarterlyEconomyConfig) -> pd.Period:
+    start = _period(config.start_date)
+    if config.difference_lead_quarter:
+        year, quarter = (
+            (start.year, start.quarter - 1) if start.quarter > 1 else (start.year - 1, 4)
+        )
+        return _period(f"{year}-Q{quarter}")
+    return start
+
+
+def _levels_end(config: QuarterlyEconomyConfig) -> pd.Period:
+    return _period(config.conditioning_end_date or config.model_end_date)
+
+
+def _restrict_conditioning_quarters(
+    observables: pd.DataFrame,
+    *,
+    model_end_date: str,
+    keep: Sequence[str],
+) -> pd.DataFrame:
+    """Semi-conditional data: after model_end_date keep only the named observables.
+
+    This mirrors DSGE.jl's ``cond_semi_names`` treatment: the Kalman filter sees
+    the conditioning quarter with every other observable missing.
+    """
+
+    out = observables.copy()
+    unknown = [name for name in keep if name not in out.columns]
+    if unknown:
+        raise ValueError(f"Unknown conditioning observables: {unknown}")
+    after = np.asarray(_period_index(out["date"]) > _period(model_end_date), dtype=bool)
+    drop = [c for c in out.columns if c.startswith("obs_") and c not in set(keep)]
+    out.loc[after, drop] = np.nan
+    return out
+
+
+def _model_shock_groups(shock_names: Sequence[str]) -> dict[str, tuple[str, ...]]:
+    """SHOCK_GROUPS restricted to shocks present in the model (e.g. no rm_shl* when n_ant=0)."""
+
+    present = set(shock_names)
+    groups = {
+        name: tuple(shock for shock in shocks if shock in present)
+        for name, shocks in SHOCK_GROUPS.items()
+    }
+    return {name: shocks for name, shocks in groups.items() if shocks}
+
+
+def _apply_saved_mode(
+    model: Model1002,
+    observations: np.ndarray,
+    *,
+    mode_path: Path,
+    start_date: str,
+) -> tuple[dict[str, Any], Path | None]:
+    """Load a full posterior-mode parameter vector saved as JSON by the estimation script."""
+
+    from dataclasses import replace
+
+    baseline = estimate(model, observations, start_date=start_date)
+    payload = json.loads(Path(mode_path).read_text(encoding="utf-8"))
+    values = payload["parameter_values"]
+    estimated = list(payload.get("estimated_parameters", values))
+    for name in estimated:
+        if name not in model.parameters:
+            raise KeyError(f"Saved mode parameter {name!r} is not a model parameter.")
+        model.parameters[name] = replace(model.parameters[name], value=float(values[name]))
+    updated = estimate(model, observations, start_date=start_date)
+    return {
+        "enabled": True,
+        "scope": f"Full posterior mode loaded from {mode_path}",
+        "mode_status": payload.get("status"),
+        "mode_sample": payload.get("sample"),
+        "mode_log_posterior_reported": payload.get("log_posterior"),
+        "n_estimated_parameters": len(estimated),
+        "parameters": {name: float(model.parameters[name].value) for name in estimated},
+        "baseline_log_posterior": baseline.log_posterior,
+        "updated_log_posterior": updated.log_posterior,
+        "certification": (
+            "Python local estimation; not a Julia-estimation oracle and not the NY Fed "
+            "production parameterization."
+        ),
+    }, Path(mode_path)
 
 
 def _validate_ragged_source(mnemonic: str, series: pd.DataFrame) -> None:
@@ -1137,7 +1293,12 @@ def _run_scenarios(
         targets[:, hours_index] = baseline_obs_model[:, hours_index] + bridge_slope * (
             unemployment - unemployment_baseline
         )
-        conditioned = solve_shocks_for_observable_targets(system, start_state, targets)
+        conditioned = solve_shocks_for_observable_targets(
+            system,
+            start_state,
+            targets,
+            shock_scale=(shock_scales if config.conditional_shock_weighting == "qq" else None),
+        )
         pseudo_model = _pseudo_from_states(system, conditioned.states)
         obs = reverse_transform_observables(model, conditioned.observables)
         pseudo = reverse_transform_pseudo_observables(model, pseudo_model)
@@ -1315,7 +1476,8 @@ def _historical_group_decomposition(
         check_empty_columns=False,
     )
     shock_names = list(model.indexes.exogenous_shocks)
-    assigned = {shock for shocks in SHOCK_GROUPS.values() for shock in shocks}
+    groups = _model_shock_groups(shock_names)
+    assigned = {shock for shocks in groups.values() for shock in shocks}
     if assigned != set(shock_names):
         raise ValueError(
             "Historical shock taxonomy must assign every shock exactly once; "
@@ -1334,6 +1496,7 @@ def _historical_group_decomposition(
         observed=decomposition.observed,
         transform=lambda values: reverse_transform_observables(model, values),
         tail_quarters=tail_quarters,
+        groups=groups,
     )
     if system.pseudo_measurement is None:
         raise RuntimeError("Historical productivity decomposition requires pseudo measurements.")
@@ -1357,6 +1520,7 @@ def _historical_group_decomposition(
         observed=pseudo_smoothed,
         transform=lambda values: reverse_transform_pseudo_observables(model, values),
         tail_quarters=tail_quarters,
+        groups=groups,
     )
     if decomposition.reconciliation_max_abs_error > 1.0e-5:
         raise ValueError(
@@ -1371,7 +1535,7 @@ def _historical_group_decomposition(
     rows = pd.DataFrame([*obs_rows, *pseudo_rows])
     quality = {
         "method": "RTS-smoothed structural shock contributions",
-        "shock_groups": {name: list(shocks) for name, shocks in SHOCK_GROUPS.items()},
+        "shock_groups": {name: list(shocks) for name, shocks in groups.items()},
         "model_unit_reconciliation_max_abs_error": (decomposition.reconciliation_max_abs_error),
         "report_unit_allocation": (
             "Exact for linear transforms; proportional total-change allocation for "
@@ -1401,6 +1565,7 @@ def _group_decomposition_rows(
     observed: np.ndarray,
     transform: Callable[[np.ndarray], np.ndarray],
     tail_quarters: int,
+    groups: Mapping[str, tuple[str, ...]] | None = None,
 ) -> tuple[list[dict[str, Any]], float]:
     smoothed_report = transform(smoothed)
     observed_report = transform(observed)
@@ -1413,7 +1578,7 @@ def _group_decomposition_rows(
         where=np.abs(smoothed) > 1.0e-10,
     )
     grouped: dict[str, np.ndarray] = {}
-    for group, shocks in SHOCK_GROUPS.items():
+    for group, shocks in (SHOCK_GROUPS if groups is None else groups).items():
         indexes = [shock_names.index(shock) for shock in shocks]
         grouped[group] = contributions[:, :, indexes].sum(axis=2) * scale
     grouped["Initial conditions and trend"] = baseline * scale
@@ -2054,6 +2219,8 @@ def _report_markdown(
     pseudo_count = baseline.loc[
         baseline["variable_kind"] == "pseudo_observable", "variable"
     ].nunique()
+    conditioning_text = _conditioning_text(config)
+    n_missing_at_end = len(data_quality["missing_at_model_end"])
     return f"""# Quarterly U.S. Economic Projection and Scenario Package
 
 ## Executive Summary
@@ -2064,7 +2231,7 @@ pseudo-observables, 90% future-shock bands, exact fed-funds-rate path ablations,
 structural and compounded scenarios, unemployment stress paths, DSGE historical shock
 decompositions, and a separate CPI basket decomposition.
 
-The data panel is **{data_quality["status"]}**: {len(data_quality["missing_at_model_end"])}
+{conditioning_text}The data panel is **{data_quality["status"]}**: {n_missing_at_end}
 observables are unavailable in the final quarter and remain missing rather than being filled
 with non-equivalent proxies. The model can filter ragged-edge data, but forecasts should be
 read with that reduced final-quarter information set in mind.
@@ -2155,6 +2322,18 @@ Table 7 snapshot ingestion with source-vintage archiving.
 """
 
 
+def _conditioning_text(config: Mapping[str, Any]) -> str:
+    end = config.get("conditioning_end_date")
+    if not end:
+        return ""
+    names = ", ".join(f"`{name}`" for name in config.get("conditioning_observables", []))
+    return (
+        f"Semi-conditional information: quarter **{end}** enters the Kalman filter with only "
+        f"{names} observed (DSGE.jl `cond_semi_names` treatment); all other observables are "
+        "missing by design in that quarter.\n\n"
+    )
+
+
 def _report_figures_markdown(
     figures: Sequence[Path],
     *,
@@ -2197,6 +2376,16 @@ def _config_manifest(config: QuarterlyEconomyConfig) -> dict[str, Any]:
         ),
         "cpi_goods_path": (None if config.cpi_goods_path is None else str(config.cpi_goods_path)),
         "unemployment_targets": list(config.unemployment_targets),
+        "public_sources_path": (
+            None if config.public_sources_path is None else str(config.public_sources_path)
+        ),
+        "n_mon_anticipated_shocks": config.n_mon_anticipated_shocks,
+        "mode_path": None if config.mode_path is None else str(config.mode_path),
+        "conditioning_end_date": config.conditioning_end_date,
+        "conditioning_observables": list(config.conditioning_observables),
+        "conditional_shock_weighting": config.conditional_shock_weighting,
+        "difference_lead_quarter": config.difference_lead_quarter,
+        "masked_quarters": list(config.masked_quarters),
         "policy_scenarios": [
             {
                 "name": scenario.name,
