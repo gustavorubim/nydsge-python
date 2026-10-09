@@ -13,6 +13,7 @@ from nydsge.kalman import KalmanResult, kalman_log_likelihood, model_process_cov
 from nydsge.parameters import (
     TransformName,
     model_log_prior,
+    parameter_log_abs_jacobian,
     transform_to_estimation_space,
     update_parameter_value,
 )
@@ -739,7 +740,22 @@ def metropolis_hastings(
     proposal_scale: float = 1.0,
     seed: int | None = None,
     start_date: Any | None = None,
+    log_likelihood_start: int = 0,
+    jacobian: bool = True,
 ) -> MetropolisHastingsResult:
+    """Random-walk Metropolis-Hastings in the unbounded estimation space.
+
+    Recorded ``log_posterior`` values are the model-space log posterior (without the
+    Jacobian term), so they stay comparable with ``estimate(...).log_posterior``.
+
+    Proposals are Gaussian steps in estimation space (``x``).  With ``jacobian=True``
+    (default) the target is ``log p(theta(x) | Y) + log |d theta / d x|``, so the
+    retained model-space draws follow the model-space posterior, as in DSGE.jl's
+    model-space sampler.  ``jacobian=False`` reproduces the previous behaviour, whose
+    model-space draws are biased for transformed parameters.  ``log_likelihood_start``
+    excludes presample periods from the likelihood, matching ``_evaluate_log_posterior``.
+    """
+
     if draws <= 0:
         msg = "Metropolis-Hastings draws must be positive."
         raise ValueError(msg)
@@ -785,6 +801,8 @@ def metropolis_hastings(
         parameter_names,
         current,
         start_date=start_date,
+        log_likelihood_start=log_likelihood_start,
+        jacobian=jacobian,
     )
     if not np.isfinite(current_log_posterior):
         msg = "Initial Metropolis-Hastings log posterior is not finite."
@@ -847,6 +865,8 @@ def metropolis_hastings(
                     parameter_names,
                     proposal,
                     start_date=start_date,
+                    log_likelihood_start=log_likelihood_start,
+                    jacobian=jacobian,
                 )
 
                 accepted_step = False
@@ -883,7 +903,14 @@ def metropolis_hastings(
                                 current,
                             )
                         )
-                        log_posterior_draws.append(current_log_posterior)
+                        log_posterior_draws.append(
+                            current_log_posterior
+                            - (
+                                log_abs_jacobian(original_parameters, parameter_names, current)
+                                if jacobian
+                                else 0.0
+                            )
+                        )
                         accepted_draws.append(sweep_accepted)
                         if len(estimation_draws) >= target_draws:
                             break
@@ -1389,24 +1416,45 @@ def _log_posterior_for_estimation_values(
     values: np.ndarray,
     *,
     start_date: Any | None = None,
+    log_likelihood_start: int = 0,
+    jacobian: bool = False,
 ) -> float:
     try:
+        vector = np.asarray(values, dtype=np.float64)
         _set_parameter_estimation_vector(
             model,
             original_parameters,
             parameter_names,
-            np.asarray(values, dtype=np.float64),
+            vector,
         )
         log_posterior, _, _, _ = _evaluate_log_posterior(
             model,
             observations,
             start_date=start_date,
+            log_likelihood_start=log_likelihood_start,
         )
         if not np.isfinite(log_posterior):
             return float("-inf")
+        if jacobian:
+            log_posterior += log_abs_jacobian(original_parameters, parameter_names, vector)
         return float(log_posterior)
     except Exception:
         return float("-inf")
+
+
+def log_abs_jacobian(
+    original_parameters: dict[str, Parameter],
+    parameter_names: tuple[str, ...],
+    values: np.ndarray,
+) -> float:
+    """Sum of ``log |d theta_i / d x_i|`` over the estimated parameters."""
+
+    return float(
+        sum(
+            parameter_log_abs_jacobian(original_parameters[name], float(value))
+            for name, value in zip(parameter_names, values, strict=True)
+        )
+    )
 
 
 def _set_parameter_estimation_vector(
