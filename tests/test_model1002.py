@@ -226,9 +226,11 @@ def test_model1002_uses_all_ffr_qs_when_expected_ffr_empty() -> None:
     assert model.indexes.exogenous_shocks["exp_rm_sh1"] == 21
 
 
-def test_model1002_ss104_builds_system_with_ss10_pipeline() -> None:
+def test_model1002_ss104_builds_regime_system() -> None:
     model = Model1002(subspec="ss104")
-    system = compute_system(model)
+    regimes = compute_system(model)
+    assert len(regimes.systems) == 29
+    system = regimes[1]
 
     n_states = len(model.indexes.endogenous_states) + len(model.indexes.endogenous_states_augmented)
     n_exo = len(model.indexes.exogenous_shocks)

@@ -4,7 +4,7 @@ Port of NY Fed DSGE.jl Model1002 subspec ss104 into nydsge-python. Spec: docs/ss
 Rules: branch ss104-port only, no force-push, main untouched, no long MCMC before M7.
 
 - [x] M1: regime-switching solve (gensys per regime + gensys2 for temporary ZLB/alt policy), regime-aware Kalman filter/smoother, time-varying information sets
-- [ ] M2: COVID shocks with regime volatilities
+- [x] M2: COVID shocks with regime volatilities
 - [ ] M3: AR(1) inflation measurement error
 - [ ] M4: flexible AIT, pgap/ygap, time-varying credibility 2020Q4-2026Q4
 - [ ] M5: SME/SPD expected FFR observables 1-6Q
@@ -12,6 +12,26 @@ Rules: branch ss104-port only, no force-push, main untouched, no long MCMC befor
 - [ ] M7: final estimation + NY Fed forecast comparison doc
 
 ## Progress log
+
+### 2026-10-12 — M2 COVID equations and volatility regimes
+
+Added phi/Ephi, ziid and biidc states, their one-quarter anticipated states,
+Euler/MRS/productivity loadings, proportional contemporaneous innovations and
+the independent anticipated biidc innovation. `Model1002("ss104")` now builds
+29 dated parameter snapshots; `compute_system` uses M1's regime system.
+The ss64 volatility schedule includes COVID sigmas 400/5/4 in 2020Q1-Q3,
+4/.05/.04 in Q4, zero thereafter, proportional multipliers 2 in Q1,
+anticipated biidc sigma 4 in Q3-Q4, standard shock regimes and zero permanent
+productivity variance in Q1-Q2. Parameter priors/fixed flags travel with snapshots.
+
+Validation: **92 targeted tests passed** (ss104, regimes, Model1002).
+Numerical gates: COVID canonical transition residual **2.303e-15** over all
+29 regimes; calibrated QQ maximum error **0**. These are equation/calibration
+checks, not full Julia model parity (reserved for M6). Julia 1.12.6 full-package
+setup currently fails with `Unsatisfiable requirements ... SortingAlgorithms`:
+SMC's StatsBase/Distributions constraints conflict with Julia-compatible versions;
+the registry download also fails in the restricted network. Evidence:
+`outputs/ss104-julia-setup.log`. M3-M5 can proceed using the cloned sources.
 
 ### 2026-10-12 — M1 regime infrastructure
 

@@ -87,6 +87,8 @@ def varied_systems() -> RegimeSwitchingSystem:
 @pytest.mark.parametrize("subspec", ["ss10", "ss104"])
 def test_one_regime_is_bit_identical_to_existing_model_solver_filter_and_smoother(subspec):
     model = Model1002(subspec)
+    if subspec == "ss104":
+        model = model.regime_snapshot(1)
     existing = compute_system(model)
     regime = compute_system(model, regime_models=(model,), tvis=True, information_sets=((1,),))
     assert isinstance(existing, System)

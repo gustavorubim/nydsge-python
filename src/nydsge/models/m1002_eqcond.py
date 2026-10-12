@@ -846,6 +846,43 @@ def equilibrium_matrices_ss10(model: Any) -> CanonicalSystem:
         if model.get_setting("add_taylor_rm", False):
             set_col(Gamma0, "eq_mp", endo, "ait_rm_t", -1.0)
 
+    if model.subspec == "ss104":
+        # eqcond.jl:63-81, 272-284, 379-390, 409-422, 479-486, 597-644.
+        labor_loading = (
+            (v("sigma_c") - 1) * v("wl_c") / (v("sigma_c") * (1 + v("h") * exp(-v("z_star"))))
+        )
+        for row in ("eq_euler", "eq_euler_f"):
+            set_col(Gamma0, row, endo, "phi_t", -labor_loading)
+            set_col(Gamma0, row, endo, "Ephi_t", labor_loading)
+            set_col(Gamma0, row, endo, "biidc_t", -1.0)
+        for row in ("eq_msub", "eq_msub_f"):
+            set_col(Gamma0, row, endo, "phi_t", v("nu_l"))
+        set_col(Gamma0, "eq_Ephi", endo, "Ephi_t", 1.0)
+        set_col(Gamma0, "eq_Ephi", endo, "phi_t", -v("rho_phi"))
+        set_col(Gamma0, "eq_Ez", endo, "ziid_t", -(v("rho_ziid") - 1) / (1 - v("alpha")))
+        set_col(Gamma0, "eq_z", endo, "ziid_t", -1 / (1 - v("alpha")))
+        set_col(Gamma1, "eq_z", endo, "ziid_t", -1 / (1 - v("alpha")))
+        for key in ("ziid", "biidc", "phi"):
+            row = f"eq_{key}"
+            set_col(Gamma0, row, endo, f"{key}_t", 1.0)
+            set_col(Gamma1, row, endo, f"{key}_t", v(f"rho_{key}"))
+            set_col(Psi, row, exo, f"{key}_sh", 1.0)
+            for horizon in range(1, model._anticipated_shock_settings().get(key, 0) + 1):
+                antrow = f"eq_{key}l{horizon}"
+                set_col(Gamma0, antrow, endo, f"{key}_tl{horizon}", 1.0)
+                previous = row if horizon == 1 else f"eq_{key}l{horizon - 1}"
+                set_col(Gamma1, previous, endo, f"{key}_tl{horizon}", 1.0)
+                if horizon != 1:
+                    raise ValueError("ss104 COVID calibration supports one anticipated quarter.")
+                set_col(Psi, antrow, exo, f"{key}_sh", v(f"sigma_{key}_prop"))
+                if key == "biidc":
+                    set_col(Psi, antrow, exo, f"{key}_shl{horizon}", 1.0)
+            if model._anticipated_shock_settings().get(key, 0):
+                if key == "ziid":
+                    set_col(Gamma0, "eq_Ez", endo, "ziid_tl1", -1 / (1 - v("alpha")))
+                elif key == "phi":
+                    set_col(Gamma0, "eq_Ephi", endo, "phi_tl1", -1.0)
+
     canonical = CanonicalSystem(Gamma0=Gamma0, Gamma1=Gamma1, C=C, Psi=Psi, Pi=Pi)
     canonical.validate()
     return canonical

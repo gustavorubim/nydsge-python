@@ -163,6 +163,11 @@ def measurement_matrices_ss10(
     }
     for shock_name, sigma_name in shock_sigmas.items():
         set_qq(shock_name, v(sigma_name) ** 2)
+    if model.subspec == "ss104":
+        for key in ("ziid", "biidc", "phi"):
+            set_qq(f"{key}_sh", v(f"sigma_{key}") ** 2)
+            for horizon in range(1, model._anticipated_shock_settings().get(key, 0) + 1):
+                set_qq(f"{key}_shl{horizon}", v(f"sigma_{key}{horizon}") ** 2)
 
     if model._is_setting_enabled("add_initialize_pgap_ygap_pseudoobs"):
         set_qq("pgap_sh", v("sigma_pgap") ** 2)

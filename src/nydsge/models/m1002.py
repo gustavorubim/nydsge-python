@@ -537,6 +537,10 @@ class Model1002(DSGEModel):
         self._init_observable_mappings()
         self._init_pseudo_observable_mappings()
         self._init_parameters()
+        if self.subspec == "ss104":
+            from nydsge.models.ss104 import initialize_covid
+
+            initialize_covid(self)
         self._init_index_maps()
         self._init_steady_state_placeholders()
 
@@ -950,6 +954,8 @@ class Model1002(DSGEModel):
         ] + [f"rm_tl{i}" for i in range(1, n_ant + 1)]
         for key, value in antshocks.items():
             endogenous_states.extend(f"{key}_tl{i}" for i in range(1, value + 1))
+        if self.subspec == "ss104":
+            endogenous_states.extend(["ziid_t", "biidc_t", "phi_t", "Ephi_t"])
         if self._is_setting_enabled("add_rw"):
             endogenous_states.append("rw_t")
             endogenous_states.append("Rref_t")
@@ -983,6 +989,8 @@ class Model1002(DSGEModel):
             exogenous_shocks.append("rm_ait_sh")
         for key, value in antshocks.items():
             exogenous_shocks.extend(f"{key}_shl{i}" for i in range(1, value + 1))
+        if self.subspec == "ss104":
+            exogenous_shocks.extend(["ziid_sh", "biidc_sh", "phi_sh"])
         if self._is_setting_enabled("add_initialize_pgap_ygap_pseudoobs"):
             exogenous_shocks.extend(["pgap_sh", "ygap_sh"])
         expected_shocks = [
@@ -1066,6 +1074,8 @@ class Model1002(DSGEModel):
         ] + [f"eq_rml{i}" for i in range(1, n_ant + 1)]
         for key, value in antshocks.items():
             equilibrium_conditions.extend(f"eq_{key}l{i}" for i in range(1, value + 1))
+        if self.subspec == "ss104":
+            equilibrium_conditions.extend(["eq_ziid", "eq_biidc", "eq_phi", "eq_Ephi"])
         if self._is_setting_enabled("add_rw"):
             equilibrium_conditions.append("eq_rw")
             equilibrium_conditions.append("eq_Rref")
@@ -1139,12 +1149,19 @@ class Model1002(DSGEModel):
     def _subspec_default_settings(subspec: str) -> dict[str, Any]:
         if subspec == "ss104":
             return {
+                "date_forecast_start": "2026-Q3",
+                "antshocks": {"biidc": 1, "phi": 1, "ziid": 1},
                 "expected_ffr": (1, 2, 3, 4, 5, 6),
                 "all_ffr_qs": (1, 2, 3, 4, 5, 6),
                 "add_iid_cond_obs_gdp_meas_err": True,
                 "add_iid_cond_obs_corepce_meas_err": True,
             }
         return {}
+
+    def regime_snapshot(self, reg: int) -> Model1002:
+        from nydsge.models.ss104 import regime_snapshot
+
+        return regime_snapshot(self, reg)
 
     def _expected_ffr_horizons(self) -> tuple[int, ...]:
         return parse_expected_ffr_horizons(

@@ -497,6 +497,11 @@ def compute_system(
 
     if regime_models is None:
         regime_models = model.get_setting("regime_models")
+    if regime_models is None and model.subspec == "ss104" and model.get_setting("regime_switching"):
+        model1002 = cast(Any, model)
+        regime_models = tuple(
+            model1002.regime_snapshot(r) for r in model.get_setting("regime_dates")
+        )
     if information_sets is None and tvis:
         information_sets = model.get_setting("tvis_information_set")
         if information_sets is None:
