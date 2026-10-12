@@ -12,8 +12,10 @@ from nydsge.parameters import parameter_log_prior
 from nydsge.solve import compute_system
 from nydsge.ss104_estimation import (
     evaluate_ss104_posterior,
+    ss104_estimation_bounds,
     ss104_estimation_vector,
     ss104_parameter_catalog,
+    ss104_projected_gradient,
     update_ss104_parameters,
 )
 from nydsge.ss104_workflow import forecast_ss104, prepare_ss104_observations
@@ -51,6 +53,25 @@ def test_regime_coordinates_update_independently_and_count_prior_once():
     assert {
         r: p.value for r, p in model.get_setting("parameter_regimes")["sigma_phi"].items()
     } == pytest.approx({r: p.value for r, p in original.items()})
+
+
+def test_explicit_bounds_and_projected_stationarity_at_phi_lower_bound():
+    model = Model1002("ss104")
+    catalog = ss104_parameter_catalog(model)
+    phi = list(catalog).index("Phi")
+    x = ss104_estimation_vector(catalog)
+    assert ss104_estimation_bounds(catalog)[phi] == pytest.approx((0, np.log(10)))
+    x[phi] = 0  # Phi=1 is an admissible boundary value.
+    g = np.zeros_like(x)
+    g[phi] = 825  # No feasible descent in this coordinate.
+    assert ss104_projected_gradient(catalog, x, g)[phi] == 0
+    x[phi] = 1e-4
+    assert ss104_projected_gradient(catalog, x, g)[phi] == 825
+    x[phi] = 0
+    g[phi] = -825  # Feasible inward descent must never be hidden.
+    assert ss104_projected_gradient(catalog, x, g)[phi] == -825
+    update_ss104_parameters(model, catalog, x)
+    assert model.parameters["Phi"].value == 1
 
 
 def test_estimation_likelihood_matches_m6_forecast_and_presample():

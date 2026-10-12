@@ -47,6 +47,36 @@ def ss104_estimation_vector(catalog) -> np.ndarray:
     )
 
 
+def ss104_estimation_bounds(catalog):
+    """Model bounds expressed in the existing optimization coordinates."""
+    result = []
+    for p in catalog.values():
+        if p.value_bounds is None or p.transform in ("sqrt", "square_root"):
+            result.append((None, None))
+        elif p.transform == "exponential":
+            lower, upper = p.value_bounds
+            result.append(
+                (
+                    float(np.log(lower)) if lower > 0 else None,
+                    float(np.log(upper)) if np.isfinite(upper) else None,
+                )
+            )
+        else:
+            result.append(p.value_bounds)
+    return result
+
+
+def ss104_projected_gradient(catalog, values, gradient):
+    """KKT gradient: a boundary coordinate need not have zero outward derivative."""
+    projected = np.asarray(gradient, dtype=float).copy()
+    for i, (lower, upper) in enumerate(ss104_estimation_bounds(catalog)):
+        if (lower is not None and values[i] <= lower + 1e-8 and projected[i] > 0) or (
+            upper is not None and values[i] >= upper - 1e-8 and projected[i] < 0
+        ):
+            projected[i] = 0
+    return projected
+
+
 def update_ss104_parameters(model, catalog, values) -> None:
     """Update all free coordinates from immutable originals; fixed regimes remain fixed."""
     values = np.asarray(values, dtype=float)

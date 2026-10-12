@@ -22,8 +22,10 @@ from ss104_local import build_local_data, build_local_model, input_provenance  #
 
 from nydsge.ss104_estimation import (  # noqa: E402
     evaluate_ss104_posterior,
+    ss104_estimation_bounds,
     ss104_estimation_vector,
     ss104_parameter_catalog,
+    ss104_projected_gradient,
     update_ss104_parameters,
 )
 
@@ -58,6 +60,7 @@ def main():
     parser.add_argument(
         "--resume", action="store_true", help="Continue this same default-start search"
     )
+    parser.add_argument("--bounded", action="store_true", help="Bounded BFGS at an active bound")
     args = parser.parse_args()
     if args.workers < 1 or args.maxiter < 1 or args.step <= 0 or args.time_limit_min <= 0:
         parser.error("workers/maxiter/step/time limit must be positive")
@@ -104,7 +107,8 @@ def main():
             "subspec": model.subspec,
             "optimizer": (
                 f"scipy BFGS; central-difference step {args.step}; gtol 0.001; "
-                "up to 3 Hessian-reset rounds in one default-start search"
+                "up to 3 Hessian-reset rounds plus bounded BFGS if needed, "
+                "in one default-start search"
             ),
             "starting_point": "DSGE.jl ss104 defaults; prior-bearing free parameter regimes",
             "sample": {
@@ -216,18 +220,31 @@ def main():
         try:
             converged = False
             diagnostics = rounds[-1] if rounds else None
-            for round_number in range(len(rounds), 3):
+            round_limit = len(rounds) + 1 if args.bounded else 3
+            for round_number in range(len(rounds), round_limit):
                 print(f"BFGS round {round_number + 1}", flush=True)
                 result = minimize(
                     objective,
                     best["x"].copy(),
-                    method="BFGS",
+                    method="L-BFGS-B" if args.bounded else "BFGS",
                     jac=gradient,
-                    options={"maxiter": args.maxiter, "gtol": 1e-3},
+                    bounds=ss104_estimation_bounds(catalog) if args.bounded else None,
+                    options=(
+                        {
+                            "maxiter": args.maxiter,
+                            "gtol": 1e-3,
+                            "ftol": 1e-15,
+                            "maxls": 40,
+                            "maxcor": 20,
+                        }
+                        if args.bounded
+                        else {"maxiter": args.maxiter, "gtol": 1e-3}
+                    ),
                     callback=checkpoint,
                 )
                 diagnostics = {
                     "round": round_number + 1,
+                    "method": "L-BFGS-B" if args.bounded else "BFGS",
                     "success": bool(result.success),
                     "message": str(result.message),
                     "iterations": int(result.nit),
@@ -242,7 +259,9 @@ def main():
                     # Line-search probes can improve the saved candidate slightly.
                     # Certify stationarity at the actual saved point, not a prior iterate.
                     gbest = gradient(best["x"])
-                    diagnostics["saved_point_gradient_inf_norm"] = float(np.max(np.abs(gbest)))
+                    projected = ss104_projected_gradient(catalog, best["x"], gbest)
+                    diagnostics["saved_point_raw_gradient_inf_norm"] = float(np.max(np.abs(gbest)))
+                    diagnostics["saved_point_gradient_inf_norm"] = float(np.max(np.abs(projected)))
                     converged = diagnostics["saved_point_gradient_inf_norm"] <= 1e-3
                     if converged:
                         break
