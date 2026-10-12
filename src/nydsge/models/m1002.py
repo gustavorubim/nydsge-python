@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from math import exp, log
 from typing import Any
 
@@ -1436,17 +1436,43 @@ class Model1002(DSGEModel):
             raise NotPortedError(msg)
         return equilibrium_matrices_ss10(self)
 
-    def measurement_matrices(self, transition: Transition) -> Measurement:
+    def measurement_matrices(
+        self,
+        transition: Transition,
+        *,
+        transitions: Sequence[Transition] | None = None,
+        reg: int = 1,
+        information_set: Sequence[int] | None = None,
+    ) -> Measurement:
         if self.subspec not in {"ss10", "ss104"}:
             msg = "Only Model1002 ss10/ss104 measurement matrices are ported."
             raise NotPortedError(msg)
-        return measurement_matrices_ss10(self, transition)
+        return measurement_matrices_ss10(
+            self,
+            transition,
+            transitions=transitions,
+            reg=reg,
+            information_set=information_set,
+        )
 
-    def pseudo_measurement_matrices(self, transition: Transition) -> PseudoMeasurement:
+    def pseudo_measurement_matrices(
+        self,
+        transition: Transition,
+        *,
+        transitions: Sequence[Transition] | None = None,
+        reg: int = 1,
+        information_set: Sequence[int] | None = None,
+    ) -> PseudoMeasurement:
         if self.subspec not in {"ss10", "ss104"}:
             msg = "Only Model1002 ss10/ss104 pseudo-measurement matrices are ported."
             raise NotPortedError(msg)
-        return pseudo_measurement_matrices_ss10(self, transition)
+        return pseudo_measurement_matrices_ss10(
+            self,
+            transition,
+            transitions=transitions,
+            reg=reg,
+            information_set=information_set,
+        )
 
     def augment_transition(self, transition: Transition) -> Transition:
         if self.subspec not in {"ss10", "ss104"}:

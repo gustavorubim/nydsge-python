@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 import numpy as np
 from scipy import linalg
 
 from nydsge.core import DSGEModel, NotPortedError
+
+if TYPE_CHECKING:
+    from nydsge.regimes import RegimeSwitchingSystem
 
 CanonicalSolveMethod = Literal["auto", "direct", "gensys"]
 
@@ -439,14 +443,81 @@ def _solve_or_empty(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.linalg.solve(a, b)
 
 
+@overload
 def compute_system(
     model: DSGEModel,
     *,
     tvis: bool = False,
     verbose: str = "high",
     method: CanonicalSolveMethod = "auto",
-) -> System:
-    del tvis, verbose
+    regime_models: Sequence[DSGEModel],
+    temporary_regimes: Sequence[Sequence[int]] = (),
+    information_sets: Sequence[Sequence[int]] | None = None,
+) -> RegimeSwitchingSystem: ...
+
+
+@overload
+def compute_system(
+    model: DSGEModel,
+    *,
+    tvis: Literal[False] = False,
+    verbose: str = "high",
+    method: CanonicalSolveMethod = "auto",
+    regime_models: None = None,
+    temporary_regimes: Sequence[Sequence[int]] = (),
+    information_sets: None = None,
+) -> System: ...
+
+
+@overload
+def compute_system(
+    model: DSGEModel,
+    *,
+    tvis: bool = False,
+    verbose: str = "high",
+    method: CanonicalSolveMethod = "auto",
+    regime_models: Sequence[DSGEModel] | None = None,
+    temporary_regimes: Sequence[Sequence[int]] = (),
+    information_sets: Sequence[Sequence[int]] | None = None,
+) -> System | RegimeSwitchingSystem: ...
+
+
+def compute_system(
+    model: DSGEModel,
+    *,
+    tvis: bool = False,
+    verbose: str = "high",
+    method: CanonicalSolveMethod = "auto",
+    regime_models: Sequence[DSGEModel] | None = None,
+    temporary_regimes: Sequence[Sequence[int]] = (),
+    information_sets: Sequence[Sequence[int]] | None = None,
+) -> System | RegimeSwitchingSystem:
+    del verbose
+    from nydsge.regimes import compute_model_regime_system
+
+    if regime_models is None:
+        regime_models = model.get_setting("regime_models")
+    if information_sets is None and tvis:
+        information_sets = model.get_setting("tvis_information_set")
+        if information_sets is None:
+            raise ValueError("tvis=True requires information_sets or tvis_information_set.")
+    if regime_models is not None:
+        if not temporary_regimes:
+            temporary_regimes = model.get_setting("temporary_regimes", ())
+        return compute_model_regime_system(
+            regime_models,
+            temporary_regimes=temporary_regimes,
+            information_sets=information_sets,
+            method=method,
+        )
+    if model.get_setting("regime_switching", False) and model.get_setting("n_regimes", 1) > 1:
+        raise ValueError("Multi-regime compute_system requires explicit regime_models.")
+    if temporary_regimes:
+        raise ValueError("temporary_regimes requires explicit regime_models.")
+    if information_sets is not None:
+        return compute_model_regime_system(
+            (model,), information_sets=information_sets, method=method
+        )
     if model.spec == "m1002" and model.subspec in {"ss10", "ss104"}:
         model1002 = cast(Any, model)
         canonical = model1002.equilibrium_matrices()

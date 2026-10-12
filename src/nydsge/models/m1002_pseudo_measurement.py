@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from math import exp
 from typing import Any
 
@@ -8,7 +9,14 @@ import numpy as np
 from nydsge.solve import PseudoMeasurement, Transition
 
 
-def pseudo_measurement_matrices_ss10(model: Any, transition: Transition) -> PseudoMeasurement:
+def pseudo_measurement_matrices_ss10(
+    model: Any,
+    transition: Transition,
+    *,
+    transitions: Sequence[Transition] | None = None,
+    reg: int = 1,
+    information_set: Sequence[int] | None = None,
+) -> PseudoMeasurement:
     """Build default Model1002 ss10 pseudo-measurement matrices."""
     model.steadystate()
     endo = model.indexes.endogenous_states
@@ -55,7 +63,17 @@ def pseudo_measurement_matrices_ss10(model: Any, transition: Transition) -> Pseu
 
     trend_growth = 100.0 * (exp(v("z_star")) - 1.0)
     inflation_trend = 100.0 * (v("pi_star") - 1.0)
-    ttt10, ccc10 = _k_periods_ahead_expected_sums(ttt, ccc, 40)
+    if transitions is None or information_set is None or len(information_set) == 1:
+        ttt10, ccc10 = _k_periods_ahead_expected_sums(ttt, ccc, 40)
+    else:
+        from nydsge.regimes import k_periods_ahead_expected_sums
+
+        ttt10, ccc10 = k_periods_ahead_expected_sums(
+            transitions,
+            40,
+            reg=reg,
+            information_set=information_set,
+        )
     ttt10 = ttt10 / 40.0
     ccc10 = ccc10 / 40.0
 

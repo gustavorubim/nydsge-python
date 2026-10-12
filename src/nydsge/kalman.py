@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
 from nydsge.backends import ArrayBackend, NumpyBackend
+from nydsge.regimes import RegimeSwitchingSystem
 from nydsge.solve import System
 
 
@@ -19,6 +21,7 @@ class KalmanResult:
     predicted_covariances: np.ndarray
     smoothed_states: np.ndarray | None = None
     smoothed_covariances: np.ndarray | None = None
+    regime_indices: np.ndarray | None = None
 
     @property
     def final_filtered_state(self) -> np.ndarray:
@@ -39,7 +42,7 @@ class KalmanResult:
 
 
 def kalman_log_likelihood(
-    system: System,
+    system: System | RegimeSwitchingSystem,
     data: np.ndarray,
     *,
     initial_state: np.ndarray | None = None,
@@ -47,6 +50,7 @@ def kalman_log_likelihood(
     process_covariances: np.ndarray | None = None,
     backend: ArrayBackend | None = None,
     log_likelihood_start: int = 0,
+    regime_indices: Sequence[int] | np.ndarray | None = None,
 ) -> KalmanResult:
     array_backend = backend or NumpyBackend()
     observations = np.asarray(data, dtype=np.float64)
@@ -54,9 +58,17 @@ def kalman_log_likelihood(
         msg = "Kalman data must be a 2D array shaped as periods x observables."
         raise ValueError(msg)
 
+    n_periods = observations.shape[0]
+    regime_system = None
+    period_systems = None
+    if isinstance(system, RegimeSwitchingSystem):
+        regime_system = system
+        period_systems = regime_system.period_systems(regime_indices, n_periods)
+        system = period_systems[0] if n_periods else regime_system.systems[0]
+    elif regime_indices is not None:
+        raise ValueError("regime_indices requires a RegimeSwitchingSystem.")
     transition = system.transition
     measurement = system.measurement
-    n_periods = observations.shape[0]
     n_states = transition.TTT.shape[0]
     if log_likelihood_start < 0 or log_likelihood_start > n_periods:
         msg = "log_likelihood_start must be between 0 and the number of periods."
@@ -118,6 +130,17 @@ def kalman_log_likelihood(
     log_likelihood = 0.0
 
     for period, observed in enumerate(observations):
+        if period_systems is not None:
+            current = period_systems[period]
+            measurement = current.measurement
+            backend_ttt = array_backend.array(current.transition.TTT)
+            backend_rrr = array_backend.array(current.transition.RRR)
+            backend_ccc = array_backend.array(current.transition.CCC)
+            if process_covariance_by_period is None:
+                process_covariance = array_backend.matmul(
+                    array_backend.matmul(backend_rrr, array_backend.array(measurement.QQ)),
+                    array_backend.transpose(backend_rrr),
+                )
         predicted_state = array_backend.matmul(backend_ttt, backend_state) + backend_ccc
         predicted_covariance = array_backend.matmul(
             array_backend.matmul(backend_ttt, backend_covariance),
@@ -179,6 +202,13 @@ def kalman_log_likelihood(
         filtered_covariances=filtered_covariances,
         predicted_states=predicted_states,
         predicted_covariances=predicted_covariances,
+        regime_indices=(
+            None
+            if regime_system is None
+            else np.ones(n_periods, dtype=np.int64)
+            if regime_indices is None
+            else np.asarray(regime_indices, dtype=np.int64).copy()
+        ),
     )
 
 
@@ -297,12 +327,32 @@ def _solve_discrete_lyapunov_doubling(
     raise ValueError(msg)
 
 
-def smooth_kalman_result(system: System, result: KalmanResult) -> KalmanResult:
+def smooth_kalman_result(
+    system: System | RegimeSwitchingSystem,
+    result: KalmanResult,
+    *,
+    regime_indices: Sequence[int] | np.ndarray | None = None,
+) -> KalmanResult:
     """Run a Rauch-Tung-Striebel smoother from stored Kalman filter arrays."""
     filtered_states = np.asarray(result.filtered_states, dtype=np.float64)
     filtered_covariances = np.asarray(result.filtered_covariances, dtype=np.float64)
     predicted_states = np.asarray(result.predicted_states, dtype=np.float64)
     predicted_covariances = np.asarray(result.predicted_covariances, dtype=np.float64)
+    period_systems = None
+    if isinstance(system, RegimeSwitchingSystem):
+        if (
+            regime_indices is not None
+            and result.regime_indices is not None
+            and not np.array_equal(regime_indices, result.regime_indices)
+        ):
+            raise ValueError("Smoother regimes must match the filter's regime_indices.")
+        indices = result.regime_indices if regime_indices is None else regime_indices
+        period_systems = system.period_systems(indices, filtered_states.shape[0])
+        system = system.systems[0]
+    elif regime_indices is not None or result.regime_indices is not None:
+        raise ValueError(
+            "Regime-filtered results require the same RegimeSwitchingSystem to smooth."
+        )
     _validate_smoother_shapes(
         system,
         filtered_states=filtered_states,
@@ -316,6 +366,8 @@ def smooth_kalman_result(system: System, result: KalmanResult) -> KalmanResult:
     transition = np.asarray(system.transition.TTT, dtype=np.float64)
 
     for period in range(filtered_states.shape[0] - 2, -1, -1):
+        if period_systems is not None:
+            transition = np.asarray(period_systems[period + 1].transition.TTT, dtype=np.float64)
         predicted_covariance_next = predicted_covariances[period + 1]
         smoother_gain = _smoother_gain(
             filtered_covariances[period],
@@ -341,14 +393,34 @@ def smooth_kalman_result(system: System, result: KalmanResult) -> KalmanResult:
         predicted_covariances=result.predicted_covariances,
         smoothed_states=smoothed_states,
         smoothed_covariances=smoothed_covariances,
+        regime_indices=result.regime_indices,
     )
 
 
-def observables_from_states(system: System, states: np.ndarray) -> np.ndarray:
+def observables_from_states(
+    system: System | RegimeSwitchingSystem,
+    states: np.ndarray,
+    *,
+    regime_indices: Sequence[int] | np.ndarray | None = None,
+) -> np.ndarray:
     state_array = np.asarray(states, dtype=np.float64)
     if state_array.ndim != 2:
         msg = "States must have shape (periods, states)."
         raise ValueError(msg)
+    if isinstance(system, RegimeSwitchingSystem):
+        path = system.period_systems(regime_indices, state_array.shape[0])
+        if len(system) == 1:
+            return observables_from_states(system.systems[0], state_array)
+        if not path:
+            return np.empty((0, system.systems[0].measurement.ZZ.shape[0]))
+        return np.concatenate(
+            [
+                observables_from_states(current, state_array[i : i + 1])
+                for i, current in enumerate(path)
+            ]
+        )
+    if regime_indices is not None:
+        raise ValueError("regime_indices requires a RegimeSwitchingSystem.")
     measurement = system.measurement
     n_states = measurement.ZZ.shape[1]
     if state_array.shape[1] != n_states:
@@ -357,11 +429,33 @@ def observables_from_states(system: System, states: np.ndarray) -> np.ndarray:
     return state_array @ measurement.ZZ.T + measurement.DD
 
 
-def pseudo_observables_from_states(system: System, states: np.ndarray) -> np.ndarray:
+def pseudo_observables_from_states(
+    system: System | RegimeSwitchingSystem,
+    states: np.ndarray,
+    *,
+    regime_indices: Sequence[int] | np.ndarray | None = None,
+) -> np.ndarray:
     state_array = np.asarray(states, dtype=np.float64)
     if state_array.ndim != 2:
         msg = "States must have shape (periods, states)."
         raise ValueError(msg)
+    if isinstance(system, RegimeSwitchingSystem):
+        path = system.period_systems(regime_indices, state_array.shape[0])
+        if len(system) == 1:
+            return pseudo_observables_from_states(system.systems[0], state_array)
+        if not path:
+            pseudo = system.systems[0].pseudo_measurement
+            if pseudo is None:
+                raise ValueError("System does not include pseudo-measurement matrices.")
+            return np.empty((0, pseudo.ZZ_pseudo.shape[0]))
+        return np.concatenate(
+            [
+                pseudo_observables_from_states(current, state_array[i : i + 1])
+                for i, current in enumerate(path)
+            ]
+        )
+    if regime_indices is not None:
+        raise ValueError("regime_indices requires a RegimeSwitchingSystem.")
     if system.pseudo_measurement is None:
         msg = "System does not include pseudo-measurement matrices."
         raise ValueError(msg)
