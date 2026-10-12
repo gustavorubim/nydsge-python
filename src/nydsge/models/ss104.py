@@ -256,7 +256,7 @@ def policy_canonical(model):
         c.Gamma0[i] = 0
         c.Gamma1[i] = 0
         c.Gamma0[i, col(f"{gap}_t")] = 1
-        if reg >= 5:
+        if reg >= 5 or model.get_setting(f"add_{gap}", False):
             rho = np.exp(
                 np.log(0.5) / model.get_setting("ait_Thalf" if gap == "pgap" else "gdp_Thalf")
             )
@@ -376,7 +376,11 @@ def compute_ss104_system(model, *, method="auto"):
         weight = model.get_setting("credibility")[r]
         future = r if r >= 10 else r + 1
         a, b = perfect[pair][0][future - 1], perfect[pair + 1][0][future - 1]
-        p = gensys_to_predictable_form(m.equilibrium_matrices())
+        # solve_gensys2! uses the FIRST ZLB regime's predictable form for
+        # every temporary quarter (unless set_pgap1 is present). This keeps
+        # rm_sh loading 1 in regimes 8-9, despite eqcond's later removal flag.
+        # Preserve that upstream solve convention for default ss104 parity.
+        p = gensys_to_predictable_form((models[4] if r < 10 else m).equilibrium_matrices())
         lhs = p.Gamma0 + p.Gamma2 @ (weight * a.TTT + (1 - weight) * b.TTT)
         transition = m.augment_transition(
             Transition(
@@ -445,3 +449,16 @@ def initialize_expected_rates(model) -> None:
         p = model.parameters[name]
         values[name] = {1: replace(p, value=0.0, fixed=True), 2: replace(p, fixed=False)}
         mapping[name] = {r: 1 if r < 10 else 2 for r in model.get_setting("regime_dates")}
+    for name, scale, base in (
+        ("sigma_condgdp", 2.0, "sigma_gdp"),
+        ("sigma_condcorepce", 1.25, "sigma_corepce"),
+    ):
+        p = model.parameters[name]
+        values[name] = {
+            1: replace(p, value=0.0, fixed=True),
+            2: replace(p, value=scale * model.parameters[base].value, fixed=False),
+        }
+        mapping[name] = {
+            r: 2 if r == model.get_setting("cur_model_regime") else 1
+            for r in model.get_setting("regime_dates")
+        }

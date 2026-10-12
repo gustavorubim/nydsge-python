@@ -222,7 +222,7 @@ def measurement_matrices_ss10(
                 set_zz(obs_name, endo_aug, "e_gdpexp_t", 1.0)
             set_dd(obs_name, trend_growth + float(gdp_row @ ccc_h))
 
-    if not np.allclose(ccc, 0.0):
+    if not np.allclose(ccc, 0.0) and model.get_setting("policy") != "zlb":
         steady_offset = np.linalg.solve(np.eye(n_states, dtype=np.float64) - ttt, ccc)
         dd += zz @ steady_offset
 

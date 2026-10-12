@@ -1,5 +1,14 @@
 # nydsge-python fidelity scan vs FRBNY DSGE (Model 1002)
 
+**2026-10-12 port update:** the stub and missing-equation findings below describe
+the original scan revision. M1-M6 now implement public ss104 at fixed default
+parameters, including all 29 regimes and full conditional mean forecasts.
+The independent source Julia oracle, numerical errors and certification boundary
+are recorded in [ss104_m6.md](ss104_m6.md) and [ss104_parity.json](ss104_parity.json).
+Published-release reproduction still requires matching vintages/posteriors and
+the nonpublic inputs described in this historical scan. No estimation was added
+to the ss104 workflow.
+
 Scope: `main @ 6716227` (PRs #1–#3), fresh clone `/workspace/nydsge-scan`. Read-only: nothing was pushed, committed, or opened.
 Reference code: public DSGE.jl `master @ c09dfe8` (2026-07-23, "migrate code to work on julia v1.12"), plus tag v1.3.0 (45c2662).
 Reference releases: NY Fed DSGE Model Forecast, Sep 18 2026 (latest; I found no newer release as of this scan) and Jun 2026. Model doc: `docs/DSGE_Model_Documentation_1002.pdf` (2021-06-17).

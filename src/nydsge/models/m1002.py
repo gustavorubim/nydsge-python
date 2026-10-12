@@ -487,9 +487,9 @@ def _parameter_regime(name: str) -> str:
 class Model1002(DSGEModel):
     """Python representation of upstream FRBNY DSGE Model1002.
 
-    This class currently ports the model shape needed for construction, settings,
-    observable ordering, and index maps. Economic kernels still raise
-    `NotPortedError` until the Julia equations are translated.
+    ss10 supports the existing single-regime workflow. ss104 includes dated
+    COVID parameters, flexible AIT credibility paths and fixed-parameter
+    solve/filter/smoother/conditional-forecast workflows.
     """
 
     def __init__(
@@ -782,6 +782,13 @@ class Model1002(DSGEModel):
                     forward_transform=forward_transform,
                 )
             )
+        if self.subspec == "ss104":
+            for name, transform in (
+                ("Econometricians10YearRateGap", "quarter_to_annual"),
+                ("PseudoGDP", "loggrowth_to_pct_annualized_percapita"),
+                ("PseudoCorePCE", "loggrowth_to_pct_annualized"),
+            ):
+                self.add_pseudo_observable(PseudoObservable(name, name, transform))
         if self._has_pgap_state() or self._has_ygap_state():
             for spec in MODEL1002_SS10_OPTIONAL_PSEUDO_OBSERVABLE_SPECS:
                 if len(spec) == 4:
@@ -1178,10 +1185,21 @@ class Model1002(DSGEModel):
         if subspec == "ss104":
             return {
                 "date_forecast_start": "2026-Q3",
+                "forecast_horizons": 40,
+                "cond_full_names": (
+                    "obs_gdp",
+                    "obs_corepce",
+                    "obs_spread",
+                    "obs_nominalrate",
+                    "obs_longrate",
+                ),
+                "cond_semi_names": ("obs_spread", "obs_nominalrate", "obs_longrate"),
                 "standard_shocks_spread_adjust": 2.0,
                 "antshocks": {"biidc": 1, "phi": 1, "ziid": 1},
                 "add_altpolicy_pgap": True,
                 "add_altpolicy_ygap": True,
+                "add_pgap": True,
+                "add_ygap": True,
                 "add_initialize_pgap_ygap_pseudoobs": True,
                 "add_ait_rm": True,
                 "add_taylor_rm": True,

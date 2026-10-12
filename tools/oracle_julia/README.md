@@ -1,5 +1,24 @@
 # Julia Oracle Tools
 
+## Fixed-default ss104 oracle (M6)
+
+`export_ss104.jl` exports all 29 regimes of public ss104 and a deterministic
+filter/smoother/conditional-forecast replay without optimizing or sampling
+parameters. Use Julia **1.8.5** with this directory's pinned environment; the
+exporter loads package types and overlays economic methods from the supplied
+DSGE.jl c09dfe8 clone, plus filtering/smoothing from StateSpaceRoutines 794fb02.
+The production Python package never calls Julia or reads the committed fixture.
+
+```text
+julia --startup-file=no --compiled-modules=no --project=tools/oracle_julia tools/oracle_julia/export_ss104.jl DSGE_ROOT SSR_ROOT outputs/ss104-oracle.h5
+python tools/oracle_julia/compare_ss104.py outputs/ss104-oracle.h5 --out outputs/ss104-parity.json
+```
+
+The source fixture is `tests/fixtures/ss104_default_oracle.h5`; names permute
+every axis before comparison. Tests require its matrices, parameter values,
+likelihoods, smoothed states and both forecast cases. Full numerical evidence
+and absolute tolerances are in [ss104_m6.md](../../docs/ss104_m6.md).
+
 This directory is reserved for migration-only scripts that run upstream
 `DSGE.jl` to export Python-readable parity fixtures.
 

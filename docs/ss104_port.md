@@ -8,10 +8,39 @@ Rules: branch ss104-port only, no force-push, main untouched, no long MCMC befor
 - [x] M3: AR(1) inflation measurement error
 - [x] M4: flexible AIT, pgap/ygap, time-varying credibility 2020Q4-2026Q4
 - [x] M5: SME/SPD expected FFR observables 1-6Q
-- [ ] M6: full ss104 parity + conditional forecast
+- [x] M6: full ss104 parity + conditional forecast
 - [ ] M7: final estimation + NY Fed forecast comparison doc
 
 ## Progress log
+
+### 2026-10-12 — M6 full fixed-default parity and conditional forecasts
+
+Completed native solve/filter/Durbin-Koopman smoother and full/semi conditional
+mean forecasts with **84/110 states, 48 shocks, 28 observables, 26 pseudo-observables,
+130 parameters and 29 regimes**. The Julia 1.8.5 source exporter and lossless HDF5
+fixture cover every regime, all parameter values, a controlled history and
+unconditional/conditional forecast replay. The initial Julia dependency blocker
+was resolved by bootstrapping pinned package types and overlaying the clean
+c09dfe8 reference methods; no reference checkout or main branch was changed.
+
+Parity maxima over 29 regimes: **TTT 2.12594e-11, RRR 1.43530e-11, CCC 3.62377e-12;
+ZZ 4.21352e-12, DD 6.91003e-13; QQ/EE/parameter values 0**. Pseudo ZZ/DD:
+**2.55795e-13 / 3.88578e-14**. History loglik Julia/Python:
+**-27.82574194739678 / -27.825741807269697** (error **1.40127e-7**).
+Conditional loglik: **-24.886624714156007 / -24.886624578812913**
+(error **1.35343e-7**). Filter/smoother mean errors: **4.86429e-7 / 1.69636e-6**.
+Unconditional forecast state/observable errors: **2.32131e-7 / 3.37272e-8**;
+conditional: **2.38242e-7 / 6.82894e-8**. All are asserted in tests with
+documented float64 tolerances. Source quirks (temporary-ZLB equation freezing,
+gap laws throughout history and skipped ZLB DD adjustment) are preserved.
+
+Targeted validation: **100 tests passed**. Final validation: **549 passed,
+4 optional-backend skips**; `ruff check .` and `ruff format --check .` passed
+(75 Python files formatted). `git diff --check` passed. API, source recipe and boundaries:
+[ss104_m6.md](ss104_m6.md); all per-regime numbers:
+[ss104_parity.json](ss104_parity.json). This is public fixed-default/controlled-
+replay parity, not reproduction of an estimated FRBNY release. M7 is unchecked;
+no ss104 estimation or MCMC was used to build the artifacts, and nothing was pushed.
 
 ### 2026-10-12 — M5 expected FFR and survey data
 

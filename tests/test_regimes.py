@@ -256,6 +256,14 @@ def test_all_matrices_vary_without_reset_and_smoother_uses_next_regime():
     gain = np.linalg.solve(z @ cov @ z.T + e, z @ cov).T
     expected_mean = mean + gain @ (data.ravel()[mask] - d[mask] - z @ mean)
     expected_cov = cov - gain @ z @ cov
+    disturbance = smooth_kalman_result(system, result, data=data)
+    np.testing.assert_allclose(disturbance.smoothed_states, expected_mean.reshape(5, 2), atol=1e-12)
+    for i in range(5):
+        np.testing.assert_allclose(
+            disturbance.smoothed_covariances[i],
+            expected_cov[2 * i : 2 * i + 2, 2 * i : 2 * i + 2],
+            atol=1e-12,
+        )
     smoothed = smooth_kalman_result(system, result)
     assert smoothed.smoothed_states is not None
     assert smoothed.smoothed_covariances is not None

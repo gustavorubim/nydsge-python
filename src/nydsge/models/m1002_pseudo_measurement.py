@@ -108,6 +108,30 @@ def pseudo_measurement_matrices_ss10(
     epi_t = endo["Epi_t"] - 1
     set_row("Expected10YearRateGap", ttt10[r_t, :] - ttt10[r_f_t, :] - ttt10[epi_t, :])
     set_dd("Expected10YearRateGap", ccc10[r_t] - ccc10[r_f_t] - ccc10[epi_t])
+    if model.subspec == "ss104":
+        econ = ttt10
+        if transitions is not None and reg >= 11:
+            from nydsge.regimes import k_periods_ahead_expected_sums
+
+            econ, _ = k_periods_ahead_expected_sums(
+                transitions, 40, reg=reg, information_set=tuple(range(reg, len(transitions) + 1))
+            )
+            econ = econ / 40
+        set_row("Econometricians10YearRateGap", econ[r_t] - econ[r_f_t] - econ[epi_t])
+        set_dd("Econometricians10YearRateGap", ccc10[r_t] - ccc10[r_f_t] - ccc10[epi_t])
+        for state, coefficient in (("y_t", 1.0), ("z_t", 1.0)):
+            set_zz("PseudoGDP", state, coefficient)
+        for state, coefficient in (("y_t1", -1.0), ("e_gdp_t", 1.0), ("e_gdp_t1", -v("me_level"))):
+            set_zz_aug("PseudoGDP", state, coefficient)
+        set_dd("PseudoGDP", trend_growth)
+        set_zz("PseudoCorePCE", "pi_t", 1.0)
+        for state, coefficient in (
+            ("e_corepce_t", 1.0),
+            ("e_meas_pi_t", 1.0),
+            ("e_meas_pi_t1", -1.0),
+        ):
+            set_zz_aug("PseudoCorePCE", state, coefficient)
+        set_dd("PseudoCorePCE", inflation_trend)
 
     set_zz("NominalFFR", "R_t", 1.0)
     set_dd("NominalFFR", v("Rstarn"))

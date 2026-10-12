@@ -116,7 +116,8 @@ def test_flexible_ait_policy_history_and_gap_initialization(ss104_system):
     assert c.Gamma1[eq["eq_mp"] - 1, state["R_t"] - 1] == 0.9
     maximum = 0.0
     for r in range(5, 30):
-        c = model.regime_snapshot(r).equilibrium_matrices()
+        # Upstream temporary solve freezes predictable equations at regime 5.
+        c = model.regime_snapshot(5 if r < 10 else r).equilibrium_matrices()
         rows = np.all(c.Pi == 0, axis=1)
         n = len(state)
         t = system[r].transition
@@ -162,3 +163,87 @@ def test_expected_ffr_horizons_and_anticipated_shock_handoff(ss104_system):
                 0.2 if 9 <= r <= model.get_setting("cur_model_regime") else 0
             )
     print("Expected FFR ZZ/QQ calibration max error=0 at 1-6Q; n_ant=6")
+
+
+def test_full_ss104_conditional_forecast_workflow(ss104_system):
+    import pandas as pd
+
+    from nydsge.ss104_workflow import forecast_ss104
+
+    model, system = ss104_system
+    dates = pd.period_range("2019Q4", "2026Q3", freq="Q")
+    frame = pd.DataFrame(np.nan, index=dates, columns=list(model.observables))
+    for i, name in enumerate(list(model.observables)[:13]):
+        frame[name] = system[1, "DD"][i] + 0.01 * np.sin(np.arange(len(dates)) + i)
+    frame.loc["2026Q3", "obs_gdp"] = 0.65
+    frame.loc["2026Q3", "obs_corepce"] = 0.70
+    output = forecast_ss104(model, system=system, data=frame, horizon=8, cond_type="full")
+    assert output.states.shape == (7, 110)
+    assert output.observables.shape == (7, 28)
+    assert output.history_states.shape == (27, 110)
+    assert output.conditional_states.shape == (1, 110)
+    assert np.isfinite(output.states).all()
+    assert np.isfinite(output.log_likelihood)
+    gap = model.indexes.endogenous_states["pgap_t"] - 1
+    ygap = model.indexes.endogenous_states["ygap_t"] - 1
+    np.testing.assert_allclose(output.history_states[2, [gap, ygap]], [-0.125, -12], atol=1e-9)
+    # Conditioning with finite conditional errors should pull both channels
+    # toward the supplied nowcast, while allowing nonzero residuals.
+    gdp = model.observables["obs_gdp"] - 1
+    pce = model.observables["obs_corepce"] - 1
+    assert abs(output.conditional_observables[0, gdp] - 0.65) < 0.1
+    assert abs(output.conditional_observables[0, pce] - 0.70) < 0.1
+    with pytest.raises(ValueError, match="require full/semi"):
+        forecast_ss104(model, system=system, data=frame)
+
+
+def test_ss104_presample_anticipated_policy_variances(ss104_system):
+    from nydsge.kalman import model_process_covariances
+
+    model, system = ss104_system
+    covariances = model_process_covariances(model, system, 2, start_date="2008Q3")
+    qq = system[1, "QQ"].copy()
+    ant = [model.indexes.exogenous_shocks[f"rm_shl{h}"] - 1 for h in range(1, 7)]
+    qq[ant, :] = qq[:, ant] = 0
+    r = system[1, "RRR"]
+    np.testing.assert_array_equal(covariances[0], r @ qq @ r.T)
+    np.testing.assert_array_equal(covariances[1], r @ system[1, "QQ"] @ r.T)
+
+
+def test_ss104_source_julia_oracle_parity(ss104_system):
+    from pathlib import Path
+
+    from tools.oracle_julia.compare_ss104 import compare
+
+    model, system = ss104_system
+    report = compare(
+        Path(__file__).parent / "fixtures" / "ss104_default_oracle.h5", model=model, system=system
+    )
+    assert report["metadata"]["dsge_commit"] == "c09dfe881f8809f65b8c0f08a761ec6cc456a6fb"
+    assert len(report["regimes"]) == 29
+    assert len(model.parameters) == 130
+    assert len(model.pseudo_observables) == 26
+    assert report["max_abs"]["parameters"] == 0
+    for errors in report["regimes"].values():
+        for name, error in errors.items():
+            assert error <= (
+                5e-10
+                if name in ("TTT", "RRR", "CCC", "ZZ", "DD", "ZZ_pseudo", "DD_pseudo")
+                else 1e-12
+            ), (
+                name,
+                error,
+            )
+    for name in ("history_loglik", "conditional_loglik"):
+        assert report["workflow"][name]["error"] < 1e-6
+    for name in ("forecast_states_error", "conditional_forecast_states_error"):
+        assert report["workflow"][name] < 1e-6
+    for name in (
+        "forecast_pseudo_observables_error",
+        "conditional_forecast_pseudo_observables_error",
+    ):
+        assert report["workflow"][name] < 1e-6
+    for name in ("forecast_observables_error", "conditional_forecast_observables_error"):
+        assert report["workflow"][name] < 1e-7
+    for name in ("history_smoothed_states_error", "conditional_smoothed_states_error"):
+        assert report["workflow"][name] < 5e-6

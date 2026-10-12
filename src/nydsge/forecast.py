@@ -23,6 +23,7 @@ from nydsge.kalman import (
     pseudo_observables_from_states,
     smooth_kalman_result,
 )
+from nydsge.regimes import RegimeSwitchingSystem
 from nydsge.solve import System, compute_system
 
 
@@ -72,18 +73,55 @@ class _ForecastDataSplit:
 
 
 def forecast_linear_system(
-    system: System,
+    system: System | RegimeSwitchingSystem,
     initial_state: np.ndarray,
     *,
     horizon: int,
     shocks: np.ndarray | None = None,
     include_pseudo: bool = False,
     backend: ArrayBackend | None = None,
+    regime_indices: Sequence[int] | np.ndarray | None = None,
 ) -> ForecastOutput:
     if horizon < 0:
         msg = "Forecast horizon must be nonnegative."
         raise ValueError(msg)
     array_backend = backend or NumpyBackend()
+    if isinstance(system, RegimeSwitchingSystem):
+        period_systems = system.period_systems(regime_indices, horizon)
+        first = system.systems[0]
+        shock_matrix = _normalize_shock_matrix(
+            shocks, horizon=horizon, n_shocks=first.transition.RRR.shape[1]
+        )
+        state = np.asarray(initial_state, dtype=float)
+        if state.shape != (first.transition.TTT.shape[0],):
+            raise ValueError(f"Initial state must have shape {(first.transition.TTT.shape[0],)}.")
+        outputs = []
+        for i, active in enumerate(period_systems):
+            step = forecast_linear_system(
+                active,
+                state,
+                horizon=1,
+                shocks=shock_matrix[i : i + 1],
+                include_pseudo=include_pseudo,
+                backend=array_backend,
+            )
+            outputs.append(step)
+            state = step.states[-1]
+        return ForecastOutput(
+            np.concatenate([o.states for o in outputs]) if outputs else np.zeros((0, len(state))),
+            np.concatenate([o.observables for o in outputs])
+            if outputs
+            else np.zeros((0, first["ZZ"].shape[0])),
+            (
+                np.concatenate([o.pseudo_observables for o in outputs])
+                if outputs
+                else np.zeros((0, first["ZZ_pseudo"].shape[0]))
+            )
+            if include_pseudo
+            else None,
+        )
+    if regime_indices is not None:
+        raise ValueError("regime_indices requires a RegimeSwitchingSystem.")
     state = np.asarray(initial_state, dtype=np.float64)
     transition = system.transition
     measurement = system.measurement
@@ -745,6 +783,21 @@ def forecast_one(
     seed: int | None = None,
     sampler: MetropolisHastingsResult | None = None,
 ) -> ForecastOutput:
+    if model.spec == "m1002" and model.subspec == "ss104":
+        if input_type != "mode" or draws or sampler is not None or shock_samples is not None:
+            raise NotPortedError("ss104 supports fixed-parameter mode forecasts only.")
+        from nydsge.ss104_workflow import forecast_ss104
+
+        return forecast_ss104(
+            model,
+            data=data,
+            horizon=horizon,
+            cond_type=cond_type,
+            initial_state=initial_state,
+            shocks=shocks,
+            history_method=history_method,
+            conditional_periods=conditional_periods,
+        )
     if model.spec == "m1002" and model.subspec == "ss10":
         if input_type not in {"mode", "full"}:
             msg = (

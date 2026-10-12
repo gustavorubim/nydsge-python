@@ -18,6 +18,7 @@ build/
 *.npy
 *.h5
 *.hdf5
+!tests/fixtures/ss104_default_oracle.h5
 *.jld
 *.jld2
 tests/fixtures/oracle/*.csv
