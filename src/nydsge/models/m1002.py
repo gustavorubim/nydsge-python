@@ -547,6 +547,9 @@ class Model1002(DSGEModel):
             initialize_covid(self)
             initialize_inflation_error(self)
             initialize_policy(self)
+            from nydsge.models.ss104 import initialize_expected_rates
+
+            initialize_expected_rates(self)
         self._init_index_maps()
         self._init_steady_state_placeholders()
 
@@ -740,6 +743,13 @@ class Model1002(DSGEModel):
                 for index in range(1, int(self.get_setting("n_anticipated_obs_gdp", 1)) + 1)
             )
         self.set_setting("forward_looking_observables", forward_looking)
+        if self.subspec == "ss104":
+            # DSGE.jl sets this list before appending SPD rows. Those rows use
+            # expectations under the imperfect-awareness system itself.
+            self.set_setting(
+                "forward_looking_observables",
+                [name for name in forward_looking if not name.startswith("obs_exp_nominalrate")],
+            )
 
     def _move_observable_to_edge(self, setting_name: str, *, first: bool) -> None:
         observable_name = self.get_setting(setting_name, None)
@@ -1188,6 +1198,10 @@ class Model1002(DSGEModel):
                 "remove_rm_t_shocks": 8,
                 "remove_pistar_shocks": 5,
                 "ss104_policy": True,
+                "add_anticipated_obs_gdp": True,
+                "n_anticipated_obs_gdp": 1,
+                "filename_anticipated_obs_gdp": "MEDIANANTGDP",
+                "meas_err_anticipated_obs_gdp": 1.0,
                 "expected_ffr": (1, 2, 3, 4, 5, 6),
                 "all_ffr_qs": (1, 2, 3, 4, 5, 6),
                 "add_iid_cond_obs_gdp_meas_err": True,

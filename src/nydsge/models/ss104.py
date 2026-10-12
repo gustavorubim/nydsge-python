@@ -367,10 +367,10 @@ def compute_ss104_system(model, *, method="auto"):
             for r, (m, t) in enumerate(zip(snapshots, augmented, strict=True), 1)
         )
         perfect.append((path, systems))
-    systems = []
+    realized = []
     for r, m in enumerate(models, 1):
         if r < 5:
-            systems.append(perfect[0][1][r - 1])
+            realized.append(perfect[0][1][r - 1].transition)
             continue
         pair = 8 if r == 5 else 6 if r <= 7 else 4 if r == 8 else 2 if r == 9 else 0
         weight = model.get_setting("credibility")[r]
@@ -385,7 +385,20 @@ def compute_ss104_system(model, *, method="auto"):
                 np.linalg.solve(lhs, p.C - p.Gamma2 @ (weight * a.CCC + (1 - weight) * b.CCC)),
             )
         )
-        meas = m.measurement_matrices(transition)
+        realized.append(transition)
+    systems = []
+    for r, (m, transition) in enumerate(zip(models, realized, strict=True), 1):
+        if r < 5:
+            systems.append(perfect[0][1][r - 1])
+            continue
+        pair = 8 if r == 5 else 6 if r <= 7 else 4 if r == 8 else 2 if r == 9 else 0
+        weight = model.get_setting("credibility")[r]
+        meas = m.measurement_matrices(
+            transition,
+            transitions=realized,
+            reg=r,
+            information_set=model.get_setting("tvis_information_set")[r - 1],
+        )
         zz, dd = meas.ZZ.copy(), meas.DD.copy()
         for name in model.get_setting("forward_looking_observables"):
             i = model.observables[name] - 1
@@ -420,3 +433,15 @@ def initialize_gap_observations(model, observations):
         if date in result.index:
             result.loc[date, f"obs_{gap}"] = -float(model.get_setting(f"{gap}_value"))
     return result
+
+
+def initialize_expected_rates(model) -> None:
+    model._add_parameter_from_spec("rho_exp_rm")
+    values, mapping = model.get_setting("parameter_regimes"), model.get_setting("model2para_regime")
+    for horizon in range(1, 7):
+        name = f"sigma_exp_rm{horizon}"
+        if name not in model.parameters:
+            continue
+        p = model.parameters[name]
+        values[name] = {1: replace(p, value=0.0, fixed=True), 2: replace(p, fixed=False)}
+        mapping[name] = {r: 1 if r < 10 else 2 for r in model.get_setting("regime_dates")}

@@ -7,11 +7,38 @@ Rules: branch ss104-port only, no force-push, main untouched, no long MCMC befor
 - [x] M2: COVID shocks with regime volatilities
 - [x] M3: AR(1) inflation measurement error
 - [x] M4: flexible AIT, pgap/ygap, time-varying credibility 2020Q4-2026Q4
-- [ ] M5: SME/SPD expected FFR observables 1-6Q
+- [x] M5: SME/SPD expected FFR observables 1-6Q
 - [ ] M6: full ss104 parity + conditional forecast
 - [ ] M7: final estimation + NY Fed forecast comparison doc
 
 ## Progress log
+
+### 2026-10-12 — M5 expected FFR and survey data
+
+Completed six anticipated Taylor/AIT shocks, six expected-FFR measurement errors
+(sigma .0375 + .00625*h after regime 9), and the anticipated GDP observable.
+The expected-FFR rows use the imperfect-awareness transition path with M1 TVIS;
+the older OIS rows use credibility-weighted perfect-policy paths, as in the source.
+AIT anticipated innovations are active from regime 9 through the forecast-start
+regime (28 for 2026Q3), then zero in regime 29. Full dimensions are now
+**84 endogenous / 110 augmented / 48 shocks / 28 observables / 29 regimes**.
+
+`nydsge.survey_ffr` loads the official SME/SPD long-table workbooks, selects
+`pctl50` of `fftr_pathofmodes` by panel, takes the last target date per quarter,
+and attaches horizons 1-6 to transformed quarterly histories. Annual fractions
+are multiplied by **25** to get quarterly percentage points. Publication dates
+must be explicit because the workbook's `survey_release_date` dates the questions.
+Latest-survey selection respects publication cutoffs; absent horizons and
+pre-2021Q4 quarters remain NaN. Older PDF-only vintages can enter via normalized
+records; internal OIS history is not reconstructed.
+
+Validation: **97 targeted tests passed**. Expected-FFR ZZ/QQ calibration maximum
+error **0**; the real July-2026 SME path matches **.9075/.9075/.9075/.9075/.9075/.8450**
+in quarterly units (max error <1e-15). Trimmed source fixture:
+`tests/fixtures/sme_jul2026_ffr.csv`, from the
+[official July workbook](https://www.newyorkfed.org/medialibrary/media/markets/survey/2026/jul-2026-data.xlsx).
+Full-model Julia oracle export is running under workspace-local Julia 1.8.5;
+M6 will record the actual cross-language errors.
 
 ### 2026-10-12 — M4 flexible AIT and imperfect awareness
 

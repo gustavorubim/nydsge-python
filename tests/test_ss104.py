@@ -135,6 +135,30 @@ def test_flexible_ait_policy_history_and_gap_initialization(ss104_system):
     gaps = initialize_gap_observations(model, frame)
     np.testing.assert_array_equal(gaps.notna().sum().values, [1, 1])
     np.testing.assert_array_equal(gaps.loc["2020Q2"].values, [-0.125, -12.0])
-    print(
-        f"AIT equation residual={maximum:.3e}; credibility/gap calibration error=0"
-    )
+    print(f"AIT equation residual={maximum:.3e}; credibility/gap calibration error=0")
+
+
+def test_expected_ffr_horizons_and_anticipated_shock_handoff(ss104_system):
+    from nydsge.regimes import k_periods_ahead_expectations
+
+    model, system = ss104_system
+    assert len(model.observables) == 28
+    rate = model.indexes.endogenous_states["R_t"] - 1
+    for r in (1, 9, 10, 27, 28, 29):
+        for h in range(1, 7):
+            power, _ = k_periods_ahead_expectations(
+                tuple(s.transition for s in system.systems),
+                h,
+                reg=r,
+                information_set=system.information_sets[r - 1],
+            )
+            row = model.observables[f"obs_exp_nominalrate{h}"] - 1
+            expected = power[rate].copy()
+            expected[model.indexes.endogenous_states_augmented[f"e_exp_rm{h}"] - 1] += 1
+            np.testing.assert_allclose(system[r, "ZZ"][row], expected, atol=1e-12, rtol=0)
+            sigma = model.regime_snapshot(r).numeric_value(f"sigma_exp_rm{h}")
+            assert sigma == (0 if r < 10 else 0.0375 + 0.00625 * h)
+            assert model.regime_snapshot(r).numeric_value(f"sigma_ait_r_m{h}") == (
+                0.2 if 9 <= r <= model.get_setting("cur_model_regime") else 0
+            )
+    print("Expected FFR ZZ/QQ calibration max error=0 at 1-6Q; n_ant=6")

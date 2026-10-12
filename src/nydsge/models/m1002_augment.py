@@ -90,6 +90,8 @@ def augment_transition_ss10(model: Any, transition: Transition) -> Transition:
     if model.subspec == "ss104":
         rrr_aug[row("e_meas_pi_t"), shock("meas_pi_sh")] = 1.0
     for horizon in _expected_ffr_horizons(model):
+        if model.subspec == "ss104":
+            ttt_aug[row(f"e_exp_rm{horizon}"), row(f"e_exp_rm{horizon}")] = v("rho_exp_rm")
         rrr_aug[row(f"e_exp_rm{horizon}"), shock(f"exp_rm_sh{horizon}")] = 1.0
     if model._is_setting_enabled("add_iid_cond_obs_gdp_meas_err"):
         rrr_aug[row("e_condgdp_t"), shock("condgdp_sh")] = 1.0
