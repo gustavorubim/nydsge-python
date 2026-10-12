@@ -1514,7 +1514,31 @@ class Model1002(DSGEModel):
         return self.steady_state
 
     def steadystate(self) -> OrderedDict[str, float]:
-        return self.compute_steady_state()
+        # A regime solve builds many policy paths at the same parameter values.
+        # Cache only on this model; parameter updates always invalidate the key.
+        key = tuple(
+            self.numeric_value(name)
+            for name in (
+                "Fomega",
+                "Phi",
+                "Upsilon",
+                "alpha",
+                "beta",
+                "delta",
+                "g_star",
+                "gamma",
+                "gamma_star",
+                "lambda_w",
+                "pi_star",
+                "sigma_c",
+                "spr",
+                "zeta_spb",
+            )
+        )
+        if getattr(self, "_steady_state_key", None) != key:
+            self.compute_steady_state()
+            self._steady_state_key = key
+        return self.steady_state
 
     def equilibrium_matrices(self) -> CanonicalSystem:
         if self.subspec not in {"ss10", "ss104"}:

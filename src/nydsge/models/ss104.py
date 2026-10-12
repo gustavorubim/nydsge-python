@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import replace
 
 import pandas as pd
@@ -235,7 +235,7 @@ def policy_canonical(model):
     from nydsge.models.m1002_eqcond import equilibrium_matrices_ss10
 
     model.steadystate()
-    model = deepcopy(model)
+    model = _policy_snapshot(model)
     model.set_setting("apply_ss104_policy", False)
     c = equilibrium_matrices_ss10(model)
     reg = model.get_setting("model_regime", 1)
@@ -298,6 +298,15 @@ def policy_canonical(model):
     return c
 
 
+def _policy_snapshot(model):
+    """Copy mutable policy/parameter/steady-state tables, sharing read-only indexes."""
+    snapshot = copy(model)
+    snapshot.settings = model.settings.copy()
+    snapshot.parameters = model.parameters.copy()
+    snapshot.steady_state = model.steady_state.copy()
+    return snapshot
+
+
 def compute_ss104_system(model, *, method="auto"):
     """Perfect-policy paths plus imperfect-awareness equations and measurement mixtures."""
     import numpy as np
@@ -326,15 +335,15 @@ def compute_ss104_system(model, *, method="auto"):
     )
     perfect = []
     solved_cache = {}
-    for last_zlb, terminal_policy in scenarios:
-        snapshots = deepcopy(models)
+    for scenario, (last_zlb, terminal_policy) in enumerate(scenarios):
+        snapshots = tuple(_policy_snapshot(m) for m in models)
         canonicals = []
         for r, m in enumerate(snapshots, 1):
             m.set_setting(
                 "policy", "taylor" if r < 5 else "zlb" if r <= last_zlb else terminal_policy
             )
             canonicals.append(m.equilibrium_matrices())
-        path = [None] * 29
+        solved_path = {}
         for r, c in enumerate(canonicals, 1):
             if 5 <= r <= last_zlb:
                 continue
@@ -344,9 +353,10 @@ def compute_ss104_system(model, *, method="auto"):
                 if result.eu != (1, 1):
                     raise ValueError(f"ss104 permanent policy failed in regime {r}: {result.eu}")
                 solved_cache[key] = result.transition
-            path[r - 1] = solved_cache[key]
-        path[4:last_zlb] = gensys2(canonicals[4:last_zlb], path[last_zlb])[:-1]
-        path = tuple(path)
+            solved_path[r - 1] = solved_cache[key]
+        temporary = gensys2(canonicals[4:last_zlb], solved_path[last_zlb])[:-1]
+        solved_path.update(enumerate(temporary, start=4))
+        path = tuple(solved_path[r] for r in range(29))
         augmented = tuple(m.augment_transition(t) for m, t in zip(snapshots, path, strict=True))
         # The actual path uses ss104's shortened TVIS; alternative paths see their entire future.
         infos = (
@@ -354,8 +364,21 @@ def compute_ss104_system(model, *, method="auto"):
             if not perfect
             else tuple(tuple(range(r, 30)) if r >= 5 else (r,) for r in range(1, 30))
         )
-        systems = tuple(
-            System(
+        # Only the realized belief pair's measurements are consumed below.
+        # Keep every transition in each path for forward expectations.
+        needed = {
+            r
+            for r in range(5, 30)
+            if scenario
+            in (
+                (pair := 8 if r == 5 else 6 if r <= 7 else 4 if r == 8 else 2 if r == 9 else 0),
+                pair + 1,
+            )
+        }
+        if scenario == 0:
+            needed.update(range(1, 5))
+        measurements = {
+            r: System(
                 t,
                 m.measurement_matrices(
                     t, transitions=augmented, reg=r, information_set=infos[r - 1]
@@ -365,12 +388,13 @@ def compute_ss104_system(model, *, method="auto"):
                 ),
             )
             for r, (m, t) in enumerate(zip(snapshots, augmented, strict=True), 1)
-        )
-        perfect.append((path, systems))
+            if r in needed
+        }
+        perfect.append((path, measurements))
     realized = []
     for r, m in enumerate(models, 1):
         if r < 5:
-            realized.append(perfect[0][1][r - 1].transition)
+            realized.append(perfect[0][1][r].transition)
             continue
         pair = 8 if r == 5 else 6 if r <= 7 else 4 if r == 8 else 2 if r == 9 else 0
         weight = model.get_setting("credibility")[r]
@@ -393,7 +417,7 @@ def compute_ss104_system(model, *, method="auto"):
     systems = []
     for r, (m, transition) in enumerate(zip(models, realized, strict=True), 1):
         if r < 5:
-            systems.append(perfect[0][1][r - 1])
+            systems.append(perfect[0][1][r])
             continue
         pair = 8 if r == 5 else 6 if r <= 7 else 4 if r == 8 else 2 if r == 9 else 0
         weight = model.get_setting("credibility")[r]
@@ -407,17 +431,18 @@ def compute_ss104_system(model, *, method="auto"):
         for name in model.get_setting("forward_looking_observables"):
             i = model.observables[name] - 1
             zz[i] = (
-                weight * perfect[pair][1][r - 1]["ZZ"][i]
-                + (1 - weight) * perfect[pair + 1][1][r - 1]["ZZ"][i]
+                weight * perfect[pair][1][r]["ZZ"][i]
+                + (1 - weight) * perfect[pair + 1][1][r]["ZZ"][i]
             )
             dd[i] = (
-                weight * perfect[pair][1][r - 1]["DD"][i]
-                + (1 - weight) * perfect[pair + 1][1][r - 1]["DD"][i]
+                weight * perfect[pair][1][r]["DD"][i]
+                + (1 - weight) * perfect[pair + 1][1][r]["DD"][i]
             )
         pa, pb = (
-            perfect[pair][1][r - 1].pseudo_measurement,
-            perfect[pair + 1][1][r - 1].pseudo_measurement,
+            perfect[pair][1][r].pseudo_measurement,
+            perfect[pair + 1][1][r].pseudo_measurement,
         )
+        assert pa is not None and pb is not None
         pseudo = PseudoMeasurement(
             weight * pa.ZZ_pseudo + (1 - weight) * pb.ZZ_pseudo,
             weight * pa.DD_pseudo + (1 - weight) * pb.DD_pseudo,

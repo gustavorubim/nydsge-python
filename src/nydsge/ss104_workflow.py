@@ -18,6 +18,30 @@ from nydsge.regimes import regime_indices_from_dates
 from nydsge.solve import compute_system
 
 
+def prepare_ss104_observations(model, data):
+    """Apply the same dated gap initialization and historical ZLB masks for fitting/forecasting."""
+    if not isinstance(data, pd.DataFrame):
+        raise TypeError("ss104 history requires a dated pandas DataFrame.")
+    frame = data.copy()
+    frame.index = pd.PeriodIndex(frame.pop("date") if "date" in frame else frame.index, freq="Q")
+    if frame.index.has_duplicates or not frame.index.is_monotonic_increasing:
+        raise ValueError("History quarters must be unique and ordered.")
+    if len(frame) and not frame.index.equals(
+        pd.period_range(frame.index[0], frame.index[-1], freq="Q")
+    ):
+        raise ValueError("History must have a contiguous quarterly grid; use NaN for missing data.")
+    frame = initialize_gap_observations(model, frame)
+    zlb = (frame.index >= pd.Period("2020Q4", freq="Q")) & (
+        frame.index <= pd.Period("2021Q4", freq="Q")
+    )
+    rates = ["obs_nominalrate", *(f"obs_nominalrate{i}" for i in range(1, 7))]
+    frame.loc[zlb, [name for name in rates if name in frame]] = np.nan
+    missing = set(model.observables) - set(frame)
+    if missing:
+        raise ValueError(f"Missing transformed observable columns: {sorted(missing)}")
+    return frame.loc[:, list(model.observables)]
+
+
 def forecast_ss104(
     model,
     *,
@@ -54,33 +78,9 @@ def forecast_ss104(
     likelihood = None
     count_cond = 0
     if data is not None:
-        if not isinstance(data, pd.DataFrame):
-            raise TypeError("ss104 history requires a dated pandas DataFrame.")
-        frame = data.copy()
-        frame.index = pd.PeriodIndex(
-            frame.pop("date") if "date" in frame else frame.index, freq="Q"
-        )
-        if frame.index.has_duplicates or not frame.index.is_monotonic_increasing:
-            raise ValueError("History quarters must be unique and ordered.")
+        frame = prepare_ss104_observations(model, data)
         if frame.empty or frame.index[-1] < forecast_start - 1:
             raise ValueError("History must reach the quarter preceding forecast start.")
-        if len(frame) and not frame.index.equals(
-            pd.period_range(frame.index[0], frame.index[-1], freq="Q")
-        ):
-            raise ValueError(
-                "History must have a contiguous quarterly grid; use NaN for missing data."
-            )
-        frame = initialize_gap_observations(model, frame)
-        # DSGE.jl post_covid_data_mods!: actual rates/OIS are not observations
-        # while the historical temporary rule mechanically fixes the FFR.
-        zlb = (frame.index >= pd.Period("2020Q4", freq="Q")) & (
-            frame.index <= pd.Period("2021Q4", freq="Q")
-        )
-        rate_rows = ["obs_nominalrate", *(f"obs_nominalrate{i}" for i in range(1, 7))]
-        frame.loc[zlb, [name for name in rate_rows if name in frame]] = np.nan
-        missing = set(model.observables) - set(frame)
-        if missing:
-            raise ValueError(f"Missing transformed observable columns: {sorted(missing)}")
         count_cond = int((frame.index >= forecast_start).sum())
         if conditional_periods is not None and count_cond != conditional_periods:
             raise ValueError("conditional_periods disagrees with dated data.")
