@@ -9,6 +9,12 @@ from nydsge.regimes import regime_indices_from_dates
 from nydsge.solve import compute_system
 
 
+@pytest.fixture(scope="module")
+def ss104_system():
+    model = Model1002("ss104")
+    return model, compute_system(model)
+
+
 def test_covid_calibration_and_proportional_anticipation():
     model = Model1002("ss104")
     for reg, expected in (
@@ -30,9 +36,8 @@ def test_covid_calibration_and_proportional_anticipation():
         model.regime_snapshot(30)
 
 
-def test_covid_equations_and_regime_filter():
-    model = Model1002("ss104")
-    system = compute_system(model)
+def test_covid_equations_and_regime_filter(ss104_system):
+    model, system = ss104_system
     assert len(system.systems) == 29
     max_residual = 0.0
     for reg in range(1, 30):
@@ -56,6 +61,8 @@ def test_covid_equations_and_regime_filter():
         ["2019Q4", "2020Q1", "2020Q2", "2020Q3", "2020Q4", "2021Q1"],
     )
     data = np.tile(system[1, "DD"], (len(path), 1))
+    data[:, 13:] = np.nan
+    data[np.asarray(path) >= 5, model.observables["obs_nominalrate"] - 1] = np.nan
     filtered = kalman_log_likelihood(system, data, regime_indices=path)
     smooth = smooth_kalman_result(system, filtered)
     assert np.isfinite(filtered.log_likelihood)
@@ -63,9 +70,8 @@ def test_covid_equations_and_regime_filter():
     print(f"COVID canonical residual={max_residual:.3e}; QQ max error=0")
 
 
-def test_inflation_error_ar1_differenced_measurement_and_regime_boundaries():
-    model = Model1002("ss104")
-    system = compute_system(model)
+def test_inflation_error_ar1_differenced_measurement_and_regime_boundaries(ss104_system):
+    model, system = ss104_system
     state = model.indexes.endogenous_states_augmented["e_meas_pi_t"] - 1
     lag = model.indexes.endogenous_states_augmented["e_meas_pi_t1"] - 1
     shock = model.indexes.exogenous_shocks["meas_pi_sh"] - 1
@@ -90,3 +96,45 @@ def test_inflation_error_ar1_differenced_measurement_and_regime_boundaries():
         actual, [1, 0.232 - 1, 0.232**2 - 0.232, 0.232**3 - 0.232**2], atol=1e-15, rtol=0
     )
     print("Inflation AR/ZZ/QQ calibration max error=0; impulse max error<1e-15")
+
+
+def test_flexible_ait_policy_history_and_gap_initialization(ss104_system):
+    import pandas as pd
+
+    from nydsge.models.ss104 import initialize_gap_observations
+
+    model, system = ss104_system
+    rho = np.exp(np.log(0.5) / 10)
+    assert model.get_setting("credibility")[5] == 0
+    assert model.get_setting("credibility")[17] == 0.5
+    assert model.get_setting("credibility")[29] == 1
+    m = model.regime_snapshot(29)
+    c = m.equilibrium_matrices()
+    eq, state = m.indexes.equilibrium_conditions, m.indexes.endogenous_states
+    assert c.Gamma0[eq["eq_mp"] - 1, state["pgap_t"] - 1] == pytest.approx(-4 * (1 - rho) * 0.1)
+    assert c.Gamma0[eq["eq_mp"] - 1, state["ygap_t"] - 1] == pytest.approx(-3 * (1 - rho) * 0.1)
+    assert c.Gamma1[eq["eq_mp"] - 1, state["R_t"] - 1] == 0.9
+    maximum = 0.0
+    for r in range(5, 30):
+        c = model.regime_snapshot(r).equilibrium_matrices()
+        rows = np.all(c.Pi == 0, axis=1)
+        n = len(state)
+        t = system[r].transition
+        maximum = max(
+            maximum,
+            np.max(np.abs((c.Gamma0 @ t.TTT[:n, :n] - c.Gamma1)[rows])),
+            np.max(np.abs((c.Gamma0 @ t.RRR[:n] - c.Psi)[rows])),
+            np.max(np.abs((c.Gamma0 @ t.CCC[:n] - c.C)[rows])),
+        )
+    assert maximum < 1e-9
+    for r in range(5, 10):
+        i = state["R_t"] - 1
+        np.testing.assert_allclose(system[r, "TTT"][i], 0, atol=1e-10)
+        assert system[r, "CCC"][i] + model.numeric_value("Rstarn") == pytest.approx(0.025)
+    frame = pd.DataFrame(index=pd.period_range("2020Q1", "2020Q4", freq="Q"))
+    gaps = initialize_gap_observations(model, frame)
+    np.testing.assert_array_equal(gaps.notna().sum().values, [1, 1])
+    np.testing.assert_array_equal(gaps.loc["2020Q2"].values, [-0.125, -12.0])
+    print(
+        f"AIT equation residual={maximum:.3e}; credibility/gap calibration error=0"
+    )

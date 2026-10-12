@@ -100,6 +100,8 @@ def test_one_regime_is_bit_identical_to_existing_model_solver_filter_and_smoothe
     for name in ("TTT", "RRR", "CCC"):
         np.testing.assert_array_equal(getattr(t, name), getattr(old_t, name))
     data = np.random.default_rng(1).normal(size=(8, existing["ZZ"].shape[0]))
+    if subspec == "ss104":
+        data[:, 13:] = np.nan
     data[1, 2] = np.nan
     data[3] = np.nan
     for process in (
@@ -211,6 +213,8 @@ def test_model1002_temporary_policy_snapshot_uses_gensys2_and_augmentation():
     assert system[1, "CCC"][state] == pytest.approx(0.025 - zlb.numeric_value("Rstarn"))
     assert system[1, "TTT"].shape[0] > len(zlb.indexes.endogenous_states)
     data = np.repeat(system[1, "DD"][None], 3, axis=0)
+    data[:, 13:] = np.nan
+    data[:, zlb.observables["obs_nominalrate"] - 1] = np.nan
     result = kalman_log_likelihood(system, data, regime_indices=[1, 2, 2])
     assert np.isfinite(result.log_likelihood)
 

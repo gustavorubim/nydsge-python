@@ -6,12 +6,33 @@ Rules: branch ss104-port only, no force-push, main untouched, no long MCMC befor
 - [x] M1: regime-switching solve (gensys per regime + gensys2 for temporary ZLB/alt policy), regime-aware Kalman filter/smoother, time-varying information sets
 - [x] M2: COVID shocks with regime volatilities
 - [x] M3: AR(1) inflation measurement error
-- [ ] M4: flexible AIT, pgap/ygap, time-varying credibility 2020Q4-2026Q4
+- [x] M4: flexible AIT, pgap/ygap, time-varying credibility 2020Q4-2026Q4
 - [ ] M5: SME/SPD expected FFR observables 1-6Q
 - [ ] M6: full ss104 parity + conditional forecast
 - [ ] M7: final estimation + NY Fed forecast comparison doc
 
 ## Progress log
+
+### 2026-10-12 — M4 flexible AIT and imperfect awareness
+
+Added pgap/ygap, AIT shock plus six anticipated AIT shocks, phi_pi=4,
+phi_y=3, rho_smooth=.9 and half-life 10 (rho=.9330329915368074).
+The GDP-gap equation uses lagged-output coefficient **-1** as in the source.
+The initialization API inserts **-.125/-12** in 2020Q2 only, with sigma 20
+initialization innovations in that regime. Actual ZLB regimes 5-9 precede AIT;
+credibility increases from 0 to 1 over regimes 5-29 (2020Q4-2026Q4).
+M1's predictable-form/gensys2 machinery solves ten perfect-policy paths;
+imperfect-awareness equations use their weighted future transitions. Historical
+SPD beliefs switch among liftoff regimes 19, 16, 15, 11 and 10. Forward measurements
+use complete belief paths, with the actual policy's TVIS shortened at regime 10.
+Taylor and pi-star innovations are removed at regimes 8 and 5 respectively.
+
+Validation: **94 targeted tests passed**. All non-expectational TTT/RRR/CCC
+equation residuals: maximum **2.487e-14**; credibility/gap calibration maximum
+error **0**; all five ZLB nominal rates equal **.025 quarterly**.
+Full default-parameter Julia parity remains M6's gate. The lean Julia setup
+also found ModelConstructors/FillArrays incompatible with Julia 1.11/1.12;
+a workspace-local Julia 1.8.5 is being used with the existing pinned manifest.
 
 ### 2026-10-12 — M3 inflation measurement error
 

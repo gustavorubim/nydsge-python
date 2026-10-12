@@ -495,6 +495,15 @@ def compute_system(
     del verbose
     from nydsge.regimes import compute_model_regime_system
 
+    if (
+        regime_models is None
+        and model.subspec == "ss104"
+        and model.get_setting("regime_switching")
+        and model.get_setting("ss104_policy")
+    ):
+        from nydsge.models.ss104 import compute_ss104_system
+
+        return compute_ss104_system(model, method=method)
     if regime_models is None:
         regime_models = model.get_setting("regime_models")
     if regime_models is None and model.subspec == "ss104" and model.get_setting("regime_switching"):

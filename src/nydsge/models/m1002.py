@@ -538,10 +538,15 @@ class Model1002(DSGEModel):
         self._init_pseudo_observable_mappings()
         self._init_parameters()
         if self.subspec == "ss104":
-            from nydsge.models.ss104 import initialize_covid, initialize_inflation_error
+            from nydsge.models.ss104 import (
+                initialize_covid,
+                initialize_inflation_error,
+                initialize_policy,
+            )
 
             initialize_covid(self)
             initialize_inflation_error(self)
+            initialize_policy(self)
         self._init_index_maps()
         self._init_steady_state_placeholders()
 
@@ -966,6 +971,9 @@ class Model1002(DSGEModel):
             endogenous_states.append("ygap_t")
         if self._is_setting_enabled("add_ait_rm"):
             endogenous_states.append("ait_rm_t")
+            endogenous_states.extend(
+                f"rm_ait_tl{i}" for i in self.get_setting("mon_anticipated_ait_shocks", ())
+            )
         exogenous_shocks = [
             "g_sh",
             "b_sh",
@@ -988,6 +996,9 @@ class Model1002(DSGEModel):
         ] + [f"rm_shl{i}" for i in range(1, n_ant + 1)]
         if self._is_setting_enabled("add_ait_rm"):
             exogenous_shocks.append("rm_ait_sh")
+            exogenous_shocks.extend(
+                f"rm_ait_shl{i}" for i in self.get_setting("mon_anticipated_ait_shocks", ())
+            )
         for key, value in antshocks.items():
             exogenous_shocks.extend(f"{key}_shl{i}" for i in range(1, value + 1))
         if self.subspec == "ss104":
@@ -1082,6 +1093,9 @@ class Model1002(DSGEModel):
             equilibrium_conditions.append("eq_Rref")
         if self._is_setting_enabled("add_ait_rm"):
             equilibrium_conditions.append("eq_ait_rm")
+            equilibrium_conditions.extend(
+                f"eq_ait_rml{i}" for i in self.get_setting("mon_anticipated_ait_shocks", ())
+            )
         if self._has_pgap_state():
             equilibrium_conditions.append("eq_pgap")
         if self._has_ygap_state():
@@ -1154,7 +1168,26 @@ class Model1002(DSGEModel):
         if subspec == "ss104":
             return {
                 "date_forecast_start": "2026-Q3",
+                "standard_shocks_spread_adjust": 2.0,
                 "antshocks": {"biidc": 1, "phi": 1, "ziid": 1},
+                "add_altpolicy_pgap": True,
+                "add_altpolicy_ygap": True,
+                "add_initialize_pgap_ygap_pseudoobs": True,
+                "add_ait_rm": True,
+                "add_taylor_rm": True,
+                "mon_anticipated_ait_shocks": (1, 2, 3, 4, 5, 6),
+                "ait_Thalf": 10.0,
+                "gdp_Thalf": 10.0,
+                "pgap_type": "flexible_ait",
+                "ygap_type": "flexible_ait",
+                "pgap_value": 0.125,
+                "ygap_value": 12.0,
+                "flexible_ait_phi_pi": 4.0,
+                "flexible_ait_phi_y": 3.0,
+                "flexible_ait_rho_smooth": 0.9,
+                "remove_rm_t_shocks": 8,
+                "remove_pistar_shocks": 5,
+                "ss104_policy": True,
                 "expected_ffr": (1, 2, 3, 4, 5, 6),
                 "all_ffr_qs": (1, 2, 3, 4, 5, 6),
                 "add_iid_cond_obs_gdp_meas_err": True,

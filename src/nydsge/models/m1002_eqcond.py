@@ -11,6 +11,10 @@ from nydsge.solve import CanonicalSystem
 
 def equilibrium_matrices_ss10(model: Any) -> CanonicalSystem:
     """Build default Model1002 ss10 canonical matrices translated from eqcond.jl."""
+    if model.subspec == "ss104" and model.get_setting("apply_ss104_policy", True):
+        from nydsge.models.ss104 import policy_canonical
+
+        return policy_canonical(model)
     model.steadystate()
     endo = model.indexes.endogenous_states
     exo = model.indexes.exogenous_shocks

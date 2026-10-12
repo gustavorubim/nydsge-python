@@ -169,6 +169,10 @@ def measurement_matrices_ss10(
         set_qq(shock_name, v(sigma_name) ** 2)
     if model.subspec == "ss104":
         set_qq("meas_pi_sh", v("sigma_meas_pi") ** 2)
+        if model.get_setting("add_ait_rm"):
+            set_qq("rm_ait_sh", v("sigma_ait_rm") ** 2)
+            for horizon in model.get_setting("mon_anticipated_ait_shocks", ()):
+                set_qq(f"rm_ait_shl{horizon}", v(f"sigma_ait_r_m{horizon}") ** 2)
         for key in ("ziid", "biidc", "phi"):
             set_qq(f"{key}_sh", v(f"sigma_{key}") ** 2)
             for horizon in range(1, model._anticipated_shock_settings().get(key, 0) + 1):
