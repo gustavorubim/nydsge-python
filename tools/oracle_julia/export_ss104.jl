@@ -5,44 +5,7 @@
 using DSGE, HDF5, JSON, Dates, LinearAlgebra
 length(ARGS) == 3 || error("Expected DSGE_ROOT SSR_ROOT OUT_H5")
 dsge_root, ssr_root, output = abspath.(ARGS)
-LinearAlgebra.BLAS.set_num_threads(1)
-function overlay(relative; skip_types = false)
-    path = joinpath(dsge_root, "src", relative)
-    code = read(path, String)
-    if skip_types
-        # Filter parsed definitions, including @doc wrappers, without matching
-        # type examples inside docstrings.
-        function filter_types(expr)
-            expr isa Expr || return expr
-            if expr.head in (:struct, :abstract)
-                return nothing
-            elseif expr.head == :macrocall && expr.args[end] isa Expr &&
-                   expr.args[end].head in (:struct, :abstract)
-                return nothing
-            end
-            return expr
-        end
-        Base.include_string(filter_types, DSGE, code, path)
-    else
-        Base.include_string(DSGE, code, path)
-    end
-end
-overlay("abstractdsgemodel.jl"; skip_types=true)
-overlay("defaults.jl")
-overlay("util.jl"; skip_types=true)
-overlay("statespace/util.jl"; skip_types=true)
-for file in ("gensys.jl", "gensys2.jl", "gensys_uncertain_altpol.jl", "gensys2_uncertain_altpol.jl", "solve.jl")
-    overlay("solve/" * file)
-end
-for file in ("default_policy.jl", "flexible_ait.jl", "zlb_rule.jl")
-    overlay("altpolicy/" * file)
-end
-for file in ("m1002.jl", "observables.jl", "pseudo_observables.jl", "subspecs_builder.jl", "subspecs.jl", "eqcond.jl", "augment_states.jl", "measurement.jl", "pseudo_measurement.jl")
-    overlay("models/representative/m1002/" * file; skip_types=file == "m1002.jl")
-end
-overlay("statespace/statespace_functions.jl")
-overlay("forecast/forecast.jl")
-println("Loaded reference economic and policy methods")
+include(joinpath(@__DIR__, "ss104_reference.jl"))
 m = DSGE.Model1002("ss104"; custom_settings=[
     DSGE.Setting(:date_forecast_start, Date(2026,9,30)),
     DSGE.Setting(:date_conditional_end, Date(2026,9,30)),
@@ -52,21 +15,6 @@ println("Model dimensions: ", DSGE.n_states(m), " / ", DSGE.n_states_augmented(m
 s = DSGE.compute_system(m; tvis=true, verbose=:none)
 println("Computed ", length(s.transitions), " regimes")
 
-module SS104Filter
-    using LinearAlgebra, SparseArrays, Random
-    module Tracker
-        abstract type TrackedReal{T} <: Real end
-    end
-    abstract type TrackedArray{T} <: AbstractMatrix{T} end
-    const TrackedMatrix = TrackedArray
-    abstract type TrackedVector{T} <: AbstractVector{T} end
-    include(joinpath(Main.ssr_root,"src","filters","util.jl"))
-    include(joinpath(Main.ssr_root,"src","filters","kalman_filter.jl"))
-    include(joinpath(Main.ssr_root,"src","smoothers","util.jl"))
-    include(joinpath(Main.ssr_root,"src","smoothers","hamilton_smoother.jl"))
-    include(joinpath(Main.ssr_root,"src","smoothers","koopman_smoother.jl"))
-    include(joinpath(Main.ssr_root,"src","smoothers","durbin_koopman_smoother.jl"))
-end
 # Controlled finite observations, not a production vintage. All regimes are
 # independently matrix-checked; history covers 2019Q4 through 2026Q2.
 y = fill(NaN, 28, 28)

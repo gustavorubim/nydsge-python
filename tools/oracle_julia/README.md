@@ -1,5 +1,30 @@
 # Julia Oracle Tools
 
+## Local-data forecast at ss104 source defaults
+
+`forecast_ss104_nyfed_params.jl` shares the M6 overlay in `ss104_reference.jl`.
+It verifies all 130 parameters in all 29 regimes against the Python manifest,
+reads the hashed effective transformed history, checks the semi-conditioning
+mask and dates, and runs the reference filter, deterministic smoother and
+39-quarter forecast after conditional 2026Q3. Pre-2008Q4 anticipated Taylor
+shock variances are zero on both sides. There is no optimization or sampling.
+
+```powershell
+.\.venv\Scripts\python.exe scripts/forecast_ss104_nyfed_params.py
+$env:JULIA_DEPOT_PATH = "$PWD/outputs/julia-depot;C:/Users/gusta/.julia"
+$env:OPENBLAS_NUM_THREADS = '1'
+./outputs/julia18/julia-1.8.5/bin/julia.exe --startup-file=no --compiled-modules=no --project=tools/oracle_julia tools/oracle_julia/forecast_ss104_nyfed_params.jl outputs/reference/DSGE.jl outputs/reference/StateSpaceRoutines.jl outputs/ss104_nyfed_params outputs/ss104_nyfed_params/julia_forecast.h5
+.\.venv\Scripts\python.exe tools/oracle_julia/compare_ss104_nyfed_params.py outputs/ss104_nyfed_params/julia_forecast.h5
+```
+
+The comparison exports Julia quarterly/annual CSVs and a parity JSON under
+`data/estimates`. It checks data identity, parameter equality, raw model-unit
+paths and quarterly GDP/core PCE/FFR plus annual GDP/core PCE Q4/Q4. The explicit
+path tolerance is **1e-5 percentage points** over the complete forecast horizon.
+The Julia HDF5 and unmasked/masked transformed data remain in ignored outputs.
+This verifies translation at code defaults; it does not reproduce the FRBNY
+production posterior. See [the forecast report](../../docs/ss104_nyfed_params_forecast.md).
+
 ## Fixed-default ss104 oracle (M6)
 
 `export_ss104.jl` exports all 29 regimes of public ss104 and a deterministic
