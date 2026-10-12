@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import multiprocessing as mp
+import os
 import sys
 import time
 from pathlib import Path
@@ -50,6 +51,54 @@ def _objective(values):
         return float("inf")
 
 
+def _pid_is_alive(pid):
+    """Return None when liveness cannot be established; never signal on Windows."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel.WaitForSingleObject.restype = wintypes.DWORD
+        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel.CloseHandle.restype = wintypes.BOOL
+        handle = kernel.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE, read-only
+        if not handle:
+            return False if ctypes.get_last_error() == 87 else None  # Invalid PID
+        try:
+            status = kernel.WaitForSingleObject(handle, 0)
+            return {0: False, 258: True}.get(status)
+        finally:
+            kernel.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return None
+    return True
+
+
+def _load_resume_checkpoint(path, provenance, catalog, f_start, *, force_resume=False):
+    previous = json.loads(path.read_text(encoding="utf-8"))
+    if previous["status"] == "running":
+        alive = _pid_is_alive(previous.get("pid"))
+        if alive is not False and not force_resume:
+            reason = "is still alive" if alive else "has unknown PID liveness"
+            raise ValueError(
+                f"Checkpoint {reason}; stop any existing search before using --force-resume."
+            )
+    if previous["input_sha256"] != provenance or previous["estimated_parameters"] != list(catalog):
+        raise ValueError("Resume inputs or parameter coordinates differ from the original search.")
+    if not np.isclose(previous["log_posterior_start"], -f_start, atol=1e-6, rtol=0):
+        raise ValueError("Resume must preserve the original ss104-default starting point.")
+    return previous
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=Path("data/estimates/m1002_ss104_mode.json"))
@@ -60,8 +109,15 @@ def main():
     parser.add_argument(
         "--resume", action="store_true", help="Continue this same default-start search"
     )
+    parser.add_argument(
+        "--force-resume",
+        action="store_true",
+        help="With --resume, override running PID protection after stopping any existing search",
+    )
     parser.add_argument("--bounded", action="store_true", help="Bounded BFGS at an active bound")
     args = parser.parse_args()
+    if args.force_resume and not args.resume:
+        parser.error("--force-resume requires --resume")
     if args.workers < 1 or args.maxiter < 1 or args.step <= 0 or args.time_limit_min <= 0:
         parser.error("workers/maxiter/step/time limit must be positive")
     _init_worker()
@@ -77,17 +133,9 @@ def main():
     provenance = input_provenance()
     rounds = []
     if args.resume:
-        previous = json.loads(args.out.read_text(encoding="utf-8"))
-        if previous["status"] == "running":
-            raise ValueError("Cannot resume a running search.")
-        if previous["input_sha256"] != provenance or previous["estimated_parameters"] != list(
-            catalog
-        ):
-            raise ValueError(
-                "Resume inputs or parameter coordinates differ from the original search."
-            )
-        if not np.isclose(previous["log_posterior_start"], -f_start, atol=1e-6, rtol=0):
-            raise ValueError("Resume must preserve the original ss104-default starting point.")
+        previous = _load_resume_checkpoint(
+            args.out, provenance, catalog, f_start, force_resume=args.force_resume
+        )
         start = np.array(previous["estimation_values"])
         best = {"x": start.copy(), "f": _objective(start)}
         if not np.isfinite(best["f"]):
@@ -103,6 +151,7 @@ def main():
         lp, ll, prior, _ = evaluate_ss104_posterior(model, data)
         report = {
             "status": status,
+            "pid": os.getpid(),
             "spec": model.spec,
             "subspec": model.subspec,
             "optimizer": (

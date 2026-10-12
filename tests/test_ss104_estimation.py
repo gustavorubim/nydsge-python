@@ -21,6 +21,64 @@ from nydsge.ss104_estimation import (
 from nydsge.ss104_workflow import forecast_ss104, prepare_ss104_observations
 
 
+@pytest.mark.parametrize(
+    ("owner", "force_resume", "error"),
+    [
+        ("exited", False, None),
+        ("live", False, "still alive"),
+        ("live", True, None),
+        ("legacy", False, "unknown PID liveness"),
+        ("legacy", True, None),
+    ],
+)
+def test_running_checkpoint_recovery_preserves_resume_guards(tmp_path, owner, force_resume, error):
+    import json
+    import os
+    import subprocess
+    import sys
+
+    from scripts.estimate_ss104_mode import _load_resume_checkpoint, _pid_is_alive
+
+    with subprocess.Popen([sys.executable, "-c", "pass"]) as process:
+        process.wait(timeout=10)
+        exited_pid = process.pid
+    assert _pid_is_alive(exited_pid) is False
+    assert _pid_is_alive(os.getpid()) is True
+    provenance, catalog = {"input.csv": "abc123"}, {"alpha": object()}
+    checkpoint = {
+        "status": "running",
+        "input_sha256": provenance,
+        "estimated_parameters": list(catalog),
+        "log_posterior_start": -12.0,
+        "estimation_values": [0.2],
+        "elapsed_seconds": 125,
+        "history": [{"iteration": 1}],
+        "counters": {"gradients": 2},
+        "optimizer_rounds": [],
+    }
+    if owner != "legacy":
+        checkpoint["pid"] = os.getpid() if owner == "live" else exited_pid
+    path = tmp_path / "checkpoint.json"
+    path.write_text(json.dumps(checkpoint), encoding="utf-8")
+    if error:
+        with pytest.raises(ValueError, match=error):
+            _load_resume_checkpoint(path, provenance, catalog, 12.0, force_resume=force_resume)
+    else:
+        assert (
+            _load_resume_checkpoint(path, provenance, catalog, 12.0, force_resume=force_resume)
+            == checkpoint
+        )
+    # Even a forced recovery must preserve input/coordinate/default-start identity.
+    for inputs, coordinates, f_start, message in (
+        ({"input.csv": "changed"}, catalog, 12.0, "Resume inputs"),
+        (provenance, {"beta": object()}, 12.0, "parameter coordinates"),
+        (provenance, catalog, 13.0, "original ss104-default"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            _load_resume_checkpoint(path, inputs, coordinates, f_start, force_resume=True)
+    assert json.loads(path.read_text(encoding="utf-8")) == checkpoint
+
+
 def test_regime_coordinates_update_independently_and_count_prior_once():
     model = Model1002("ss104")
     catalog = ss104_parameter_catalog(model)
