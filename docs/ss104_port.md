@@ -23,6 +23,52 @@ Rules: branch ss104-port only, no force-push, main untouched, no long MCMC befor
 
 ## Progress log
 
+### 2026-10-12 — PR #4 review fixes and final validation
+
+- **Steady-state restoration (`bb1d09b`):** forecast cleanup invalidates the
+  last draw's cache key after restoring parameters and steady-state values.
+  One parameterized regression covers fresh `sigma_g+0.01` and initialized
+  repeated `alpha+0.01` draws for ss10 and ss104, comparing states, observables,
+  pseudo-observables and subsequent solves to independently recomputed
+  fresh-model results at absolute tolerance 1e-12. The ss104 draw path uses
+  its single-regime Taylor configuration, then re-enables all 29 regimes for
+  the reuse check. Before the fix, both NaN Gamma0 and repeated-draw drift
+  were reproduced; all four cases now pass.
+- **Interrupted search recovery (`3f75584`):** checkpoints record the owning
+  PID. `--resume` recovers a running checkpoint when its process has exited;
+  `--resume --force-resume` explicitly overrides live/unknown PID protection
+  after stopping any existing search. Synthetic-checkpoint cases verify live
+  and exited processes, legacy files without a PID, and forced recovery.
+  Input hashes, parameter coordinates and the original default starting
+  posterior remain mandatory even when forced; history/counters/time persist.
+- **Non-default Julia parity (`0cdcbba`):** three deterministic bounded
+  perturbations of all 96 free prior-bearing coordinates are committed as
+  compact fixtures (~3.3 MB each), generated with Julia 1.8.5 and the pinned
+  source overlay. All 492 retained datasets per fixture were checked exactly
+  against the raw exports. All 29 regime matrices, parameter tables,
+  likelihoods, filter/smoother means and forecast paths are tested.
+  Covariances retain periods 0, 2, 4 and final in each compact fixture; the
+  default fixture tests complete histories, and complete non-default histories
+  were also validated against the raw exports. Explicit covariance gates:
+  absolute <2e-4; relative to max oracle entry <1e-6 filtered / <5e-10 predicted.
+  Matrix maximum is 2.53806e-11; parameters/QQ/EE match exactly. New vector
+  workflow budgets are documented in the
+  [oracle recipe](../tools/oracle_julia/README.md#ss104-non-default-parameter-vectors):
+  2e-6 states, 1e-5 smoother states, 5e-7 forecast observables, 1e-6 pseudo-observables.
+  Original fixed-default gates remain unchanged; some non-default workflow
+  errors exceed those tighter default limits (observable maximum 3.11695e-7,
+  smoother maximum 8.93469e-6).
+- **Forecast labels (`dfbe5a3`):** README, this checklist and the M7 comparison
+  label the estimated forecast **EXPERIMENTAL**. Port correctness is met;
+  estimated-forecast readiness is not met because the mode is unconverged and
+  data gaps remain. A regression checks these claims against the saved M7 run.
+
+Final validation: **571 passed, 4 skipped (575 collected)** in **72.91 seconds**
+with `python -m pytest --tb=short` and `OPENBLAS_NUM_THREADS=1`.
+`ruff check .` passed; `ruff format --check .` passed (**86 Python files**).
+`git diff --check` passed. All work stays on `ss104-port`; main remains
+`6716227be0ed573cd45f6f04fd38cb15a5807c37`; no force-push or merge.
+
 ### 2026-10-12 — M7 offline estimation and published forecast comparison
 
 Completed one final BFGS trajectory from ss104 defaults on the existing
