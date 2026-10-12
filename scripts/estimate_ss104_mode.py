@@ -55,6 +55,9 @@ def main():
     parser.add_argument("--maxiter", type=int, default=400)
     parser.add_argument("--time-limit-min", type=float, default=120)
     parser.add_argument("--step", type=float, default=1e-4)
+    parser.add_argument(
+        "--resume", action="store_true", help="Continue this same default-start search"
+    )
     args = parser.parse_args()
     if args.workers < 1 or args.maxiter < 1 or args.step <= 0 or args.time_limit_min <= 0:
         parser.error("workers/maxiter/step/time limit must be positive")
@@ -69,6 +72,27 @@ def main():
     counters = {"serial_objectives": 1, "gradients": 0, "gradient_objectives": 0}
     history = []
     provenance = input_provenance()
+    rounds = []
+    if args.resume:
+        previous = json.loads(args.out.read_text(encoding="utf-8"))
+        if previous["status"] == "running":
+            raise ValueError("Cannot resume a running search.")
+        if previous["input_sha256"] != provenance or previous["estimated_parameters"] != list(
+            catalog
+        ):
+            raise ValueError(
+                "Resume inputs or parameter coordinates differ from the original search."
+            )
+        if not np.isclose(previous["log_posterior_start"], -f_start, atol=1e-6, rtol=0):
+            raise ValueError("Resume must preserve the original ss104-default starting point.")
+        start = np.array(previous["estimation_values"])
+        best = {"x": start.copy(), "f": _objective(start)}
+        if not np.isfinite(best["f"]):
+            raise ValueError("The saved ss104 candidate is not a finite posterior point.")
+        t0 -= previous["elapsed_seconds"]
+        history = previous["history"]
+        counters = previous["counters"]
+        rounds = previous.get("optimizer_rounds", [previous["diagnostics"]])
     args.out.parent.mkdir(parents=True, exist_ok=True)
 
     def write(status, diagnostics=None):
@@ -78,7 +102,10 @@ def main():
             "status": status,
             "spec": model.spec,
             "subspec": model.subspec,
-            "optimizer": "scipy BFGS with central-difference gradient; step 0.0001; gtol 0.001",
+            "optimizer": (
+                f"scipy BFGS; central-difference step {args.step}; gtol 0.001; "
+                "up to 3 Hessian-reset rounds in one default-start search"
+            ),
             "starting_point": "DSGE.jl ss104 defaults; prior-bearing free parameter regimes",
             "sample": {
                 "presample_start": str(data.index[0]),
@@ -113,6 +140,7 @@ def main():
             "counters": counters,
             "history": history,
             "diagnostics": diagnostics,
+            "optimizer_rounds": rounds,
             "mcmc": {
                 "runs": 0,
                 "reason": (
@@ -186,22 +214,38 @@ def main():
         print(f"start log posterior {-f_start:.6f}; {len(catalog)} coordinates", flush=True)
         write("running")
         try:
-            result = minimize(
-                objective,
-                start,
-                method="BFGS",
-                jac=gradient,
-                options={"maxiter": args.maxiter, "gtol": 1e-3},
-                callback=checkpoint,
-            )
-            diagnostics = {
-                "success": bool(result.success),
-                "message": str(result.message),
-                "iterations": int(result.nit),
-                "gradient_inf_norm": float(np.max(np.abs(result.jac))),
-                "inverse_hessian_kind": "BFGS approximation; not a validated posterior covariance",
-            }
-            converged = bool(result.success) and np.isfinite(result.fun)
+            converged = False
+            diagnostics = rounds[-1] if rounds else None
+            for round_number in range(len(rounds), 3):
+                print(f"BFGS round {round_number + 1}", flush=True)
+                result = minimize(
+                    objective,
+                    best["x"].copy(),
+                    method="BFGS",
+                    jac=gradient,
+                    options={"maxiter": args.maxiter, "gtol": 1e-3},
+                    callback=checkpoint,
+                )
+                diagnostics = {
+                    "round": round_number + 1,
+                    "success": bool(result.success),
+                    "message": str(result.message),
+                    "iterations": int(result.nit),
+                    "gradient_inf_norm": float(np.max(np.abs(result.jac))),
+                    "negative_log_posterior": best["f"],
+                    "inverse_hessian_kind": "BFGS approximation; not a posterior covariance",
+                }
+                rounds.append(diagnostics)
+                print(json.dumps(diagnostics), flush=True)
+                write("running", diagnostics)
+                if result.success and np.isfinite(result.fun):
+                    # Line-search probes can improve the saved candidate slightly.
+                    # Certify stationarity at the actual saved point, not a prior iterate.
+                    gbest = gradient(best["x"])
+                    diagnostics["saved_point_gradient_inf_norm"] = float(np.max(np.abs(gbest)))
+                    converged = diagnostics["saved_point_gradient_inf_norm"] <= 1e-3
+                    if converged:
+                        break
             write("converged" if converged else "stopped", diagnostics)
         except TimeUp:
             write("time_limit", {"success": False, "message": "Configured mode-search time limit"})
