@@ -9,9 +9,43 @@ Rules: branch ss104-port only, no force-push, main untouched, no long MCMC befor
 - [x] M4: flexible AIT, pgap/ygap, time-varying credibility 2020Q4-2026Q4
 - [x] M5: SME/SPD expected FFR observables 1-6Q
 - [x] M6: full ss104 parity + conditional forecast
-- [ ] M7: final estimation + NY Fed forecast comparison doc
+- [x] M7: final estimation run + NY Fed forecast comparison doc (mode convergence not certified)
 
 ## Progress log
+
+### 2026-10-12 — M7 offline estimation and published forecast comparison
+
+Completed one final BFGS trajectory from ss104 defaults on the existing
+2026-10-06 local FRED/non-FRED snapshots: 96 prior-bearing parameter-regime
+coordinates, presample 1959Q3-Q4, likelihood 1960Q1-2026Q2, COVID observations
+retained. Five priorless coordinates stay at defaults; missing OIS, survey
+history and anticipated GDP remain NaN. Two real local survey workbooks
+supply 2024Q3 and 2026Q3; source-defined pgap/ygap initialization is preserved.
+
+Search status **time_limit**, **97 iterations**,
+**120.81 minutes**; log posterior
+**-6487.849291 -> -1249.959509**
+(likelihood **-1153.812337**, prior **-96.147172**).
+Best finite search candidate; optimizer convergence is not certified.
+No MCMC was run under the optional one-hour sampling budget.
+
+Produced the 40-quarter 2026Q3-2036Q2 ss104 path at the best finite estimate, with one semi
+conditional quarter using rates/spreads/long rates and the available six
+SME expectations. Committed mode and quarterly/annual comparison CSVs are
+under `data/estimates/`; generated arrays/data/metadata are under
+`outputs/ss104_m7/`. [ss104_forecast_comparison.md](ss104_forecast_comparison.md)
+reuses the cached NY Fed September 2026 forecast, reports GDP/core PCE/FFR/
+output gap over the complete horizon, and names each missing file/series.
+
+The independent machine oracle `C:\Users\gusta\master\ss104_oracle_box.h5`
+and `ss104-parity-box.json` are cited with hashes. Its likelihood/forecast-observable
+errors are **3.71096e-7 / 6.59366e-8**. Conditional-observation and smoother
+cross-machine exceptions (**1.53845e-7 / 5.18873e-6**) are disclosed; M6 gates
+are unchanged. Original M6 oracle tests still pass.
+
+Validation: **105 targeted passed; 554 full-suite passed, 4 optional skips**.
+Ruff lint/format and diff checks passed. Implementation/optimizer commits: `a0e5363`, `6661453`.
+All work stays on `ss104-port`; main is unchanged; no push was issued by this M7 session.
 
 ### 2026-10-12 — M6 full fixed-default parity and conditional forecasts
 

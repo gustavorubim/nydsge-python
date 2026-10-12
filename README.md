@@ -47,6 +47,14 @@ numerical surfaces pass strict `1e-10`.
 Accelerator captures (macOS MPS, Linux CUDA/JAX) are pending real-machine runs;
 Windows CPU/CUDA baselines are captured.
 
+The `ss104-port` branch implements the public 29-regime ss104 specification,
+with M6 Julia-oracle parity and an offline local estimation/forecast workflow.
+See the [ss104 milestone log](docs/ss104_port.md) and
+[NY Fed forecast comparison](docs/ss104_forecast_comparison.md) for results,
+missing data, and the independent machine oracle's numerical exceptions. The
+M7 fit reached its runtime limit; its forecast uses the best finite estimate,
+with optimizer convergence explicitly uncertified.
+
 ---
 
 ## Installation

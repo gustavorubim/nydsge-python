@@ -6,8 +6,10 @@ parameters, including all 29 regimes and full conditional mean forecasts.
 The independent source Julia oracle, numerical errors and certification boundary
 are recorded in [ss104_m6.md](ss104_m6.md) and [ss104_parity.json](ss104_parity.json).
 Published-release reproduction still requires matching vintages/posteriors and
-the nonpublic inputs described in this historical scan. No estimation was added
-to the ss104 workflow.
+the nonpublic inputs described in this historical scan. M7's separate local
+estimation and forecast are documented in
+[ss104_forecast_comparison.md](ss104_forecast_comparison.md); that run does not
+certify production-release reproduction.
 
 Scope: `main @ 6716227` (PRs #1–#3), fresh clone `/workspace/nydsge-scan`. Read-only: nothing was pushed, committed, or opened.
 Reference code: public DSGE.jl `master @ c09dfe8` (2026-07-23, "migrate code to work on julia v1.12"), plus tag v1.3.0 (45c2662).
