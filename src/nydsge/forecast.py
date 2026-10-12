@@ -1191,6 +1191,9 @@ def _restore_model_parameters(
         model.parameters[name] = parameter
     model.steady_state.clear()
     model.steady_state.update(original_steady_state)
+    # The last draw's key cannot validate the restored (possibly NaN) values.
+    if hasattr(model, "_steady_state_key"):
+        delattr(model, "_steady_state_key")
 
 
 def _flatten_forecast_samples(samples: np.ndarray) -> np.ndarray:

@@ -560,6 +560,66 @@ def test_forecast_parameter_draws_uses_sampler_values_and_restores_model() -> No
     assert dict(model.steady_state) == original_steady_state
 
 
+@pytest.mark.parametrize("subspec", ["ss10", "ss104"])
+@pytest.mark.parametrize("scenario", ["fresh_sigma_g", "initialized_alpha"])
+def test_parameter_forecast_reuse_matches_fresh_model(subspec, scenario) -> None:
+    from dataclasses import replace
+
+    def new_model():
+        model = Model1002(subspec)
+        # Parameter-draw forecasts use a single-regime System. Exercise ss104's
+        # Taylor snapshot here, then restore its full regime solve below.
+        if subspec == "ss104":
+            model.set_setting("regime_switching", False)
+        return model
+
+    model = new_model()
+    name = "sigma_g" if scenario == "fresh_sigma_g" else "alpha"
+    if scenario == "initialized_alpha":
+        compute_system(model)
+    original_parameters = dict(model.parameters)
+    original_steady_state = dict(model.steady_state)
+    value = model.parameters[name].value + 0.01
+    sampler = replace(
+        _sampler_for_alpha_draws(model),
+        parameter_names=(name,),
+        parameter_draws=np.array([[value]]),
+        estimation_draws=np.zeros((1, 1)),
+        log_posterior=np.zeros(1),
+        accepted=np.ones(1, dtype=bool),
+    )
+    n_states = len(model.indexes.endogenous_states) + len(model.indexes.endogenous_states_augmented)
+    state = np.linspace(-0.1, 0.1, n_states)
+    expected = forecast_parameter_draws(
+        new_model(), sampler, horizon=3, initial_state=state, include_pseudo=True
+    )
+    for _ in range(2):
+        actual = forecast_parameter_draws(
+            model, sampler, horizon=3, initial_state=state, include_pseudo=True
+        )
+        for output in ("states", "observables", "pseudo_observables"):
+            np.testing.assert_allclose(
+                getattr(actual, output), getattr(expected, output), atol=1e-12, rtol=0
+            )
+        assert dict(model.parameters) == original_parameters
+        np.testing.assert_equal(
+            list(model.steady_state.values()), list(original_steady_state.values())
+        )
+
+    baseline = new_model()
+    if subspec == "ss104":
+        model.set_setting("regime_switching", True)
+        baseline.set_setting("regime_switching", True)
+    actual_system, expected_system = compute_system(model), compute_system(baseline)
+    actual_systems = actual_system.systems if subspec == "ss104" else (actual_system,)
+    expected_systems = expected_system.systems if subspec == "ss104" else (expected_system,)
+    for actual_regime, expected_regime in zip(actual_systems, expected_systems, strict=True):
+        for name in ("TTT", "RRR", "CCC", "ZZ", "DD", "QQ", "EE", "ZZ_pseudo", "DD_pseudo"):
+            np.testing.assert_allclose(
+                actual_regime[name], expected_regime[name], atol=1e-12, rtol=0
+            )
+
+
 def test_forecast_one_model1002_full_can_use_sampler_draws() -> None:
     model = Model1002(settings={"forecast_horizon": 2})
     sampler = _sampler_for_alpha_draws(model)
