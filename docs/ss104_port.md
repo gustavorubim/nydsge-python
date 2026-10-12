@@ -9,7 +9,17 @@ Rules: branch ss104-port only, no force-push, main untouched, no long MCMC befor
 - [x] M4: flexible AIT, pgap/ygap, time-varying credibility 2020Q4-2026Q4
 - [x] M5: SME/SPD expected FFR observables 1-6Q
 - [x] M6: full ss104 parity + conditional forecast
-- [x] M7: final estimation run + NY Fed forecast comparison doc (mode convergence not certified)
+- [x] M7: EXPERIMENTAL estimation artifacts + NY Fed comparison (mode unconverged)
+- [ ] M7 estimated-forecast readiness: mode convergence and data gaps unresolved
+
+## Acceptance
+
+- **Port correctness: MET** — the documented Julia parity gates validate the
+  public ss104 translation, including regime matrices and controlled replay.
+- **Estimated-forecast readiness: NOT MET** — the M7 estimated forecast is
+  **EXPERIMENTAL**. Its mode is unconverged, and historical OIS, survey and
+  anticipated-GDP inputs have data gaps. Passing port parity does not close
+  these estimation and input requirements.
 
 ## Progress log
 

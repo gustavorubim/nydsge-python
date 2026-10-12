@@ -1,5 +1,12 @@
 # M7 ss104 estimation and NY Fed forecast comparison
 
+**EXPERIMENTAL estimated forecast.**
+
+**Port correctness: MET** — the public ss104 translation passes the documented
+Julia parity gates. **Estimated-forecast readiness: NOT MET** — the M7 mode is
+unconverged and the local vintage has the data gaps listed below. Port parity
+does not certify this estimated forecast for production use.
+
 **Convergence exception:** the single default-start estimation reached its
 configured cumulative runtime limit. The independently checked projected
 gradient is **23.4596**, above the **0.001** target. The tables therefore use

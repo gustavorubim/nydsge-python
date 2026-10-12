@@ -52,8 +52,13 @@ with M6 Julia-oracle parity and an offline local estimation/forecast workflow.
 See the [ss104 milestone log](docs/ss104_port.md) and
 [NY Fed forecast comparison](docs/ss104_forecast_comparison.md) for results,
 missing data, and the independent machine oracle's numerical exceptions. The
-M7 fit reached its runtime limit; its forecast uses the best finite estimate,
-with optimizer convergence explicitly uncertified.
+M7 estimated forecast is **EXPERIMENTAL**: the fit reached its runtime limit
+and uses the best finite estimate, with optimizer convergence uncertified.
+
+- **Port correctness: MET** — the public ss104 model passes the documented Julia
+  parity gates.
+- **Estimated-forecast readiness: NOT MET** — the M7 mode is unconverged and
+  historical OIS, survey and anticipated-GDP inputs have data gaps.
 
 ---
 
