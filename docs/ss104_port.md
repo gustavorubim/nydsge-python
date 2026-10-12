@@ -5,13 +5,28 @@ Rules: branch ss104-port only, no force-push, main untouched, no long MCMC befor
 
 - [x] M1: regime-switching solve (gensys per regime + gensys2 for temporary ZLB/alt policy), regime-aware Kalman filter/smoother, time-varying information sets
 - [x] M2: COVID shocks with regime volatilities
-- [ ] M3: AR(1) inflation measurement error
+- [x] M3: AR(1) inflation measurement error
 - [ ] M4: flexible AIT, pgap/ygap, time-varying credibility 2020Q4-2026Q4
 - [ ] M5: SME/SPD expected FFR observables 1-6Q
 - [ ] M6: full ss104 parity + conditional forecast
 - [ ] M7: final estimation + NY Fed forecast comparison doc
 
 ## Progress log
+
+### 2026-10-12 — M3 inflation measurement error
+
+Added augmented `e_meas_pi_t` and its lag with rho .232 after regime 1,
+unit innovation loading, and **current minus lag** loadings on both inflation
+observables. ss104 uses sigma .0999 in model regimes 2-10 and zero otherwise;
+the legacy core-PCE error has sigma zero in 2-10 and .0999 outside that interval.
+Its persistence remains .232, including while its innovations are disabled.
+This follows `augment_states.jl`, `measurement.jl:161-172`, and the ss104 override
+of `add_meas_pi!` / `rm_iid_pce_meas_err!` (the GDP-deflator error remains active).
+
+Validation: **93 targeted tests passed**. AR/lag/RRR/ZZ/QQ calibration maximum
+error **0** across 29 regimes; independent four-quarter impulse path error
+**<1e-15**. Full Julia parity remains the M6 gate; the M2 dependency blocker
+does not block the native implementation.
 
 ### 2026-10-12 — M2 COVID equations and volatility regimes
 

@@ -102,6 +102,10 @@ def measurement_matrices_ss10(
     if model._is_setting_enabled("add_iid_cond_obs_corepce_meas_err"):
         set_zz("obs_corepce", endo_aug, "e_condcorepce_t", 1.0)
     set_dd("obs_corepce", inflation_trend)
+    if model.subspec == "ss104":
+        for name in ("obs_gdpdeflator", "obs_corepce"):
+            set_zz(name, endo_aug, "e_meas_pi_t", 1.0)
+            set_zz(name, endo_aug, "e_meas_pi_t1", -1.0)
 
     set_zz("obs_nominalrate", endo, "R_t", 1.0)
     set_dd("obs_nominalrate", v("Rstarn"))
@@ -164,6 +168,7 @@ def measurement_matrices_ss10(
     for shock_name, sigma_name in shock_sigmas.items():
         set_qq(shock_name, v(sigma_name) ** 2)
     if model.subspec == "ss104":
+        set_qq("meas_pi_sh", v("sigma_meas_pi") ** 2)
         for key in ("ziid", "biidc", "phi"):
             set_qq(f"{key}_sh", v(f"sigma_{key}") ** 2)
             for horizon in range(1, model._anticipated_shock_settings().get(key, 0) + 1):

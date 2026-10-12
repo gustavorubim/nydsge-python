@@ -61,3 +61,32 @@ def test_covid_equations_and_regime_filter():
     assert np.isfinite(filtered.log_likelihood)
     assert np.isfinite(smooth.smoothed_states).all()
     print(f"COVID canonical residual={max_residual:.3e}; QQ max error=0")
+
+
+def test_inflation_error_ar1_differenced_measurement_and_regime_boundaries():
+    model = Model1002("ss104")
+    system = compute_system(model)
+    state = model.indexes.endogenous_states_augmented["e_meas_pi_t"] - 1
+    lag = model.indexes.endogenous_states_augmented["e_meas_pi_t1"] - 1
+    shock = model.indexes.exogenous_shocks["meas_pi_sh"] - 1
+    iid = model.indexes.exogenous_shocks["corepce_sh"] - 1
+    for reg in range(1, 30):
+        assert system[reg, "TTT"][state, state] == (0 if reg == 1 else 0.232)
+        assert system[reg, "TTT"][lag, state] == 1
+        assert system[reg, "RRR"][state, shock] == 1
+        assert system[reg, "QQ"][shock, shock] == (0.0999**2 if 2 <= reg <= 10 else 0)
+        assert system[reg, "QQ"][iid, iid] == (0 if 2 <= reg <= 10 else 0.0999**2)
+        for obs in ("obs_gdpdeflator", "obs_corepce"):
+            row = model.observables[obs] - 1
+            np.testing.assert_array_equal(system[reg, "ZZ"][row, [state, lag]], [1, -1])
+    # An isolated inflation-error innovation decays and is differenced by both inflation rows.
+    x = system[2, "RRR"][:, shock]
+    row = model.observables["obs_corepce"] - 1
+    actual = []
+    for _ in range(4):
+        actual.append(system[2, "ZZ"][row] @ x)
+        x = system[2, "TTT"] @ x
+    np.testing.assert_allclose(
+        actual, [1, 0.232 - 1, 0.232**2 - 0.232, 0.232**3 - 0.232**2], atol=1e-15, rtol=0
+    )
+    print("Inflation AR/ZZ/QQ calibration max error=0; impulse max error<1e-15")

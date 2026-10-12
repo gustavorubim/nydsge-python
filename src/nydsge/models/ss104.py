@@ -142,3 +142,32 @@ def regime_snapshot(model, reg: int):
     for name, path in model.get_setting("model2para_regime", {}).items():
         snapshot.parameters[name] = model.get_setting("parameter_regimes")[name][path[reg]]
     return snapshot
+
+
+def initialize_inflation_error(model) -> None:
+    """ss87 -> ss93 -> ss104: differenced AR(1) error, iid PCE off in regimes 2-10."""
+    values = model.get_setting("parameter_regimes")
+    mapping = model.get_setting("model2para_regime")
+    dates = model.get_setting("regime_dates")
+    for name, baseline, covid, path in (
+        ("rho_meas_pi", 0.0, 0.2320, lambda r: 1 if r == 1 else 2),
+        ("sigma_meas_pi", 0.0, 0.0999, lambda r: 2 if 2 <= r <= 10 else 1),
+        ("rho_corepce", 0.2320, 0.0, lambda r: 1),
+        ("sigma_corepce", 0.0999, 0.0, lambda r: 2 if 2 <= r <= 10 else 1),
+    ):
+        if name not in model.parameters:
+            model._add_parameter_from_spec(name)
+        parameter = model.parameters[name]
+        values[name] = {
+            1: replace(parameter, value=baseline, fixed=name in ("rho_meas_pi", "sigma_meas_pi")),
+            2: replace(parameter, value=covid, fixed=name in ("rho_corepce", "sigma_corepce")),
+        }
+        if name == "sigma_meas_pi":
+            values[name][2] = replace(
+                parameter,
+                value=covid,
+                fixed=False,
+                prior=Prior("root_inverse_gamma", nu=2.0, tau=0.4),
+            )
+        mapping[name] = {r: path(r) for r in dates}
+        model.parameters[name] = values[name][1]

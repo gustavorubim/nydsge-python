@@ -538,9 +538,10 @@ class Model1002(DSGEModel):
         self._init_pseudo_observable_mappings()
         self._init_parameters()
         if self.subspec == "ss104":
-            from nydsge.models.ss104 import initialize_covid
+            from nydsge.models.ss104 import initialize_covid, initialize_inflation_error
 
             initialize_covid(self)
+            initialize_inflation_error(self)
         self._init_index_maps()
         self._init_steady_state_placeholders()
 
@@ -1103,6 +1104,9 @@ class Model1002(DSGEModel):
             "e_gdp_t1",
             "e_gdi_t1",
         ]
+        if self.subspec == "ss104":
+            endogenous_states_augmented.extend(["e_meas_pi_t", "e_meas_pi_t1"])
+            exogenous_shocks.append("meas_pi_sh")
         for horizon in self._expected_ffr_horizons():
             endogenous_states_augmented.append(f"e_exp_rm{horizon}")
             exogenous_shocks.append(f"exp_rm_sh{horizon}")
