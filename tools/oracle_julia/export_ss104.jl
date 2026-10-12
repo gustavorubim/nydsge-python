@@ -1,15 +1,49 @@
-# Fixed-default ss104 oracle. Never estimates or samples parameters.
-# Usage: julia --project=tools/oracle_julia export_ss104.jl DSGE_ROOT SSR_ROOT OUT_H5
+# ss104 oracle at defaults or an explicit model-space parameter vector. No estimation.
+# Usage: julia --project=tools/oracle_julia export_ss104.jl DSGE_ROOT SSR_ROOT OUT_H5 [VECTOR_JSON]
 # Bootstrap package types/dependencies from the pinned oracle environment, then
 # replace economic and solve/state-space methods with the supplied reference source.
 using DSGE, HDF5, JSON, Dates, LinearAlgebra
-length(ARGS) == 3 || error("Expected DSGE_ROOT SSR_ROOT OUT_H5")
-dsge_root, ssr_root, output = abspath.(ARGS)
+length(ARGS) in (3,4) || error("Expected DSGE_ROOT SSR_ROOT OUT_H5 [VECTOR_JSON]")
+dsge_root, ssr_root, output = abspath.(ARGS[1:3])
 include(joinpath(@__DIR__, "ss104_reference.jl"))
 m = DSGE.Model1002("ss104"; custom_settings=[
     DSGE.Setting(:date_forecast_start, Date(2026,9,30)),
     DSGE.Setting(:date_conditional_end, Date(2026,9,30)),
     DSGE.Setting(:saveroot, dirname(output)), DSGE.Setting(:dataroot, dirname(output))])
+vector = length(ARGS) == 4 ? JSON.parsefile(ARGS[4]) : nothing
+if vector !== nothing
+    function ascii_name(key)
+        name = string(key)
+        for (a,b) in ("α"=>"alpha", "β"=>"beta", "ρ"=>"rho", "σ"=>"sigma", "π"=>"pi",
+                      "ζ"=>"zeta", "ι"=>"iota", "μ"=>"mu", "ω"=>"omega", "γ"=>"gamma",
+                      "λ"=>"lambda", "δ"=>"delta", "Φ"=>"Phi", "Γ"=>"Gamma", "ν"=>"nu",
+                      "ϵ"=>"epsilon", "φ"=>"phi", "S′′"=>"Spp", "ψ"=>"psi", "η"=>"eta")
+            name = replace(name, a=>b)
+        end
+        name
+    end
+    parameters = Dict(ascii_name(p.key)=>p for p in m.parameters)
+    for (coordinate,value) in vector["parameters"]
+        parts = split(coordinate, "@")
+        p = parameters[parts[1]]
+        if length(parts) == 2
+            regime = parse(Int,parts[2])
+            fixed = haskey(p.regimes,:fixed) ? DSGE.ModelConstructors.regime_fixed(p,regime) : p.fixed
+            fixed && error("Fixed coordinate $coordinate")
+            DSGE.ModelConstructors.set_regime_val!(p,regime,Float64(value))
+            DSGE.ModelConstructors.regime_val(p,regime) == value || error("Invalid value $coordinate")
+            regime == 1 && (p.value = value)
+        else
+            p.fixed && error("Fixed coordinate $coordinate")
+            p.valuebounds[1] <= value <= p.valuebounds[2] || error("Out of bounds $coordinate")
+            p.value = value
+        end
+    end
+    # Refresh ScaledParameter.scaledvalue via the native update API before solving.
+    DSGE.ModelConstructors.update!(m.parameters, [p.value for p in m.parameters])
+    DSGE.steadystate!(m)
+    println("Applied parameter vector: ",vector["id"])
+end
 println("Model dimensions: ", DSGE.n_states(m), " / ", DSGE.n_states_augmented(m),
         " / ", DSGE.n_shocks_exogenous(m), " / ", DSGE.n_observables(m))
 s = DSGE.compute_system(m; tvis=true, verbose=:none)
@@ -55,7 +89,8 @@ h5open(output, "w") do f
         "dsge_commit"=>strip(read(`git -c safe.directory=$dsge_root -C $dsge_root rev-parse HEAD`, String)),
         "statespace_commit"=>strip(read(`git -c safe.directory=$ssr_root -C $ssr_root rev-parse HEAD`, String)),
         "julia_version"=>string(VERSION), "forecast_start"=>"2026Q3",
-        "scope"=>"ss104 default params; reference methods over pinned package types; no estimation")))
+        "scope"=>"ss104 explicit params; reference methods over pinned package types; no estimation",
+        "parameter_vector"=>vector)))
     for key in (:endogenous_states, :endogenous_states_augmented, :exogenous_shocks,
                 :equilibrium_conditions, :expected_shocks, :observables, :pseudo_observables)
         names = sort(collect(getfield(m,key)); by=last)

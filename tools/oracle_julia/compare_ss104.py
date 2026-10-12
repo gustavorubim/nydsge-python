@@ -1,4 +1,4 @@
-"""Compare fixed-default Python ss104 to the source Julia export (no Julia runtime)."""
+"""Compare Python ss104 to a default/explicit-vector Julia export (no Julia runtime)."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from nydsge.kalman import kalman_log_likelihood, observables_from_states, smooth
 from nydsge.models import Model1002
 from nydsge.regimes import regime_indices_from_dates
 from nydsge.solve import compute_system
+from nydsge.ss104_estimation import ss104_parameter_catalog, update_ss104_parameters
 from nydsge.ss104_workflow import forecast_ss104
 
 TRANSLATION = {
@@ -48,7 +49,15 @@ def translate(name):
 
 
 def compare(path, *, model=None, system=None):
-    model = model or Model1002("ss104")
+    if model is None:
+        model = Model1002("ss104")
+        with h5py.File(path) as fixture:
+            vector = json.loads(fixture["metadata/json"].asstr()[()]).get("parameter_vector")
+        if vector is not None:
+            catalog = ss104_parameter_catalog(model)
+            if vector["coordinates"] != list(catalog):
+                raise ValueError("Oracle parameter coordinates differ from the Python model.")
+            update_ss104_parameters(model, catalog, vector["estimation_values"])
     system = compute_system(model) if system is None else system
     report = {"max_abs": {}, "regimes": {}}
     with h5py.File(path) as f:
@@ -162,8 +171,15 @@ def compare(path, *, model=None, system=None):
                     )
                 for name in ("predicted_covariances", "filtered_covariances"):
                     reference = f[f"{prefix}/{name}"][...][:, states][:, :, states]
-                    report["workflow"][f"{label}_{name}_error"] = float(
-                        np.max(np.abs(reference - getattr(result, name)))
+                    actual = getattr(result, name)
+                    if f"{prefix}/covariance_periods" in f:
+                        actual = actual[f[f"{prefix}/covariance_periods"][...]]
+                    error = float(np.max(np.abs(reference - actual)))
+                    scale = float(np.max(np.abs(reference)))
+                    report["workflow"][f"{label}_{name}_error"] = error
+                    report["workflow"][f"{label}_{name}_scale"] = scale
+                    report["workflow"][f"{label}_{name}_relative_error"] = (
+                        error / scale if scale else error
                     )
                 if label == "history":
                     path = regime_indices_from_dates(

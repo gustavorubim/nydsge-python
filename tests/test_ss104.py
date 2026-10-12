@@ -210,16 +210,41 @@ def test_ss104_presample_anticipated_policy_variances(ss104_system):
     np.testing.assert_array_equal(covariances[1], r @ system[1, "QQ"] @ r.T)
 
 
-def test_ss104_source_julia_oracle_parity(ss104_system):
+@pytest.mark.parametrize(
+    "vector_id", [None, 1, 2, 3], ids=["default", "vector_1", "vector_2", "vector_3"]
+)
+def test_ss104_source_julia_oracle_parity(ss104_system, vector_id):
+    import json
     from pathlib import Path
 
+    import h5py
+
+    from nydsge.ss104_estimation import ss104_parameter_catalog, update_ss104_parameters
     from tools.oracle_julia.compare_ss104 import compare
 
-    model, system = ss104_system
-    report = compare(
-        Path(__file__).parent / "fixtures" / "ss104_default_oracle.h5", model=model, system=system
-    )
+    filename = "ss104_default_oracle.h5" if vector_id is None else f"ss104_vector_{vector_id}.h5"
+    path = Path(__file__).parent / "fixtures" / filename
+    if vector_id is None:
+        model, system = ss104_system
+    else:
+        with h5py.File(path) as fixture:
+            vector = json.loads(fixture["metadata/json"].asstr()[()])["parameter_vector"]
+        model = Model1002("ss104")
+        catalog = ss104_parameter_catalog(model)
+        assert vector["coordinates"] == list(catalog)
+        assert vector["id"] == f"vector_{vector_id}"
+        update_ss104_parameters(model, catalog, vector["estimation_values"])
+        updated = ss104_parameter_catalog(model)
+        assert vector["parameters"] == {k: p.value for k, p in updated.items()}
+        assert all(
+            not p.fixed and p.value_bounds[0] <= p.value <= p.value_bounds[1]
+            for p in updated.values()
+        )
+        assert sum(p.value != catalog[k].value for k, p in updated.items()) >= 90
+        system = compute_system(model)
+    report = compare(path, model=model, system=system)
     assert report["metadata"]["dsge_commit"] == "c09dfe881f8809f65b8c0f08a761ec6cc456a6fb"
+    assert report["metadata"]["statespace_commit"] == "794fb02ff45a62537d8d5d037c1d12b3aa7e4574"
     assert len(report["regimes"]) == 29
     assert len(model.parameters) == 130
     assert len(model.pseudo_observables) == 26
@@ -237,13 +262,23 @@ def test_ss104_source_julia_oracle_parity(ss104_system):
     for name in ("history_loglik", "conditional_loglik"):
         assert report["workflow"][name]["error"] < 1e-6
     for name in ("forecast_states_error", "conditional_forecast_states_error"):
-        assert report["workflow"][name] < 1e-6
+        assert report["workflow"][name] < (1e-6 if vector_id is None else 2e-6)
     for name in (
         "forecast_pseudo_observables_error",
         "conditional_forecast_pseudo_observables_error",
     ):
         assert report["workflow"][name] < 1e-6
     for name in ("forecast_observables_error", "conditional_forecast_observables_error"):
-        assert report["workflow"][name] < 1e-7
+        assert report["workflow"][name] < (1e-7 if vector_id is None else 5e-7)
     for name in ("history_smoothed_states_error", "conditional_smoothed_states_error"):
-        assert report["workflow"][name] < 5e-6
+        assert report["workflow"][name] < (5e-6 if vector_id is None else 1e-5)
+    for label in ("history", "conditional"):
+        for state in ("predicted_states", "filtered_states"):
+            assert report["workflow"][f"{label}_{state}_error"] < 2e-6
+        for covariance in ("filtered_covariances", "predicted_covariances"):
+            key = f"{label}_{covariance}"
+            # Absolute error protects small entries; max-entry normalization
+            # captures scale amplification from the COVID variances (sigma=400).
+            assert report["workflow"][f"{key}_error"] < 2e-4
+            tolerance = 1e-6 if covariance == "filtered_covariances" else 5e-10
+            assert report["workflow"][f"{key}_relative_error"] < tolerance

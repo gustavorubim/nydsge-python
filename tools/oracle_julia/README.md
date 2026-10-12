@@ -263,3 +263,48 @@ history-backed forecasts, so `--data-out` and `--data-in` replay runs stay
 forecast-consistent. `vv export-hard-target-inputs` creates the deterministic
 observable CSV, zero-shock NPZ archive, and a manifest with the exact Julia
 oracle, Python candidate, and strict comparison commands for this smoke.
+
+## ss104 non-default parameter vectors
+
+`export_ss104.jl` uses the existing source overlay at DSGE commit `c09dfe8`
+and StateSpaceRoutines commit `794fb02`, with Julia 1.8.5 and the pinned
+environment. Its optional fourth argument is a JSON vector of explicit
+model-space coordinates; `name@r` selects a parameter regime. Fixed entries
+and bounds are checked by the Julia exporter.
+
+The three committed `tests/fixtures/ss104_vector_*.h5` fixtures perturb all
+96 prior-bearing free coordinates deterministically in estimation space:
+`x[j] += 0.001*sin(vector_id*(j+1))`, clipped to the declared bounds.
+They retain all 29 regimes, 130 parameter values, canonical/system matrices,
+filter/smoother means, likelihoods and both 40-quarter forecast workflows.
+To keep them small, covariance arrays retain zero-based periods 0, 2, 4 and
+the final period. The default fixture still checks complete covariance histories.
+Float64 entries are preserved exactly; gzip and identical-dataset hard links
+reduce storage. The source commits and complete input vectors are embedded
+in each fixture, so tests need no Julia runtime.
+
+Recreate them with the same writable-local/read-only-existing Julia depot
+setup described in [M6](../../docs/ss104_m6.md):
+
+```powershell
+python tools/oracle_julia/ss104_vectors.py vectors outputs/pr4_oracles
+foreach ($vectorId in 1..3) {
+    julia --startup-file=no --compiled-modules=no --project=tools/oracle_julia tools/oracle_julia/export_ss104.jl DSGE_ROOT SSR_ROOT outputs/pr4_oracles/vector_$vectorId.h5 outputs/pr4_oracles/vector_$vectorId.json
+    python tools/oracle_julia/ss104_vectors.py compact outputs/pr4_oracles/vector_$vectorId.h5 tests/fixtures/ss104_vector_$vectorId.h5
+}
+python -m pytest tests/test_ss104.py
+```
+
+Covariance gates in `tests/test_ss104.py` check both history and conditional
+filtered/predicted arrays: maximum absolute error <2e-4, and maximum error
+divided by the oracle's maximum absolute entry <1e-6 filtered / <5e-10
+predicted. Original fixed-default gates, and all matrix/parameter/likelihood
+gates, remain unchanged. The new vector cases use explicit absolute workflow
+budgets of 2e-6 for filter/prediction/forecast states, 1e-5 for smoothed states,
+5e-7 for forecast observables, and 1e-6 for forecast pseudo-observables.
+COVID covariance scales near 6.6e5 amplify tiny solver/float64 differences:
+measured non-default maxima are 2.54e-11 for matrices, 2.85e-7 for likelihood,
+1.73e-6 for filtered states, 8.94e-6 for smoothed states, 1.02e-6 for forecast
+states, and 3.12e-7 for forecast observables. These are separate vector-case
+budgets, not a claim that every vector passes the tighter fixed-default
+workflow limits. No model equation or default gate was changed to obtain parity.
