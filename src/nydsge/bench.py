@@ -30,7 +30,7 @@ from nydsge.runtime import (
     UnsupportedRuntimeError,
     runtime_report,
 )
-from nydsge.solve import compute_system
+from nydsge.solve import System, compute_system
 
 ParityKernel = Literal["forecast", "kalman", "all"]
 
@@ -193,6 +193,7 @@ def benchmark_forecast_targets(
 
     target_statuses = _backend_statuses(statuses)
     system = compute_system(Model1002())
+    assert isinstance(system, System)
     initial_state = np.zeros(system.transition.TTT.shape[0], dtype=np.float64)
     results: list[BenchmarkResult] = []
 
@@ -431,6 +432,7 @@ def benchmark_kalman_targets(
 
     target_statuses = _backend_statuses(statuses)
     system = compute_system(Model1002())
+    assert isinstance(system, System)
     data = np.zeros((periods, system.measurement.ZZ.shape[0]), dtype=np.float64)
     results: list[BenchmarkResult] = []
 
@@ -530,6 +532,7 @@ def benchmark_batched_kalman_targets(
 
     target_statuses = _backend_statuses(statuses)
     system = compute_system(Model1002())
+    assert isinstance(system, System)
     data = np.zeros((batches, periods, system.measurement.ZZ.shape[0]), dtype=np.float64)
     results: list[BenchmarkResult] = []
 
@@ -744,6 +747,7 @@ def _compare_forecast_parity(
     rtol: float,
 ) -> list[BackendParityResult]:
     system = compute_system(Model1002())
+    assert isinstance(system, System)
     initial_state = np.zeros(system.transition.TTT.shape[0], dtype=np.float64)
     reference = forecast_linear_system(
         system,
@@ -789,6 +793,7 @@ def _compare_kalman_parity(
     rtol: float,
 ) -> list[BackendParityResult]:
     system = compute_system(Model1002())
+    assert isinstance(system, System)
     data = np.zeros((periods, system.measurement.ZZ.shape[0]), dtype=np.float64)
     reference = kalman_log_likelihood(system, data)
     return [

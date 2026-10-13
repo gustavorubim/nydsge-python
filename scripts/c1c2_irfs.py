@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from c1c2_common import build_model  # noqa: E402
 
 from nydsge.models import Model1002
-from nydsge.solve import compute_system
+from nydsge.solve import System, compute_system
 
 H = 41
 DESK_DIR = Path(os.environ.get("NYDSGE_DESK_DIR", "/workspace/nydsge/outputs/desk_fomc_20260916"))
@@ -36,6 +36,8 @@ def irf(system, shock_index: int, size: float, *, pseudo: bool = False) -> np.nd
 
 def summarize(model: Model1002) -> dict:
     s = compute_system(model)
+    if not isinstance(s, System):
+        raise ValueError("C1/C2 impulse responses require a single-regime system.")
     obs = list(model.observables)
     pse = list(model.pseudo_observable_mappings)
     shocks = list(model.indexes.exogenous_shocks)

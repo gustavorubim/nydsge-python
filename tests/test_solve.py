@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+from typing import assert_type
+
 import numpy as np
 import pytest
 
 from nydsge.core import NotPortedError
+from nydsge.models import Model1002
+from nydsge.regimes import RegimeSwitchingSystem
 from nydsge.solve import (
     CanonicalSystem,
+    System,
     build_system,
     build_system_from_canonical,
+    compute_system,
     gensys,
     solve_canonical,
 )
@@ -209,3 +215,19 @@ def test_build_system_rejects_nonfinite_matrices() -> None:
             QQ=np.eye(1),
             EE=np.eye(1),
         )
+
+
+def test_compute_system_return_types_follow_dynamic_and_explicit_regimes() -> None:
+    model = Model1002()
+    single = assert_type(compute_system(model), System | RegimeSwitchingSystem)
+    assert isinstance(single, System)
+
+    explicit = assert_type(compute_system(model, regime_models=(model,)), RegimeSwitchingSystem)
+    assert isinstance(explicit, RegimeSwitchingSystem)
+
+    model.set_setting("regime_models", (model,))
+    configured = assert_type(compute_system(model), System | RegimeSwitchingSystem)
+    assert isinstance(configured, RegimeSwitchingSystem)
+    for name in ("TTT", "RRR", "CCC", "ZZ", "DD", "QQ", "EE", "ZZ_pseudo", "DD_pseudo"):
+        np.testing.assert_allclose(configured[1, name], explicit[1, name], atol=1e-12, rtol=0)
+        np.testing.assert_allclose(configured[1, name], single[name], atol=1e-12, rtol=0)

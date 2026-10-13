@@ -124,6 +124,8 @@ def generate_irf_report(
     output_dir = Path(output_dir)
     figure_dir = output_dir / "impulse_responses"
     solved = system if system is not None else compute_system(model)
+    if not isinstance(solved, System):
+        raise ReportError("Impulse-response reports require a single-regime system.")
     irf = observable_irf(solved, horizon=horizon, normalization=normalization)
     obs_labels = _observable_labels(model)
     shock_labels = _shock_labels(model)
@@ -445,6 +447,8 @@ def generate_forecast_report(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     system = compute_system(model)
+    if not isinstance(system, System):
+        raise ReportError("Forecast reports require a single-regime system.")
     if data is None:
         data = load_data(model, check_empty_columns=check_empty_columns)
     forecast = forecast_one(

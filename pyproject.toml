@@ -70,6 +70,12 @@ select = ["B", "E", "F", "I", "UP", "W"]
 [tool.ty.src]
 exclude = ["outputs"]
 
+[tool.ty.environment]
+# CLI scripts and their tests add this directory to sys.path at runtime.
+extra-paths = ["scripts"]
+
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+# Keep repository-local oracle helpers importable with both pytest entry points.
+pythonpath = ["."]

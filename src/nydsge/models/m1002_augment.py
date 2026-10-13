@@ -69,6 +69,9 @@ def augment_transition_ss10(model: Any, transition: Transition) -> Transition:
     ttt_aug[row("e_corepce_t"), row("e_corepce_t")] = v("rho_corepce")
     ttt_aug[row("e_gdp_t"), row("e_gdp_t")] = v("rho_gdp")
     ttt_aug[row("e_gdi_t"), row("e_gdi_t")] = v("rho_gdi")
+    if model.subspec == "ss104":
+        ttt_aug[row("e_meas_pi_t"), row("e_meas_pi_t")] = v("rho_meas_pi")
+        ttt_aug[row("e_meas_pi_t1"), row("e_meas_pi_t")] = 1.0
     if model._is_setting_enabled("add_iid_cond_obs_gdp_meas_err"):
         ttt_aug[row("e_condgdp_t"), row("e_condgdp_t")] = v("rho_condgdp")
     if model._is_setting_enabled("add_iid_anticipated_obs_gdp_meas_err"):
@@ -84,7 +87,11 @@ def augment_transition_ss10(model: Any, transition: Transition) -> Transition:
     rrr_aug[row("e_gdp_t"), shock("gdp_sh")] = 1.0
     rrr_aug[row("e_gdp_t"), shock("gdi_sh")] = v("rho_gdpvar") * v("sigma_gdp") ** 2
     rrr_aug[row("e_gdi_t"), shock("gdi_sh")] = 1.0
+    if model.subspec == "ss104":
+        rrr_aug[row("e_meas_pi_t"), shock("meas_pi_sh")] = 1.0
     for horizon in _expected_ffr_horizons(model):
+        if model.subspec == "ss104":
+            ttt_aug[row(f"e_exp_rm{horizon}"), row(f"e_exp_rm{horizon}")] = v("rho_exp_rm")
         rrr_aug[row(f"e_exp_rm{horizon}"), shock(f"exp_rm_sh{horizon}")] = 1.0
     if model._is_setting_enabled("add_iid_cond_obs_gdp_meas_err"):
         rrr_aug[row("e_condgdp_t"), shock("condgdp_sh")] = 1.0

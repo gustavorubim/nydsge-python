@@ -1,5 +1,49 @@
 # Julia Oracle Tools
 
+## Local-data forecast at ss104 source defaults
+
+`forecast_ss104_nyfed_params.jl` shares the M6 overlay in `ss104_reference.jl`.
+It verifies all 130 parameters in all 29 regimes against the Python manifest,
+reads the hashed effective transformed history, checks the semi-conditioning
+mask and dates, and runs the reference filter, deterministic smoother and
+39-quarter forecast after conditional 2026Q3. Pre-2008Q4 anticipated Taylor
+shock variances are zero on both sides. There is no optimization or sampling.
+
+```powershell
+.\.venv\Scripts\python.exe scripts/forecast_ss104_nyfed_params.py
+$env:JULIA_DEPOT_PATH = "$PWD/outputs/julia-depot;C:/Users/gusta/.julia"
+$env:OPENBLAS_NUM_THREADS = '1'
+./outputs/julia18/julia-1.8.5/bin/julia.exe --startup-file=no --compiled-modules=no --project=tools/oracle_julia tools/oracle_julia/forecast_ss104_nyfed_params.jl outputs/reference/DSGE.jl outputs/reference/StateSpaceRoutines.jl outputs/ss104_nyfed_params outputs/ss104_nyfed_params/julia_forecast.h5
+.\.venv\Scripts\python.exe tools/oracle_julia/compare_ss104_nyfed_params.py outputs/ss104_nyfed_params/julia_forecast.h5
+```
+
+The comparison exports Julia quarterly/annual CSVs and a parity JSON under
+`data/estimates`. It checks data identity, parameter equality, raw model-unit
+paths and quarterly GDP/core PCE/FFR plus annual GDP/core PCE Q4/Q4. The explicit
+path tolerance is **1e-5 percentage points** over the complete forecast horizon.
+The Julia HDF5 and unmasked/masked transformed data remain in ignored outputs.
+This verifies translation at code defaults; it does not reproduce the FRBNY
+production posterior. See [the forecast report](../../docs/ss104_nyfed_params_forecast.md).
+
+## Fixed-default ss104 oracle (M6)
+
+`export_ss104.jl` exports all 29 regimes of public ss104 and a deterministic
+filter/smoother/conditional-forecast replay without optimizing or sampling
+parameters. Use Julia **1.8.5** with this directory's pinned environment; the
+exporter loads package types and overlays economic methods from the supplied
+DSGE.jl c09dfe8 clone, plus filtering/smoothing from StateSpaceRoutines 794fb02.
+The production Python package never calls Julia or reads the committed fixture.
+
+```text
+julia --startup-file=no --compiled-modules=no --project=tools/oracle_julia tools/oracle_julia/export_ss104.jl DSGE_ROOT SSR_ROOT outputs/ss104-oracle.h5
+python tools/oracle_julia/compare_ss104.py outputs/ss104-oracle.h5 --out outputs/ss104-parity.json
+```
+
+The source fixture is `tests/fixtures/ss104_default_oracle.h5`; names permute
+every axis before comparison. Tests require its matrices, parameter values,
+likelihoods, smoothed states and both forecast cases. Full numerical evidence
+and absolute tolerances are in [ss104_m6.md](../../docs/ss104_m6.md).
+
 This directory is reserved for migration-only scripts that run upstream
 `DSGE.jl` to export Python-readable parity fixtures.
 
@@ -219,3 +263,48 @@ history-backed forecasts, so `--data-out` and `--data-in` replay runs stay
 forecast-consistent. `vv export-hard-target-inputs` creates the deterministic
 observable CSV, zero-shock NPZ archive, and a manifest with the exact Julia
 oracle, Python candidate, and strict comparison commands for this smoke.
+
+## ss104 non-default parameter vectors
+
+`export_ss104.jl` uses the existing source overlay at DSGE commit `c09dfe8`
+and StateSpaceRoutines commit `794fb02`, with Julia 1.8.5 and the pinned
+environment. Its optional fourth argument is a JSON vector of explicit
+model-space coordinates; `name@r` selects a parameter regime. Fixed entries
+and bounds are checked by the Julia exporter.
+
+The three committed `tests/fixtures/ss104_vector_*.h5` fixtures perturb all
+96 prior-bearing free coordinates deterministically in estimation space:
+`x[j] += 0.001*sin(vector_id*(j+1))`, clipped to the declared bounds.
+They retain all 29 regimes, 130 parameter values, canonical/system matrices,
+filter/smoother means, likelihoods and both 40-quarter forecast workflows.
+To keep them small, covariance arrays retain zero-based periods 0, 2, 4 and
+the final period. The default fixture still checks complete covariance histories.
+Float64 entries are preserved exactly; gzip and identical-dataset hard links
+reduce storage. The source commits and complete input vectors are embedded
+in each fixture, so tests need no Julia runtime.
+
+Recreate them with the same writable-local/read-only-existing Julia depot
+setup described in [M6](../../docs/ss104_m6.md):
+
+```powershell
+python tools/oracle_julia/ss104_vectors.py vectors outputs/pr4_oracles
+foreach ($vectorId in 1..3) {
+    julia --startup-file=no --compiled-modules=no --project=tools/oracle_julia tools/oracle_julia/export_ss104.jl DSGE_ROOT SSR_ROOT outputs/pr4_oracles/vector_$vectorId.h5 outputs/pr4_oracles/vector_$vectorId.json
+    python tools/oracle_julia/ss104_vectors.py compact outputs/pr4_oracles/vector_$vectorId.h5 tests/fixtures/ss104_vector_$vectorId.h5
+}
+python -m pytest tests/test_ss104.py
+```
+
+Covariance gates in `tests/test_ss104.py` check both history and conditional
+filtered/predicted arrays: maximum absolute error <2e-4, and maximum error
+divided by the oracle's maximum absolute entry <1e-6 filtered / <5e-10
+predicted. Original fixed-default gates, and all matrix/parameter/likelihood
+gates, remain unchanged. The new vector cases use explicit absolute workflow
+budgets of 2e-6 for filter/prediction/forecast states, 1e-5 for smoothed states,
+5e-7 for forecast observables, and 1e-6 for forecast pseudo-observables.
+COVID covariance scales near 6.6e5 amplify tiny solver/float64 differences:
+measured non-default maxima are 2.54e-11 for matrices, 2.85e-7 for likelihood,
+1.73e-6 for filtered states, 8.94e-6 for smoothed states, 1.02e-6 for forecast
+states, and 3.12e-7 for forecast observables. These are separate vector-case
+budgets, not a claim that every vector passes the tighter fixed-default
+workflow limits. No model equation or default gate was changed to obtain parity.

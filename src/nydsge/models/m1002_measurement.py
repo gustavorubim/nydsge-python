@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from math import exp, log
 from typing import Any
 
@@ -10,7 +10,14 @@ from nydsge.models.expected_ffr import parse_expected_ffr_horizons
 from nydsge.solve import Measurement, Transition
 
 
-def measurement_matrices_ss10(model: Any, transition: Transition) -> Measurement:
+def measurement_matrices_ss10(
+    model: Any,
+    transition: Transition,
+    *,
+    transitions: Sequence[Transition] | None = None,
+    reg: int = 1,
+    information_set: Sequence[int] | None = None,
+) -> Measurement:
     """Build default Model1002 ss10 measurement matrices."""
     model.steadystate()
     endo = model.indexes.endogenous_states
@@ -22,6 +29,16 @@ def measurement_matrices_ss10(model: Any, transition: Transition) -> Measurement
     n_exogenous = len(exo)
     ttt = np.asarray(transition.TTT, dtype=np.float64)
     ccc = np.asarray(transition.CCC, dtype=np.float64)
+
+    def expectations(horizon: int, *, summed: bool = False) -> tuple[np.ndarray, np.ndarray]:
+        if transitions is None or information_set is None or len(information_set) == 1:
+            helper = _k_periods_ahead_expected_sums if summed else _k_periods_ahead_expectations
+            return helper(ttt, ccc, horizon)
+        from nydsge.regimes import k_periods_ahead_expectations, k_periods_ahead_expected_sums
+
+        helper = k_periods_ahead_expected_sums if summed else k_periods_ahead_expectations
+        return helper(transitions, horizon, reg=reg, information_set=information_set)
+
     if ttt.shape != (n_states, n_states):
         msg = f"TTT must have shape {(n_states, n_states)} for Model1002 measurement."
         raise ValueError(msg)
@@ -85,6 +102,10 @@ def measurement_matrices_ss10(model: Any, transition: Transition) -> Measurement
     if model._is_setting_enabled("add_iid_cond_obs_corepce_meas_err"):
         set_zz("obs_corepce", endo_aug, "e_condcorepce_t", 1.0)
     set_dd("obs_corepce", inflation_trend)
+    if model.subspec == "ss104":
+        for name in ("obs_gdpdeflator", "obs_corepce"):
+            set_zz(name, endo_aug, "e_meas_pi_t", 1.0)
+            set_zz(name, endo_aug, "e_meas_pi_t1", -1.0)
 
     set_zz("obs_nominalrate", endo, "R_t", 1.0)
     set_dd("obs_nominalrate", v("Rstarn"))
@@ -103,7 +124,7 @@ def measurement_matrices_ss10(model: Any, transition: Transition) -> Measurement
     set_zz("obs_spread", endo, "R_t", -1.0)
     set_dd("obs_spread", 100.0 * log(v("spr")))
 
-    ttt10, ccc10 = _k_periods_ahead_expected_sums(ttt, ccc, 40)
+    ttt10, ccc10 = expectations(40, summed=True)
     ttt10 = ttt10 / 40.0
     ccc10 = ccc10 / 40.0
     zz[obs["obs_longinflation"] - 1, :] = ttt10[endo["pi_t"] - 1, :]
@@ -146,6 +167,16 @@ def measurement_matrices_ss10(model: Any, transition: Transition) -> Measurement
     }
     for shock_name, sigma_name in shock_sigmas.items():
         set_qq(shock_name, v(sigma_name) ** 2)
+    if model.subspec == "ss104":
+        set_qq("meas_pi_sh", v("sigma_meas_pi") ** 2)
+        if model.get_setting("add_ait_rm"):
+            set_qq("rm_ait_sh", v("sigma_ait_rm") ** 2)
+            for horizon in model.get_setting("mon_anticipated_ait_shocks", ()):
+                set_qq(f"rm_ait_shl{horizon}", v(f"sigma_ait_r_m{horizon}") ** 2)
+        for key in ("ziid", "biidc", "phi"):
+            set_qq(f"{key}_sh", v(f"sigma_{key}") ** 2)
+            for horizon in range(1, model._anticipated_shock_settings().get(key, 0) + 1):
+                set_qq(f"{key}_shl{horizon}", v(f"sigma_{key}{horizon}") ** 2)
 
     if model._is_setting_enabled("add_initialize_pgap_ygap_pseudoobs"):
         set_qq("pgap_sh", v("sigma_pgap") ** 2)
@@ -158,9 +189,9 @@ def measurement_matrices_ss10(model: Any, transition: Transition) -> Measurement
         set_qq("condcorepce_sh", v("sigma_condcorepce") ** 2)
 
     n_mon_anticipated_shocks = int(model.get_setting("n_mon_anticipated_shocks"))
-    anticipated_rate_expectations = _one_to_k_periods_ahead_expectations(
-        ttt, ccc, n_mon_anticipated_shocks
-    )
+    anticipated_rate_expectations = [
+        expectations(step) for step in range(1, n_mon_anticipated_shocks + 1)
+    ]
     for horizon, (ttt_h, ccc_h) in enumerate(anticipated_rate_expectations, start=1):
         obs_name = f"obs_nominalrate{horizon}"
         zz[obs[obs_name] - 1, :] = ttt_h[endo["R_t"] - 1, :]
@@ -171,7 +202,7 @@ def measurement_matrices_ss10(model: Any, transition: Transition) -> Measurement
         if horizon <= n_mon_anticipated_shocks:
             ttt_h, ccc_h = anticipated_rate_expectations[horizon - 1]
         else:
-            ttt_h, ccc_h = _k_periods_ahead_expectations(ttt, ccc, horizon)
+            ttt_h, ccc_h = expectations(horizon)
         obs_name = f"obs_exp_nominalrate{horizon}"
         zz[obs[obs_name] - 1, :] = ttt_h[endo["R_t"] - 1, :]
         set_zz(obs_name, endo_aug, f"e_exp_rm{horizon}", 1.0)
@@ -185,13 +216,13 @@ def measurement_matrices_ss10(model: Any, transition: Transition) -> Measurement
         gdp_row[endo_aug["e_gdp_t1"] - 1] = -meas_err * v("me_level")
         for horizon in range(1, int(model.get_setting("n_anticipated_obs_gdp", 1)) + 1):
             obs_name = f"obs_gdp{horizon}"
-            ttt_h, ccc_h = _k_periods_ahead_expectations(ttt, ccc, horizon)
+            ttt_h, ccc_h = expectations(horizon)
             zz[obs[obs_name] - 1, :] = gdp_row @ ttt_h
             if model._is_setting_enabled("add_iid_anticipated_obs_gdp_meas_err"):
                 set_zz(obs_name, endo_aug, "e_gdpexp_t", 1.0)
             set_dd(obs_name, trend_growth + float(gdp_row @ ccc_h))
 
-    if not np.allclose(ccc, 0.0):
+    if not np.allclose(ccc, 0.0) and model.get_setting("policy") != "zlb":
         steady_offset = np.linalg.solve(np.eye(n_states, dtype=np.float64) - ttt, ccc)
         dd += zz @ steady_offset
 

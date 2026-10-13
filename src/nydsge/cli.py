@@ -86,7 +86,7 @@ from nydsge.runtime import (
     UnsupportedRuntimeError,
     runtime_report,
 )
-from nydsge.solve import CanonicalSolveMethod, compute_system, solve_canonical
+from nydsge.solve import CanonicalSolveMethod, System, compute_system, solve_canonical
 from nydsge.vv import (
     check_fixture_coverage,
     check_sampler_proposal_trace,
@@ -956,6 +956,8 @@ def solve(
     )
     try:
         system = compute_system(model_obj)
+        if not isinstance(system, System):
+            raise NotPortedError("The solve summary requires a single-regime system.")
     except NotPortedError as err:
         raise _not_ported_exit(str(err)) from err
     table = Table(title=f"{model_obj.description()} solved system")
@@ -2687,6 +2689,8 @@ def vv_export_system(
     )
     try:
         system = compute_system(model_obj)
+        if not isinstance(system, System):
+            raise NotPortedError("System fixture export requires a single-regime system.")
         path = save_system_fixture(system, output_dir, filename=filename)
         manifest_path = save_fixture_manifest(
             output_dir,
@@ -2911,6 +2915,8 @@ def vv_export_matrices(
         canonical = model_obj.equilibrium_matrices()
         solved = solve_canonical(canonical, method=solve_method)
         system = compute_system(model_obj, method=solve_method)
+        if not isinstance(system, System):
+            raise NotPortedError("System fixture export requires a single-regime system.")
         parameter_path = save_parameter_fixture(model_obj.parameters, output_dir)
         metadata_path = save_model_metadata_fixture(model_obj, output_dir)
         steady_state_path = save_steady_state_fixture(model_obj.steady_state, output_dir)
@@ -4355,6 +4361,8 @@ def _export_model1002_candidate_suite(
     canonical = model.equilibrium_matrices()
     solved = solve_canonical(canonical)
     system = compute_system(model)
+    if not isinstance(system, System):
+        raise NotPortedError("System fixture export requires a single-regime system.")
     parameter_path = save_parameter_fixture(model.parameters, output_dir)
     metadata_path = save_model_metadata_fixture(model, output_dir)
     steady_state_path = save_steady_state_fixture(model.steady_state, output_dir)

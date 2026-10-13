@@ -1,0 +1,55 @@
+{
+  "passed": true,
+  "tolerance_percentage_points": 1e-05,
+  "quarterly_max_abs_pp": {
+    "gdp": 1.2220930116768614e-06,
+    "corepce": 1.9850323207393217e-07,
+    "ffr": 5.066203589976226e-08
+  },
+  "annual_q4_q4_max_abs_pp": {
+    "gdp": 4.2474339245757164e-07,
+    "corepce": 1.901471147203182e-07
+  },
+  "model_units_max_abs": {
+    "PseudoGDP": 2.850888933814133e-07,
+    "PseudoCorePCE": 4.8575233724257316e-08,
+    "NominalFFR": 1.2665508974940565e-08
+  },
+  "log_likelihood": {
+    "python": -6340.517802593065,
+    "julia": -6340.517811319675,
+    "max_abs_error": 8.726609848963562e-06
+  },
+  "julia": {
+    "cond_type": "semi",
+    "parameter_max_abs_error": 0.0,
+    "julia_version": "1.8.5",
+    "forecast_start": "2026Q3",
+    "presample_periods": 2,
+    "dsge_commit": "c09dfe881f8809f65b8c0f08a761ec6cc456a6fb",
+    "forecast_end": "2036Q2",
+    "statespace_commit": "794fb02ff45a62537d8d5d037c1d12b3aa7e4574",
+    "conditioned_observations_sha256": "b0097a5ebc8557670a273dfd03b45505e2758a7f8fc4e271e398dcbb56ec58cb",
+    "parameter_source": "DSGE.jl ss104 defaults (the published code's calibration, not the FRBNY production posterior)",
+    "estimation_runs": 0
+  },
+  "oracle_sha256": "8bf912cea18be44ffdb76716b009e95aa25e734a2c995a0abe6cd39831f7b9e2",
+  "forecast_quarters": 40,
+  "annual_years": [
+    2026,
+    2027,
+    2028,
+    2029,
+    2030,
+    2031,
+    2032,
+    2033,
+    2034,
+    2035
+  ],
+  "input_sha256": {
+    "data/public/fred_levels_20261006.csv": "491078df6e9d9b05d0ca68aa7f4ac3c6f8bf1cb0ef39568c75cc089e4a303c85",
+    "data/public/nonfred_sources_20261006.csv": "a75929eeafcfd3c1d22fd334bdb64869d48e9ee129792d8093597b2554212f28",
+    "data/public/ss104_survey_ffr_local.csv": "c971c477e3be94882ba06a67c634b3ba2ac88f2a66bd633ac6658e5ae3ebb985"
+  }
+}

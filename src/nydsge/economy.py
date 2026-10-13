@@ -347,6 +347,8 @@ def run_quarterly_economy_package(
             maxiter=config.refresh_maxiter,
         )
     system = compute_system(model)
+    if not isinstance(system, System):
+        raise ValueError("Economy projections require a single-regime system.")
     baseline = forecast_one(
         model,
         input_type="mode",

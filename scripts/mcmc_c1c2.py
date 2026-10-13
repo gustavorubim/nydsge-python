@@ -35,18 +35,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from c1c2_common import N_PRESAMPLE, PRESAMPLE_START, ROOT  # noqa: E402
 from estimate_c1c2_mode import _setup  # noqa: E402
 
+from nydsge.core import DSGEModel  # noqa: E402
 from nydsge.estimate import (  # noqa: E402
     _log_posterior_for_estimation_values,
     _set_parameter_estimation_vector,
     metropolis_hastings,
     parameter_estimation_vector,
 )
+from nydsge.models import Model1002  # noqa: E402
 
 MODE_JSON = ROOT / "data/estimates/m1002_ss10_c1c2_mode_maskcovid.json"
 HESSIAN_NPY = ROOT / "data/estimates/m1002_ss10_c1c2_mode_maskcovid.hessian.npy"
 
 
-def load_problem() -> tuple[object, np.ndarray, tuple[str, ...], np.ndarray, np.ndarray]:
+def load_problem() -> tuple[Model1002, np.ndarray, tuple[str, ...], np.ndarray, np.ndarray]:
     """Model, masked data, parameter names, mode (estimation space), proposal covariance."""
 
     model, data, names, _ = _setup(0, True)
@@ -66,10 +68,10 @@ def load_problem() -> tuple[object, np.ndarray, tuple[str, ...], np.ndarray, np.
     return model, data, names, x_mode, covariance
 
 
-def log_target(model: object, data: np.ndarray, names: tuple[str, ...], x: np.ndarray) -> float:
-    original = dict(model.parameters)  # type: ignore[attr-defined]
+def log_target(model: DSGEModel, data: np.ndarray, names: tuple[str, ...], x: np.ndarray) -> float:
+    original = dict(model.parameters)
     value = _log_posterior_for_estimation_values(
-        model,  # type: ignore[arg-type]
+        model,
         data,
         original,
         names,
@@ -78,7 +80,7 @@ def log_target(model: object, data: np.ndarray, names: tuple[str, ...], x: np.nd
         log_likelihood_start=N_PRESAMPLE,
         jacobian=True,
     )
-    model.parameters.update(original)  # type: ignore[attr-defined]
+    model.parameters.update(original)
     return value
 
 
@@ -90,7 +92,7 @@ def start_points(
     n_mode_starts: int,
     overdispersion: float,
     seed: int,
-    model: object,
+    model: DSGEModel,
     data: np.ndarray,
     names: tuple[str, ...],
 ) -> list[np.ndarray]:
