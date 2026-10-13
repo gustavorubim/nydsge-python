@@ -28,6 +28,7 @@ from nydsge.kalman import (
     smooth_kalman_result,
 )
 from nydsge.models import Model1002
+from nydsge.regimes import RegimeSwitchingSystem
 from nydsge.runtime import RuntimeConfig
 from nydsge.solve import Measurement, PseudoMeasurement, System, Transition, compute_system
 
@@ -611,8 +612,16 @@ def test_parameter_forecast_reuse_matches_fresh_model(subspec, scenario) -> None
         model.set_setting("regime_switching", True)
         baseline.set_setting("regime_switching", True)
     actual_system, expected_system = compute_system(model), compute_system(baseline)
-    actual_systems = actual_system.systems if subspec == "ss104" else (actual_system,)
-    expected_systems = expected_system.systems if subspec == "ss104" else (expected_system,)
+    if subspec == "ss104":
+        assert isinstance(actual_system, RegimeSwitchingSystem)
+        assert isinstance(expected_system, RegimeSwitchingSystem)
+        actual_systems = actual_system.systems
+        expected_systems = expected_system.systems
+    else:
+        assert isinstance(actual_system, System)
+        assert isinstance(expected_system, System)
+        actual_systems = (actual_system,)
+        expected_systems = (expected_system,)
     for actual_regime, expected_regime in zip(actual_systems, expected_systems, strict=True):
         for name in ("TTT", "RRR", "CCC", "ZZ", "DD", "QQ", "EE", "ZZ_pseudo", "DD_pseudo"):
             np.testing.assert_allclose(
@@ -755,6 +764,7 @@ def test_forecast_one_model1002_uses_filtered_history_as_forecast_start() -> Non
     assert output.log_likelihood is not None
     assert np.isfinite(output.log_likelihood)
     system = compute_system(model)
+    assert isinstance(system, System)
     expected_first_forecast_state = (
         system.transition.TTT @ output.history_states[-1] + system.transition.CCC
     )
@@ -777,6 +787,7 @@ def test_forecast_one_model1002_can_use_smoothed_history() -> None:
     )
 
     system = compute_system(model)
+    assert isinstance(system, System)
     filtered = kalman_log_likelihood(
         system,
         data,
@@ -821,6 +832,7 @@ def test_forecast_one_model1002_semiconditional_data_reduces_horizon() -> None:
     assert output.history_observables.shape == (1, 19)
     assert output.states.shape == (2, 84)
     system = compute_system(model)
+    assert isinstance(system, System)
     combined = np.vstack(
         [
             df_to_matrix(model, data, in_sample=True),
@@ -1255,3 +1267,32 @@ def _dated_observable_frame(model: Model1002, dates: list[str]) -> pd.DataFrame:
             **{name: np.zeros(len(dates), dtype=np.float64) for name in model.observables},
         }
     )
+
+
+def test_regime_forecasts_without_an_initial_state_fail_explicitly() -> None:
+    model = Model1002()
+    model.set_setting("regime_models", (model,))
+    with pytest.raises(NotPortedError, match="require an explicit initial state"):
+        forecast_one(model, "mode", "none", ["forecastobs"], horizon=1)
+    sampler = _sampler_for_alpha_draws(model)
+    with pytest.raises(NotPortedError, match="require an explicit initial state"):
+        forecast_parameter_draws(model, sampler, horizon=1)
+
+
+def test_one_regime_forecasts_preserve_explicit_initial_state_behavior() -> None:
+    model = Model1002()
+    n_states = len(model.indexes.endogenous_states) + len(model.indexes.endogenous_states_augmented)
+    initial_state = np.linspace(-0.1, 0.1, n_states)
+    sampler = _sampler_for_alpha_draws(model)
+    single_mode = forecast_one(
+        model, "mode", "none", ["forecastobs"], horizon=2, initial_state=initial_state
+    )
+    single_draws = forecast_parameter_draws(model, sampler, horizon=2, initial_state=initial_state)
+    model.set_setting("regime_models", (model,))
+    regime_mode = forecast_one(
+        model, "mode", "none", ["forecastobs"], horizon=2, initial_state=initial_state
+    )
+    regime_draws = forecast_parameter_draws(model, sampler, horizon=2, initial_state=initial_state)
+    for single, regime in ((single_mode, regime_mode), (single_draws, regime_draws)):
+        np.testing.assert_allclose(regime.states, single.states, atol=1e-12, rtol=0)
+        np.testing.assert_allclose(regime.observables, single.observables, atol=1e-12, rtol=0)

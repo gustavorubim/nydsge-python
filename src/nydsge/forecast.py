@@ -941,6 +941,8 @@ def forecast_one(
                 if initial_state is None and filtered_history_states.shape[0] > 0:
                     start = filtered_history_states[-1].copy()
             else:
+                if not isinstance(system, System):
+                    raise NotPortedError("Empty forecast histories require a single-regime system.")
                 historical_states = np.zeros((0, system.transition.TTT.shape[0]))
             if _output_requested(output_vars, "histstates"):
                 history_states = historical_states
@@ -952,6 +954,8 @@ def forecast_one(
                     historical_states,
                 )
             if normalized_cond_type == "full" and data_split.conditional_periods > 0:
+                if not isinstance(system, System):
+                    raise NotPortedError("Full conditioning requires a single-regime system.")
                 conditional_targets = data_split.observations[data_split.history_periods :]
                 conditioning = solve_shocks_for_observable_targets(
                     system,
@@ -968,6 +972,8 @@ def forecast_one(
             if shocks is not None:
                 msg = "Explicit shocks are only supported for input_type='mode'."
                 raise ValueError(msg)
+            if not isinstance(system, System):
+                raise NotPortedError("Shock-sample forecasts require a single-regime system.")
             forecast = forecast_linear_system_samples(
                 system,
                 start,
@@ -1206,8 +1212,12 @@ def _flatten_forecast_samples(samples: np.ndarray) -> np.ndarray:
     )
 
 
-def _initial_forecast_state(system: System, initial_state: np.ndarray | None) -> np.ndarray:
+def _initial_forecast_state(
+    system: System | RegimeSwitchingSystem, initial_state: np.ndarray | None
+) -> np.ndarray:
     if initial_state is None:
+        if not isinstance(system, System):
+            raise NotPortedError("Regime-system forecasts require an explicit initial state.")
         return np.zeros(system.transition.TTT.shape[0], dtype=np.float64)
     return np.asarray(initial_state, dtype=np.float64)
 
@@ -1384,6 +1394,8 @@ def historical_decomposition(
     """
 
     system = compute_system(model)
+    if not isinstance(system, System):
+        raise NotPortedError("Historical decomposition requires a single-regime system.")
     if data is None:
         data = load_data(model, check_empty_columns=check_empty_columns)
     split = _forecast_data_split(
@@ -1492,7 +1504,7 @@ def _observable_shock_design(system: System, *, horizon: int) -> np.ndarray:
 
 
 def _states_for_history_method(
-    system: System,
+    system: System | RegimeSwitchingSystem,
     filtered: KalmanResult,
     history_method: str,
 ) -> np.ndarray:

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import math
+from typing import assert_type
 
 import numpy as np
 import pytest
 
 from nydsge.core import NotPortedError
 from nydsge.models import Model1002
-from nydsge.solve import Transition, compute_system
+from nydsge.regimes import RegimeSwitchingSystem
+from nydsge.solve import System, Transition, compute_system
 
 
 def test_model1002_constructs_ss10_shape() -> None:
@@ -228,7 +230,8 @@ def test_model1002_uses_all_ffr_qs_when_expected_ffr_empty() -> None:
 
 def test_model1002_ss104_builds_regime_system() -> None:
     model = Model1002(subspec="ss104")
-    regimes = compute_system(model)
+    regimes = assert_type(compute_system(model), System | RegimeSwitchingSystem)
+    assert isinstance(regimes, RegimeSwitchingSystem)
     assert len(regimes.systems) == 29
     system = regimes[1]
 
@@ -1598,6 +1601,7 @@ def test_compute_system_builds_model1002_ss10_system() -> None:
     model = Model1002()
 
     system = compute_system(model)
+    assert isinstance(system, System)
 
     endo = model.indexes.endogenous_states
     endo_aug = model.indexes.endogenous_states_augmented

@@ -66,6 +66,7 @@ def test_covid_equations_and_regime_filter(ss104_system):
     filtered = kalman_log_likelihood(system, data, regime_indices=path)
     smooth = smooth_kalman_result(system, filtered)
     assert np.isfinite(filtered.log_likelihood)
+    assert smooth.smoothed_states is not None
     assert np.isfinite(smooth.smoothed_states).all()
     print(f"COVID canonical residual={max_residual:.3e}; QQ max error=0")
 
@@ -202,12 +203,83 @@ def test_ss104_presample_anticipated_policy_variances(ss104_system):
 
     model, system = ss104_system
     covariances = model_process_covariances(model, system, 2, start_date="2008Q3")
+    assert covariances is not None
     qq = system[1, "QQ"].copy()
     ant = [model.indexes.exogenous_shocks[f"rm_shl{h}"] - 1 for h in range(1, 7)]
     qq[ant, :] = qq[:, ant] = 0
     r = system[1, "RRR"]
     np.testing.assert_array_equal(covariances[0], r @ qq @ r.T)
     np.testing.assert_array_equal(covariances[1], r @ system[1, "QQ"] @ r.T)
+
+
+def test_ss104_forecast_rejects_single_regime_system(ss104_system):
+    from nydsge.ss104_workflow import forecast_ss104
+
+    model, system = ss104_system
+    with pytest.raises(TypeError, match="RegimeSwitchingSystem"):
+        forecast_ss104(model, system=system[1], horizon=0)
+
+
+def test_ss104_forecast_rejects_missing_start_quarter(ss104_system):
+    import pandas as pd
+
+    from nydsge.ss104_workflow import forecast_ss104
+
+    _, system = ss104_system
+    model = Model1002("ss104")
+    model.set_setting("date_forecast_start", pd.NaT)
+    with pytest.raises(ValueError, match="date_forecast_start must be a valid quarter"):
+        forecast_ss104(model, system=system, horizon=0)
+
+
+def _oracle_parameter_vector():
+    import json
+    from pathlib import Path
+
+    import h5py
+
+    with h5py.File(Path(__file__).parent / "fixtures/ss104_vector_1.h5") as fixture:
+        return json.loads(fixture["metadata/json"].asstr()[()])["parameter_vector"]
+
+
+def test_ss104_oracle_vector_preserves_fixed_coordinates():
+    from nydsge.ss104_estimation import ss104_parameter_catalog
+    from tools.oracle_julia.compare_ss104 import apply_parameter_vector
+
+    model = Model1002("ss104")
+    fixed = {name: p for name, p in model.parameters.items() if p.fixed}
+    fixed_regimes = {
+        (name, regime): p
+        for name, path in model.get_setting("parameter_regimes").items()
+        for regime, p in path.items()
+        if p.fixed
+    }
+    vector = _oracle_parameter_vector()
+    apply_parameter_vector(model, vector)
+    assert {name: model.parameters[name] for name in fixed} == fixed
+    assert {
+        (name, regime): model.get_setting("parameter_regimes")[name][regime]
+        for name, regime in fixed_regimes
+    } == fixed_regimes
+    assert {k: p.value for k, p in ss104_parameter_catalog(model).items()} == vector["parameters"]
+
+
+@pytest.mark.parametrize("corruption", ["coordinates", "keys", "value", "nonfinite"])
+def test_ss104_oracle_vector_rejects_inconsistent_inputs(corruption):
+    from tools.oracle_julia.compare_ss104 import apply_parameter_vector
+
+    vector = _oracle_parameter_vector()
+    name = vector["coordinates"][0]
+    if corruption == "coordinates":
+        vector["coordinates"].reverse()
+    elif corruption == "keys":
+        vector["parameters"].pop(name)
+    elif corruption == "value":
+        vector["parameters"][name] += 1e-6
+    else:
+        vector["parameters"][name] = float("nan")
+    with pytest.raises(ValueError, match="Oracle"):
+        apply_parameter_vector(Model1002("ss104"), vector)
 
 
 @pytest.mark.parametrize(
@@ -219,8 +291,8 @@ def test_ss104_source_julia_oracle_parity(ss104_system, vector_id):
 
     import h5py
 
-    from nydsge.ss104_estimation import ss104_parameter_catalog, update_ss104_parameters
-    from tools.oracle_julia.compare_ss104 import compare
+    from nydsge.ss104_estimation import ss104_parameter_catalog
+    from tools.oracle_julia.compare_ss104 import apply_parameter_vector, compare
 
     filename = "ss104_default_oracle.h5" if vector_id is None else f"ss104_vector_{vector_id}.h5"
     path = Path(__file__).parent / "fixtures" / filename
@@ -233,16 +305,19 @@ def test_ss104_source_julia_oracle_parity(ss104_system, vector_id):
         catalog = ss104_parameter_catalog(model)
         assert vector["coordinates"] == list(catalog)
         assert vector["id"] == f"vector_{vector_id}"
-        update_ss104_parameters(model, catalog, vector["estimation_values"])
+        apply_parameter_vector(model, vector)
         updated = ss104_parameter_catalog(model)
         assert vector["parameters"] == {k: p.value for k, p in updated.items()}
         assert all(
-            not p.fixed and p.value_bounds[0] <= p.value <= p.value_bounds[1]
+            not p.fixed
+            and p.value_bounds is not None
+            and p.value_bounds[0] <= p.value <= p.value_bounds[1]
             for p in updated.values()
         )
         assert sum(p.value != catalog[k].value for k, p in updated.items()) >= 90
         system = compute_system(model)
-    report = compare(path, model=model, system=system)
+    # Also exercise the standalone comparator's identical model-space setup.
+    report = compare(path) if vector_id == 1 else compare(path, model=model, system=system)
     assert report["metadata"]["dsge_commit"] == "c09dfe881f8809f65b8c0f08a761ec6cc456a6fb"
     assert report["metadata"]["statespace_commit"] == "794fb02ff45a62537d8d5d037c1d12b3aa7e4574"
     assert len(report["regimes"]) == 29

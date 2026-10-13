@@ -19,7 +19,7 @@ from nydsge.forecast import solve_shocks_for_observable_targets
 from nydsge.models import Model1002
 from nydsge.public_sources import load_public_sources_csv, merge_public_sources
 from nydsge.scenarios import current_public_observables
-from nydsge.solve import compute_system
+from nydsge.solve import System, compute_system
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -44,6 +44,7 @@ def test_no_anticipated_shocks_drops_ois_rows_and_shocks() -> None:
     assert "sigma_r_m" in names
     assert not any(name.startswith("sigma_r_m") and name != "sigma_r_m" for name in names)
     system = compute_system(model)
+    assert isinstance(system, System)
     zz = system.measurement.ZZ
     obs = list(model.observables)
     for row in ("obs_longinflation", "obs_longrate", "obs_tfp"):
@@ -114,6 +115,7 @@ def test_restrict_conditioning_quarters_keeps_only_named_observables() -> None:
 def test_qq_weighted_conditioning_is_weighted_minimum_norm() -> None:
     model = _model(0)
     system = compute_system(model)
+    assert isinstance(system, System)
     n_obs = system.measurement.ZZ.shape[0]
     start = np.zeros(system.transition.TTT.shape[0])
     targets = np.full((2, n_obs), np.nan)

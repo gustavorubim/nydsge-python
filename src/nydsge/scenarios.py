@@ -25,7 +25,7 @@ from nydsge.forecast import (
     solve_shocks_for_observable_targets,
 )
 from nydsge.models import Model1002
-from nydsge.solve import compute_system
+from nydsge.solve import System, compute_system
 
 DEFAULT_UNEMPLOYMENT_TARGETS = (5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 15.0)
 DEFAULT_REFRESH_PARAMETERS = (
@@ -235,6 +235,8 @@ def run_ai_economy_study(
     baseline_model = np.asarray(baseline_output.observables, dtype=np.float64)
     baseline_report = reverse_transform_observables(model, baseline_model)
     system = compute_system(model)
+    if not isinstance(system, System):
+        raise ValueError("Unemployment scenarios require a single-regime system.")
     dates = _quarter_sequence(forecast_start, horizon)
 
     baseline_unemployment = _forecast_unemployment_baseline(

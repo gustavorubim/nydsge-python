@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -52,10 +53,13 @@ def nyfed() -> dict:
     }
 
 
-def q4q4(qq: dict, year: int) -> float:
-    vals = [qq.get(f"{year}-Q{i}") for i in range(1, 5)]
-    if any(v is None or not np.isfinite(v) for v in vals):
-        return float("nan")
+def q4q4(qq: Mapping[str, float | None], year: int) -> float:
+    vals: list[float] = []
+    for i in range(1, 5):
+        value = qq.get(f"{year}-Q{i}")
+        if value is None or not np.isfinite(value):
+            return float("nan")
+        vals.append(value)
     return float(100 * (np.prod([(1 + v / 100) ** 0.25 for v in vals]) - 1))
 
 

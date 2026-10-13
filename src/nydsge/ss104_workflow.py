@@ -14,7 +14,7 @@ from nydsge.kalman import (
     smooth_kalman_result,
 )
 from nydsge.models.ss104 import initialize_gap_observations
-from nydsge.regimes import regime_indices_from_dates
+from nydsge.regimes import RegimeSwitchingSystem, regime_indices_from_dates
 from nydsge.solve import compute_system
 
 
@@ -70,7 +70,11 @@ def forecast_ss104(
     if horizon < 0:
         raise ValueError("Forecast horizon must be nonnegative.")
     system = compute_system(model) if system is None else system
+    if not isinstance(system, RegimeSwitchingSystem):
+        raise TypeError("ss104 forecasting requires a RegimeSwitchingSystem.")
     forecast_start = pd.Period(model.get_setting("date_forecast_start"), freq="Q")
+    if not isinstance(forecast_start, pd.Period):
+        raise ValueError("date_forecast_start must be a valid quarter.")
     n = system[1, "TTT"].shape[0]
     start = np.zeros(n) if initial_state is None else np.asarray(initial_state, dtype=float)
     history_states = history_obs = history_pseudo = None
@@ -112,6 +116,8 @@ def forecast_ss104(
             ),
         )
         smooth = smooth_kalman_result(system, filtered, data=observations)
+        if smooth.smoothed_states is None:
+            raise ValueError("The ss104 smoother did not return smoothed states.")
         states = (
             smooth.smoothed_states if history_method == "smoothed" else filtered.filtered_states
         )

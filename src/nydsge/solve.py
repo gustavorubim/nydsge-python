@@ -460,19 +460,6 @@ def compute_system(
 def compute_system(
     model: DSGEModel,
     *,
-    tvis: Literal[False] = False,
-    verbose: str = "high",
-    method: CanonicalSolveMethod = "auto",
-    regime_models: None = None,
-    temporary_regimes: Sequence[Sequence[int]] = (),
-    information_sets: None = None,
-) -> System: ...
-
-
-@overload
-def compute_system(
-    model: DSGEModel,
-    *,
     tvis: bool = False,
     verbose: str = "high",
     method: CanonicalSolveMethod = "auto",
@@ -492,6 +479,11 @@ def compute_system(
     temporary_regimes: Sequence[Sequence[int]] = (),
     information_sets: Sequence[Sequence[int]] | None = None,
 ) -> System | RegimeSwitchingSystem:
+    """Solve a model, honoring any regime configuration in its mutable settings.
+
+    Omitting regime_models does not guarantee a single System: ss104 policies
+    and model-provided regime snapshots can also produce a regime system.
+    """
     del verbose
     from nydsge.regimes import compute_model_regime_system
 

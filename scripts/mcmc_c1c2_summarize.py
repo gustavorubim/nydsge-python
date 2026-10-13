@@ -18,6 +18,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import TypedDict
 
 import numpy as np
 from scipy import stats
@@ -26,6 +27,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from c1c2_common import build_model  # noqa: E402
 
 from nydsge.estimate import _model_values_for_estimation_vector  # noqa: E402
+
+
+class _ParameterSummary(TypedDict):
+    parameter: str
+    mode: float
+    start_dsgejl: float
+    mean: float
+    sd: float
+    q05: float
+    q16: float
+    median: float
+    q84: float
+    q95: float
+    rhat: float
+    ess_bulk: float
+    ess_tail: float
+    chain_median_min: float
+    chain_median_max: float
+    prior: str
+    prior_mean: float | None
+    prior_std: float | None
+    prior_nu: float | None
+    prior_tau: float | None
 
 
 def _autocov(x: np.ndarray) -> np.ndarray:
@@ -167,7 +191,7 @@ def main() -> None:
     mode_values = json.loads((Path(__file__).resolve().parents[1] / meta["mode_json"]).read_text())[
         "parameter_values"
     ]
-    rows = []
+    rows: list[_ParameterSummary] = []
     for j, name in enumerate(names):
         x = mod[:, :, j]
         q = np.quantile(x, [0.05, 0.16, 0.5, 0.84, 0.95])

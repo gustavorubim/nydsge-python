@@ -20,6 +20,7 @@ import multiprocessing as mp
 import sys
 import time
 from pathlib import Path
+from typing import TypedDict
 
 import numpy as np
 from scipy.optimize import minimize
@@ -33,18 +34,38 @@ from c1c2_common import (  # noqa: E402
     observation_matrix,
 )
 
+from nydsge.core import Parameter  # noqa: E402
 from nydsge.estimate import (  # noqa: E402
     _evaluate_log_posterior,
     _set_parameter_estimation_vector,
     estimation_parameter_names,
     parameter_estimation_vector,
 )
+from nydsge.models import Model1002  # noqa: E402
 
 COVID_QUARTERS = ("2020-Q2", "2020-Q3", "2020-Q4")
-_STATE: dict[str, object] = {}
 
 
-def _setup(n_ant: int, mask_covid: bool) -> tuple[object, np.ndarray, tuple[str, ...], list[str]]:
+class _WorkerState(TypedDict):
+    model: Model1002
+    data: np.ndarray
+    names: tuple[str, ...]
+    original: dict[str, Parameter]
+
+
+_STATE: _WorkerState | None = None
+
+
+def _worker_state() -> _WorkerState:
+    if _STATE is None:
+        msg = "Posterior worker has not been initialized."
+        raise RuntimeError(msg)
+    return _STATE
+
+
+def _setup(
+    n_ant: int, mask_covid: bool
+) -> tuple[Model1002, np.ndarray, tuple[str, ...], list[str]]:
     model = build_model(n_ant)
     obs = build_observables(model)
     if mask_covid:
@@ -57,18 +78,20 @@ def _setup(n_ant: int, mask_covid: bool) -> tuple[object, np.ndarray, tuple[str,
 
 
 def _init_worker(n_ant: int, mask_covid: bool) -> None:
+    global _STATE
     model, data, names, _ = _setup(n_ant, mask_covid)
-    _STATE.update(model=model, data=data, names=names, original=dict(model.parameters))
+    _STATE = {"model": model, "data": data, "names": names, "original": dict(model.parameters)}
 
 
 def _neg_log_post(x: np.ndarray) -> float:
-    model = _STATE["model"]
-    original = _STATE["original"]
+    state = _worker_state()
+    model = state["model"]
+    original = state["original"]
     try:
-        _set_parameter_estimation_vector(model, original, _STATE["names"], np.asarray(x, float))
+        _set_parameter_estimation_vector(model, original, state["names"], np.asarray(x, float))
         lp, _, _, _ = _evaluate_log_posterior(
             model,
-            _STATE["data"],
+            state["data"],
             start_date=PRESAMPLE_START,
             log_likelihood_start=N_PRESAMPLE,
         )
@@ -286,7 +309,7 @@ def _write(
     original = dict(model.parameters)
     _set_parameter_estimation_vector(model, original, names, np.asarray(x, float))
     lp, ll, lprior, _ = _evaluate_log_posterior(
-        model, _STATE["data"], start_date=PRESAMPLE_START, log_likelihood_start=N_PRESAMPLE
+        model, _worker_state()["data"], start_date=PRESAMPLE_START, log_likelihood_start=N_PRESAMPLE
     )
     values = {k: float(p.value) for k, p in model.parameters.items()}
     model.parameters.update(original)

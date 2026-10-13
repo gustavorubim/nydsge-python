@@ -20,7 +20,7 @@ from nydsge.report import (
     generate_historical_decomposition_report,
     generate_irf_report,
 )
-from nydsge.solve import compute_system
+from nydsge.solve import System, compute_system
 
 runner = CliRunner()
 
@@ -32,6 +32,7 @@ def _model() -> Model1002:
 def _simulated_frame(model: Model1002, periods: int, *, seed: int = 0) -> pd.DataFrame:
     """Simulate the solved system to obtain non-trivial in-sample observables."""
     system = compute_system(model)
+    assert isinstance(system, System)
     rng = np.random.default_rng(seed)
     n_shocks = system.transition.RRR.shape[1]
     n_states = system.transition.TTT.shape[0]
@@ -53,6 +54,7 @@ def _simulated_frame(model: Model1002, periods: int, *, seed: int = 0) -> pd.Dat
 def test_observable_irf_matches_forecast_linear_system() -> None:
     model = _model()
     system = compute_system(model)
+    assert isinstance(system, System)
     irf = observable_irf(system, horizon=10, normalization="unit")
     n_shocks = system.transition.RRR.shape[1]
     assert irf.observables.shape == (10, len(model.observables), n_shocks)
@@ -71,6 +73,7 @@ def test_observable_irf_matches_forecast_linear_system() -> None:
 def test_observable_irf_one_sd_normalization_scales_by_sqrt_qq() -> None:
     model = _model()
     system = compute_system(model)
+    assert isinstance(system, System)
     irf = observable_irf(system, horizon=4, normalization="one_sd")
     expected = np.sqrt(np.clip(np.diag(system.measurement.QQ), 0.0, None))
     np.testing.assert_allclose(irf.shock_scales, expected)
@@ -81,6 +84,7 @@ def test_observable_irf_one_sd_normalization_scales_by_sqrt_qq() -> None:
 
 def test_observable_irf_rejects_unknown_normalization() -> None:
     system = compute_system(_model())
+    assert isinstance(system, System)
     with pytest.raises(ValueError, match="normalization"):
         observable_irf(system, horizon=4, normalization="bogus")
 

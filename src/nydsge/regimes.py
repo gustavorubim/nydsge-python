@@ -10,7 +10,7 @@ statespace_functions}.jl. See docs/ss104_m1.md for contracts and source mapping.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from numbers import Integral
 from typing import Any, overload
@@ -437,7 +437,7 @@ def compute_model_regime_system(
     )
 
 
-def regime_indices_from_dates(regime_dates: Mapping[int, Any], dates: Sequence[Any]) -> np.ndarray:
+def regime_indices_from_dates(regime_dates: Mapping[int, Any], dates: Iterable[Any]) -> np.ndarray:
     """Map observation quarters to one-based regimes; no prehistory extrapolation."""
     count = len(regime_dates)
     if not count or set(regime_dates) != set(range(1, count + 1)):

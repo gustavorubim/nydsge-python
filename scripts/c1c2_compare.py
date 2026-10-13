@@ -23,7 +23,7 @@ from nydsge.data import reverse_transform_observables, reverse_transform_pseudo_
 from nydsge.economy import _restrict_conditioning_quarters
 from nydsge.forecast import forecast_one, historical_decomposition
 from nydsge.models import Model1002
-from nydsge.solve import compute_system
+from nydsge.solve import System, compute_system
 
 DESK_DIR = Path(os.environ.get("NYDSGE_DESK_DIR", "/workspace/nydsge/outputs/desk_fomc_20260916"))
 COND_OBS = ("obs_nominalrate", "obs_spread", "obs_longrate", "obs_longinflation")
@@ -33,6 +33,13 @@ def metrics(
     model: Model1002, obs: pd.DataFrame, *, report_quarter: str = "2026-Q2", horizon: int = 8
 ) -> dict:
     system = compute_system(model)
+    if not isinstance(system, System):
+        msg = "C1/C2 metrics require a single-regime system."
+        raise ValueError(msg)
+    pseudo = system.pseudo_measurement
+    if pseudo is None:
+        msg = "C1/C2 metrics require pseudo-measurement matrices."
+        raise ValueError(msg)
     fc = forecast_one(
         model,
         input_type="mode",
@@ -83,7 +90,7 @@ def metrics(
     sm = hd.smoothed_observables[T, oi]
     scale = reverse_transform_observables(model, hd.smoothed_observables)[T, oi] / sm
     pce = {s: float(hd.observable_contributions[T, oi, j] * scale) for j, s in enumerate(shocks)}
-    zzp = system.pseudo_measurement.ZZ_pseudo
+    zzp = pseudo.ZZ_pseudo
     og_row = pnames.index("OutputGap")
     og = {s: float(zzp[og_row] @ hd.state_contributions[T, :, j]) for j, s in enumerate(shocks)}
 
@@ -107,9 +114,7 @@ def metrics(
             ),
         }
 
-    og_base = float(
-        zzp[og_row] @ hd.state_baseline[T] + system.pseudo_measurement.DD_pseudo[og_row]
-    )
+    og_base = float(zzp[og_row] @ hd.state_baseline[T] + pseudo.DD_pseudo[og_row])
     return {
         "forecast": path,
         "long_run_inflation_2026Q2": lri,

@@ -156,6 +156,7 @@ def test_kalman_process_covariances_affect_default_initialization() -> None:
 def test_model1002_process_covariances_zero_anticipated_shocks_before_zlb() -> None:
     model = Model1002()
     system = compute_system(model)
+    assert isinstance(system, System)
 
     covariances = model_process_covariances(model, system, 3, start_date="2008-Q3")
 

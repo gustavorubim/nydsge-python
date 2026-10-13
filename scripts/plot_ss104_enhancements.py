@@ -38,8 +38,8 @@ from nydsge.kalman import (  # noqa: E402
     model_process_covariances,
     smooth_kalman_result,
 )
-from nydsge.regimes import regime_indices_from_dates  # noqa: E402
-from nydsge.solve import compute_system  # noqa: E402
+from nydsge.regimes import RegimeSwitchingSystem, regime_indices_from_dates  # noqa: E402
+from nydsge.solve import System, compute_system  # noqa: E402
 from nydsge.ss104_estimation import ss104_parameter_catalog, update_ss104_parameters  # noqa: E402
 
 SS10_MODE = ROOT / "data/estimates/m1002_ss10_c1c2_mode_maskcovid.json"
@@ -92,6 +92,10 @@ def ss10_replay(mode):
         history_method="smoothed",
     )
     system = compute_system(model)
+    if not isinstance(system, System) or system.pseudo_measurement is None:
+        raise ValueError("The ss10 replay requires a single system with pseudo measurements.")
+    if forecast.history_states is None or forecast.pseudo_observables is None:
+        raise ValueError("The ss10 replay requires history states and forecast pseudo observables.")
     hist_pseudo = (
         forecast.history_states @ system.pseudo_measurement.ZZ_pseudo.T
         + system.pseudo_measurement.DD_pseudo
@@ -151,6 +155,8 @@ def covid_shocks(model):
     same backward information recursion as the package disturbance smoother.
     """
     system = compute_system(model)
+    if not isinstance(system, RegimeSwitchingSystem):
+        raise TypeError("COVID shock reconstruction requires a RegimeSwitchingSystem.")
     history = build_local_data(model, end="2026-Q2")
     data = history.to_numpy(dtype=float)
     indices = regime_indices_from_dates(model.get_setting("regime_dates"), history.index)
@@ -185,6 +191,8 @@ def covid_shocks(model):
         shocks[t] = current.measurement.QQ @ current.transition.RRR.T @ r
     # Verify structural shock means reconstruct smoothed state innovations in COVID quarters.
     smoothed = smooth_kalman_result(system, filtered, data=data).smoothed_states
+    if smoothed is None:
+        raise ValueError("COVID shock reconstruction requires smoothed states.")
     errors = []
     for t in np.flatnonzero((history.index >= "2020Q1") & (history.index <= "2021Q4")):
         current = path[t].transition
@@ -269,7 +277,7 @@ def quarterly_plot(out, data):
 def regime_plot(out, model):
     dates = model.get_setting("regime_dates")
     starts = pd.PeriodIndex(list(dates.values()), freq="Q").to_timestamp()
-    end = pd.Period("2027Q1").to_timestamp()
+    end = pd.Timestamp("2027-01-01")
     fig, axes = plt.subplots(3, 1, figsize=(13, 8), height_ratios=(1, 1.5, 2))
     axes[0].step([*starts, end], [*dates, 29], where="post", color=COLORS[1], label="Model regime")
     axes[0].text(pd.Timestamp("1988-01-01"), 5, "Regime 1: 1959Q3–2019Q4", ha="center")

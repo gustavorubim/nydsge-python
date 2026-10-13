@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import h5py
@@ -13,7 +14,7 @@ import pandas as pd
 from nydsge.forecast import forecast_linear_system
 from nydsge.kalman import kalman_log_likelihood, observables_from_states, smooth_kalman_result
 from nydsge.models import Model1002
-from nydsge.regimes import regime_indices_from_dates
+from nydsge.regimes import RegimeSwitchingSystem, regime_indices_from_dates
 from nydsge.solve import compute_system
 from nydsge.ss104_estimation import ss104_parameter_catalog, update_ss104_parameters
 from nydsge.ss104_workflow import forecast_ss104
@@ -48,17 +49,54 @@ def translate(name):
     return name
 
 
+def apply_parameter_vector(model, vector):
+    """Validate inverse transforms, then replay Julia's exact model-space inputs.
+
+    The Julia exporter reads ``parameters`` directly. Recomputing its values
+    from estimation coordinates can differ by machine roundoff across platforms,
+    which gets amplified when large shock standard deviations are squared.
+    """
+    catalog = ss104_parameter_catalog(model)
+    if vector["coordinates"] != list(catalog) or set(vector["parameters"]) != set(catalog):
+        raise ValueError("Oracle parameter coordinates differ from the Python model.")
+    update_ss104_parameters(model, catalog, vector["estimation_values"])
+    reconstructed = ss104_parameter_catalog(model)
+    epsilon = float(2 * np.finfo(np.float64).eps)
+    exact = {}
+    for label, parameter in reconstructed.items():
+        value = float(vector["parameters"][label])
+        if (
+            not np.isfinite(value)
+            or not np.isclose(parameter.value, value, rtol=epsilon, atol=epsilon)
+            or (
+                parameter.value_bounds is not None
+                and not parameter.value_bounds[0] <= value <= parameter.value_bounds[1]
+            )
+        ):
+            raise ValueError(f"Oracle model-space value disagrees with estimation vector: {label}")
+        exact[label] = replace(parameter, value=value)
+    regimes = {name: dict(path) for name, path in model.get_setting("parameter_regimes").items()}
+    for label, parameter in exact.items():
+        if "@" in label:
+            name, regime = label.rsplit("@", 1)
+            regimes[name][int(regime)] = parameter
+            if int(regime) == 1:
+                model.parameters[name] = parameter
+        else:
+            model.parameters[label] = parameter
+    model.set_setting("parameter_regimes", regimes)
+
+
 def compare(path, *, model=None, system=None):
     if model is None:
         model = Model1002("ss104")
         with h5py.File(path) as fixture:
             vector = json.loads(fixture["metadata/json"].asstr()[()]).get("parameter_vector")
         if vector is not None:
-            catalog = ss104_parameter_catalog(model)
-            if vector["coordinates"] != list(catalog):
-                raise ValueError("Oracle parameter coordinates differ from the Python model.")
-            update_ss104_parameters(model, catalog, vector["estimation_values"])
+            apply_parameter_vector(model, vector)
     system = compute_system(model) if system is None else system
+    if not isinstance(system, RegimeSwitchingSystem):
+        raise TypeError("ss104 oracle comparison requires a RegimeSwitchingSystem.")
     report = {"max_abs": {}, "regimes": {}}
     with h5py.File(path) as f:
 
@@ -151,6 +189,8 @@ def compare(path, *, model=None, system=None):
                     system, data[:count], regime_indices=np.arange(1, count + 1)
                 )
                 smooth = smooth_kalman_result(system, result, data=data[:count])
+                if smooth.smoothed_states is None:
+                    raise ValueError("ss104 oracle comparison requires smoothed states.")
                 reconstructed = observables_from_states(
                     system, smooth.smoothed_states, regime_indices=np.arange(1, count + 1)
                 )

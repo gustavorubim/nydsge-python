@@ -257,6 +257,8 @@ def test_all_matrices_vary_without_reset_and_smoother_uses_next_regime():
     expected_mean = mean + gain @ (data.ravel()[mask] - d[mask] - z @ mean)
     expected_cov = cov - gain @ z @ cov
     disturbance = smooth_kalman_result(system, result, data=data)
+    assert disturbance.smoothed_states is not None
+    assert disturbance.smoothed_covariances is not None
     np.testing.assert_allclose(disturbance.smoothed_states, expected_mean.reshape(5, 2), atol=1e-12)
     for i in range(5):
         np.testing.assert_allclose(
@@ -363,9 +365,15 @@ def test_model_measurement_and_pseudo_rows_respect_information_sets():
 
 
 def test_regime_dates_and_revisiting_regimes():
+    import pandas as pd
+
     dates = {1: "2020-Q1", 2: "2020-07-01", 3: "2021-Q1"}
     np.testing.assert_array_equal(
         regime_indices_from_dates(dates, ["2020-Q1", "2020-Q3", "2020-Q4", "2021-Q2"]), [1, 2, 2, 3]
+    )
+    np.testing.assert_array_equal(
+        regime_indices_from_dates(dates, pd.period_range("2020Q1", periods=5, freq="Q")),
+        [1, 1, 2, 2, 3],
     )
     with pytest.raises(ValueError, match="precede"):
         regime_indices_from_dates(dates, ["2019-Q4"])

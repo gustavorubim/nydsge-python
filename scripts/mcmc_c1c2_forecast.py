@@ -27,6 +27,7 @@ import multiprocessing as mp  # noqa: E402
 import sys  # noqa: E402
 from dataclasses import replace  # noqa: E402
 from pathlib import Path  # noqa: E402
+from typing import TypedDict  # noqa: E402
 
 import numpy as np  # noqa: E402
 
@@ -37,7 +38,7 @@ from c1c2_compare import COND_OBS, metrics  # noqa: E402
 from nydsge.data import reverse_transform_observables  # noqa: E402
 from nydsge.economy import _restrict_conditioning_quarters  # noqa: E402
 from nydsge.forecast import forecast_linear_system_samples, forecast_one  # noqa: E402
-from nydsge.solve import compute_system  # noqa: E402
+from nydsge.solve import System, compute_system  # noqa: E402
 
 MASK = ("2020-Q2", "2020-Q3", "2020-Q4")
 POP_GROWTH_ANN = 1.0552487467627714  # terminal HP-trend population growth, /tmp/econ_after run
@@ -45,6 +46,15 @@ H = 9  # 2026Q4 .. 2028Q4
 FDATES = [f"{2026 + (3 + i) // 4}-Q{(3 + i) % 4 + 1}" for i in range(H)]
 VARS = ("obs_corepce", "obs_nominalrate", "obs_gdp")
 _S: dict = {}
+
+
+class _Bands(TypedDict):
+    mean: float | list[float]
+    q05: float | list[float]
+    q16: float | list[float]
+    median: float | list[float]
+    q84: float | list[float]
+    q95: float | list[float]
 
 
 def _init() -> None:
@@ -87,6 +97,9 @@ def one_draw(task: dict) -> dict:
     _set(task["values"])
     model, obs, names = _S["model"], _S["obs"], _S["names"]
     system = compute_system(model)
+    if not isinstance(system, System):
+        msg = "C1/C2 forecasts require a single-regime system."
+        raise ValueError(msg)
     fc = forecast_one(
         model,
         input_type="mode",
@@ -105,6 +118,9 @@ def one_draw(task: dict) -> dict:
     sims = forecast_linear_system_samples(
         system, s_t, horizon=H, draws=task["n_shock"], seed=task["seed"]
     ).observable_samples
+    if sims is None:
+        msg = "Forecast did not return observable samples."
+        raise RuntimeError(msg)
     sims = reverse_transform_observables(model, sims.reshape(-1, sims.shape[-1])).reshape(
         sims.shape
     )
@@ -158,7 +174,7 @@ def one_draw(task: dict) -> dict:
     return out
 
 
-def _bands(x: np.ndarray) -> dict:
+def _bands(x: np.ndarray) -> _Bands:
     q = np.quantile(x, [0.05, 0.16, 0.5, 0.84, 0.95], axis=0)
     return {
         "mean": np.mean(x, axis=0).tolist(),
@@ -182,18 +198,18 @@ def summarize(results: list[dict]) -> dict:
         }
     dec = [r["decomp"] for r in results if "decomp" in r]
     if dec:
-        out["decomposition_2026Q2"] = {"n_draws": len(dec)}
+        decomposition: dict[str, int | _Bands | dict[str, _Bands]] = {"n_draws": len(dec)}
         for group in ("corepce", "outputgap"):
             for comp in dec[0][group]:
                 vals = np.asarray([d[group][comp] for d in dec])
-                out["decomposition_2026Q2"][f"{group}:{comp}"] = _bands(vals)
+                decomposition[f"{group}:{comp}"] = _bands(vals)
         for key in (
             "corepce_initial",
             "smoothed_corepce_2026Q2",
             "long_run_inflation_2026Q2",
             "output_gap_2026Q2",
         ):
-            out["decomposition_2026Q2"][key] = _bands(np.asarray([d[key] for d in dec]))
+            decomposition[key] = _bands(np.asarray([d[key] for d in dec]))
         shares = np.asarray(
             [
                 [
@@ -207,10 +223,11 @@ def summarize(results: list[dict]) -> dict:
         )
         dev = np.asarray([d["smoothed_corepce_2026Q2"] - d["corepce_initial"] for d in dec])
         frac = shares / dev[:, None]
-        out["decomposition_2026Q2"]["share_of_shock_driven_deviation"] = {
+        decomposition["share_of_shock_driven_deviation"] = {
             name: _bands(frac[:, i])
             for i, name in enumerate(["pi_star", "lambda_f", "lambda_w", "monetary"])
         }
+        out["decomposition_2026Q2"] = decomposition
     return out
 
 
