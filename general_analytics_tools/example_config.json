@@ -1,0 +1,19 @@
+{
+  "model": "ss104",
+  "parameters": "public_defaults",
+  "inputs": {
+    "levels_csv": "../inputs/quarterly_levels.csv",
+    "source_manifest": "../inputs/source_manifest.json"
+  },
+  "sample": {
+    "presample_start": "1964Q1",
+    "mainsample_start": "1964Q3",
+    "history_end": "2026Q2",
+    "conditioning_end": "2026Q3"
+  },
+  "conditioning_observables": ["obs_hours"],
+  "complete_conditioning_observables": ["obs_hours"],
+  "forecast_quarters": 8,
+  "policy_impacts_bp": [25, 50, -25],
+  "plot_history_start": "2021Q1"
+}

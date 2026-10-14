@@ -91,3 +91,11 @@ difference, max relative difference, and labels on mismatch.
 `nydsge` is distributed under the BSD 3-Clause License (see [`LICENSE`](LICENSE)),
 matching upstream DSGE.jl. By contributing, you agree that your contributions are
 licensed under the same terms.
+
+## Ad hoc analytics and agent workflows
+
+Use [general_analytics_tools](general_analytics_tools/README.md) for offline fixed-default
+forecasts, impact-normalized monetary surprises, diagnostic decompositions and
+reproducible plotting. Read its [agent instructions](general_analytics_tools/AGENTS.md)
+before extending that workflow. The toolkit reuses native model functionality;
+its numerical checks do not certify empirical calibration or estimated-forecast readiness.

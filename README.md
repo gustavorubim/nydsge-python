@@ -1,6 +1,6 @@
 # nydsge
 
-**A native Python port of the New York Fed DSGE model workflow — built for full
+**A native Python port of the New York Fed DSGE model workflow â€” built for full
 numerical parity with the upstream Julia implementation, with no Julia runtime
 dependency.**
 
@@ -11,7 +11,7 @@ NumPy/SciPy float64 CPU reference path, and every translated surface is checked
 against Julia-generated oracle fixtures at strict tolerance.
 
 The runtime package (`src/nydsge/`) is pure Python. Julia is used **only** during
-development, under `tools/oracle_julia/`, to generate the parity fixtures — it is
+development, under `tools/oracle_julia/`, to generate the parity fixtures â€” it is
 never called to compute results. Once fixtures exist, the package runs with no
 Julia installed.
 
@@ -35,8 +35,8 @@ preserving results:
 
 ## Current status
 
-The first hard target — strict CPU float64 parity for `Model1002("ss10")` with
-`data_vintage=181115` and `date_forecast_start=2018-Q4` — is validated at the
+The first hard target â€” strict CPU float64 parity for `Model1002("ss10")` with
+`data_vintage=181115` and `date_forecast_start=2018-Q4` â€” is validated at the
 release horizon (40 quarters) and production draw count (1000 draws). All
 numerical surfaces pass strict `1e-10`.
 
@@ -55,9 +55,9 @@ missing data, and the independent machine oracle's numerical exceptions. The
 M7 estimated forecast is **EXPERIMENTAL**: the fit reached its runtime limit
 and uses the best finite estimate, with optimizer convergence uncertified.
 
-- **Port correctness: MET** — the public ss104 model passes the documented Julia
+- **Port correctness: MET** â€” the public ss104 model passes the documented Julia
   parity gates.
-- **Estimated-forecast readiness: NOT MET** — the M7 mode is unconverged and
+- **Estimated-forecast readiness: NOT MET** â€” the M7 mode is unconverged and
   historical OIS, survey and anticipated-GDP inputs have data gaps.
 
 ---
@@ -71,7 +71,7 @@ uv sync --extra torch   # + Torch backend (use a CUDA/MPS wheel for acceleration
 uv sync --extra jax     # + JAX backend (CPU, or Linux CUDA)
 ```
 
-`nydsge` requires Python ≥ 3.12. For Windows CUDA, install a Torch CUDA wheel
+`nydsge` requires Python â‰¥ 3.12. For Windows CUDA, install a Torch CUDA wheel
 matching your toolkit before relying on `--backend torch --device cuda`.
 
 Confirm the environment:
@@ -183,10 +183,10 @@ flowchart TD
     Backend -->|torch| Torch["Torch CUDA/MPS/CPU adapter"]
     Backend -->|jax| JAX["JAX CPU/CUDA adapter"]
 
-    CPU --> Kernels["Solve · Kalman · posterior · forecast"]
+    CPU --> Kernels["Solve Â· Kalman Â· posterior Â· forecast"]
     Torch --> Kernels
     JAX --> Kernels
-    Kernels --> Outputs["Arrays · fixtures · reports"]
+    Kernels --> Outputs["Arrays Â· fixtures Â· reports"]
 ```
 
 ### Model1002 pipeline
@@ -277,7 +277,7 @@ uv run nydsge meansbands --source forecastpseudo --horizon 40
 `nydsge report` produces forecast analysis artifacts: an all-observable macro
 forecast panel, per-observable impulse responses, and a true historical shock
 decomposition. Each command writes labeled numeric arrays (`.npz`), a JSON
-summary, and — unless `--no-plots` is passed — deterministic PNG figures.
+summary, and â€” unless `--no-plots` is passed â€” deterministic PNG figures.
 Plotting needs the `plot` extra; numeric arrays export without matplotlib.
 
 ```powershell
@@ -474,9 +474,9 @@ tests/                Unit, CLI, and parity tests; generated fixtures (ignored).
 
 ## Platform support
 
-- **macOS** — CPU, Torch MPS (float32 accelerator; float64 uses CPU parity).
-- **Windows** — CPU, Torch CUDA.
-- **Linux** — CPU, Torch CUDA, JAX CUDA.
+- **macOS** â€” CPU, Torch MPS (float32 accelerator; float64 uses CPU parity).
+- **Windows** â€” CPU, Torch CUDA.
+- **Linux** â€” CPU, Torch CUDA, JAX CUDA.
 - **WSL is intentionally unsupported.** `nydsge doctor` exits nonzero on WSL and
   points to native Windows, macOS, or Linux.
 
@@ -516,8 +516,14 @@ uv run pytest
 
 ## References
 
-- [DSGE.jl](https://github.com/FRBNY-DSGE/DSGE.jl) ·
+- [DSGE.jl](https://github.com/FRBNY-DSGE/DSGE.jl) Â·
   [docs](https://frbny-dsge.github.io/DSGE.jl/latest/)
-- [PyTorch install](https://pytorch.org/get-started/locally/) ·
+- [PyTorch install](https://pytorch.org/get-started/locally/) Â·
   [MPS notes](https://docs.pytorch.org/docs/stable/notes/mps.html)
 - [JAX install](https://docs.jax.dev/en/latest/installation.html)
+
+## Ad hoc analytics tools
+
+See [general_analytics_tools](general_analytics_tools/README.md) for configurable,
+offline ss104 forecasts, normalized policy surprises, diagnostic historical
+decompositions and separate rendering, with [agent guidance](AGENTS.md).
