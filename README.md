@@ -521,3 +521,9 @@ uv run pytest
 - [PyTorch install](https://pytorch.org/get-started/locally/) ·
   [MPS notes](https://docs.pytorch.org/docs/stable/notes/mps.html)
 - [JAX install](https://docs.jax.dev/en/latest/installation.html)
+
+## Ad hoc analytics tools
+
+See [general_analytics_tools](general_analytics_tools/README.md) for configurable,
+offline ss104 forecasts, normalized policy surprises, diagnostic historical
+decompositions and separate rendering, with [agent guidance](AGENTS.md).

@@ -30,3 +30,6 @@ tests/fixtures/oracle/*.csv
 # Generated forecast/report run artifacts (figures, npz, scripts) are not source.
 outputs/
 mcps/
+
+# Local analytics inputs may contain uncommitted source snapshots.
+inputs/
