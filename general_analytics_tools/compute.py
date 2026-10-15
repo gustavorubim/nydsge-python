@@ -326,6 +326,9 @@ def _compute(config: dict[str, Any], config_path: Path, output: Path) -> dict[st
         shocks=hd["shocks"],
         remainder=hd["remainder"],
         measurement_gap=hd["measurement_gap"],
+        state_remainder=hd["state_remainder"],
+        innovation_condition=hd["innovation_condition"],
+        smoother_information_error=hd["smoother_information_error"],
     )
     future = pd.period_range(cond_end + 1, periods=config["forecast_quarters"], freq="Q")
     future_regimes = regime_indices_from_dates(model.get_setting("regime_dates"), list(future))
