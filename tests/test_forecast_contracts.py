@@ -144,3 +144,51 @@ def test_historical_decomposition_accepts_partial_dated_window_before_origin():
     assert np.isfinite(decomposition.smoothed_states).all()
     with pytest.raises(ValueError, match="quarter before forecast"):
         forecast_one(model, "mode", "none", ["forecastobs"], data=frame, horizon=1)
+
+
+def test_ss10_future_innovation_uncertainty_survives_kernel_wrapper_and_bands():
+    from nydsge.forecast import compute_meansbands, meansbands_from_forecast
+
+    model = Model1002("ss10")
+    output = forecast_one(model, "full", "none", ["forecastobs"], horizon=3, draws=4, seed=1)
+    assert output.observable_samples is not None
+    assert np.max(np.ptp(output.observable_samples, axis=0)) > 0
+    assert output.uncertainty_sources == ("future_model_innovations",)
+    assert output.parameter_draw_provenance is None
+    bands = compute_meansbands(model, "full", "none", ["forecastobs"], horizon=3, draws=4, seed=1)
+    assert bands.uncertainty_sources == output.uncertainty_sources
+    assert bands.parameter_draw_provenance is None
+    np.testing.assert_array_equal(bands.mean, output.observables)
+    np.testing.assert_allclose(bands.lower, np.quantile(output.observable_samples, 0.05, axis=0))
+    zero = forecast_one(
+        model,
+        "full",
+        "none",
+        ["forecastobs"],
+        horizon=3,
+        shock_samples=np.zeros((2, 3, len(model.indexes.exogenous_shocks))),
+    )
+    assert zero.uncertainty_sources == ("future_model_innovations",)
+    assert zero.parameter_draw_provenance is None
+    assert meansbands_from_forecast(zero).uncertainty_sources == zero.uncertainty_sources
+
+
+@pytest.mark.parametrize("conditioning", ["full", "semi"])
+@pytest.mark.parametrize("input_type", ["mode", "full"])
+def test_ss10_conditional_forecast_requires_explicit_inputs_before_solving(
+    conditioning, input_type, monkeypatch
+):
+    import nydsge.forecast as module
+
+    model = Model1002("ss10")
+    sampler = _repeated_sampler(model) if input_type == "full" else None
+
+    def unexpected_solve(_):
+        raise AssertionError("Missing conditioning inputs must fail before a solve.")
+
+    monkeypatch.setattr(module, "compute_system", unexpected_solve)
+    with pytest.raises(ValueError, match="require explicit"):
+        forecast_one(model, input_type, conditioning, ["forecastobs"], horizon=2, sampler=sampler)
+    if sampler is not None:
+        with pytest.raises(ValueError, match="require explicit"):
+            module.forecast_parameter_draws(model, sampler, horizon=2, cond_type=conditioning)

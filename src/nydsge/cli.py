@@ -5663,14 +5663,23 @@ def _history_date_labels(
 ) -> list[str]:
     if data_path is None:
         return []
-    return date_labels_for_sample(
+    frame = load_data(
         model,
-        load_data(
-            model,
-            path=data_path,
-            check_empty_columns=not (allow_empty_data_columns or model.subspec == "ss104"),
-        ),
+        path=data_path,
+        check_empty_columns=not (allow_empty_data_columns or model.subspec == "ss104"),
     )
+    if model.subspec == "ss104":
+        import pandas as pd
+
+        from nydsge.ss104_workflow import prepare_ss104_observations
+
+        # Native ss104 retains every supplied presample history row. Derive
+        # labels from that same prepared frame, rather than the ss10 sample
+        # window, which starts at date_mainsample_start and can drop date axes.
+        prepared = prepare_ss104_observations(model, frame)
+        origin = pd.Period(model.get_setting("date_forecast_start"), freq="Q")
+        return [quarter_label(date) for date in prepared.index if date < origin]
+    return date_labels_for_sample(model, frame)
 
 
 def _draw_labels(count: int) -> list[str]:

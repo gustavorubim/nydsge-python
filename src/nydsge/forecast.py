@@ -269,6 +269,7 @@ def forecast_linear_system_samples(
         state_samples=state_samples,
         observable_samples=observable_samples,
         pseudo_observable_samples=pseudo_observable_samples,
+        uncertainty_sources=("future_model_innovations",),
     )
 
 
@@ -454,7 +455,9 @@ def forecast_parameter_draws(
     selected_history_method = _normalize_history_method(history_method)
     normalized_cond_type = _normalize_cond_type(cond_type)
     if data is None and normalized_cond_type != "none":
-        data = load_data(model, check_empty_columns=check_empty_columns)
+        raise ValueError(
+            "Conditional forecasts require explicit dated data or a conditional matrix."
+        )
     data_split = None
     forecast_horizon = horizon
     if data is not None:
@@ -809,6 +812,11 @@ def _forecast_one_linear_model(
         msg = "Only input_type='mode' or input_type='full' are ported for Model1002 ss10 forecasts."
         raise NotPortedError(msg)
     normalized_cond_type = _normalize_cond_type(cond_type)
+    if normalized_cond_type != "none" and data is None:
+        raise ValueError(
+            "Conditional forecasts require explicit dated data or a conditional matrix."
+        )
+
     if input_type == "full" and draws <= 0 and sampler is None and shock_samples is None:
         msg = "input_type='full' requires draws > 0, shock_samples, or a sampler result."
         raise ValueError(msg)
@@ -1026,6 +1034,8 @@ def _forecast_one_linear_model(
             forecast.pseudo_observable_samples,
         ),
         log_likelihood=log_likelihood,
+        uncertainty_sources=forecast.uncertainty_sources,
+        parameter_draw_provenance=forecast.parameter_draw_provenance,
     )
 
 

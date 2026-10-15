@@ -135,3 +135,78 @@ def test_ss10_cli_keeps_default_empty_column_guard(tmp_path):
     pd.DataFrame({"date": ["2018Q3"], "obs_gdp": [np.nan]}).to_csv(path, index=False)
     with pytest.raises(ValueError, match="empty columns"):
         _load_cli_data(Model1002("ss10"), path)
+
+
+@pytest.mark.parametrize(
+    "kind,stem", [("export-forecast", "forecast"), ("export-meansbands", "meansbands")]
+)
+def test_ss10_future_shock_export_retains_uncertainty_source(tmp_path, kind, stem):
+    output = tmp_path / kind
+    result = CliRunner().invoke(
+        app,
+        [
+            "vv",
+            kind,
+            "--input-type",
+            "full",
+            "--draws",
+            "4",
+            "--seed",
+            "1",
+            "--horizon",
+            "2",
+            "--output-dir",
+            str(output),
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    manifest = json.loads((output / "manifest.json").read_text())
+    metadata = json.loads((output / (stem + ".npz.metadata.json")).read_text())
+    assert manifest["uncertainty_sources"] == ["future_model_innovations"]
+    assert metadata["uncertainty_sources"] == ["future_model_innovations"]
+    assert manifest["parameter_draw_provenance"] is None
+
+
+def test_ss104_cli_exports_actual_presample_history_dates(tmp_path):
+    model = Model1002("ss104")
+    frame = pd.DataFrame(
+        {
+            "date": ["1959Q3", "1959Q4", "1960Q1"],
+            **{
+                name: ([0.9] * 3 if name == "obs_nominalrate" else [np.nan] * 3)
+                for name in model.observables
+            },
+        }
+    )
+    data_path = tmp_path / "presample.csv"
+    frame.to_csv(data_path, index=False)
+    for kind, key, extra in (
+        ("export-forecast", "forecast/history_states", []),
+        ("export-meansbands", "meansbands/mean", ["--source", "history_states"]),
+    ):
+        output = tmp_path / kind
+        result = CliRunner().invoke(
+            app,
+            [
+                "vv",
+                kind,
+                "--subspec",
+                "ss104",
+                "--data",
+                str(data_path),
+                "--forecast-start",
+                "1960-Q2",
+                "--horizon",
+                "2",
+                "--output-dir",
+                str(output),
+                "--json",
+                *extra,
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        manifest = json.loads((output / "manifest.json").read_text())
+        dates = manifest["labels"][key]["axis0"]
+        assert dates == ["1959-Q3", "1959-Q4", "1960-Q1"]
+        assert load_fixture_arrays(output)[key].shape[0] == len(dates)

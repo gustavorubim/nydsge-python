@@ -24,11 +24,11 @@ Additional regression mapping:
   weights and zero-variance innovations, while preserving unique full-column-rank
   recovery. No residual is reassigned to manufacture closure and no gate is relaxed.
 
-Focused live-grid tests: **8 passed**. Export/CLI regression tests: **9 passed**.
+Focused live-grid tests: **8 passed**. Export/CLI regression tests: **12 passed** after the independent-review follow-up.
 Scoped Ruff lint and formatting passed.
 Historical decomposition still accepts valid partial dated research windows;
 only forecasting requires history to reach its declared origin.
-Integrated validation: **679 passed, 4 skipped** in 99.88 seconds; full Ruff
+Integrated validation: **687 passed, 4 skipped** in 104.26 seconds; full Ruff
 format/check, ty and 37-file runtime-purity checks passed. The locked isolated
 Windows environment and wheel build succeeded. Existing oracle fixtures and
 numerical gates remain unchanged.
@@ -53,3 +53,15 @@ scope. It does not certify a private NY Fed production configuration or empirica
 forecast quality. M7 remains unconverged. Retain run-specific HD checks, original
 strict thresholds, uncertainty labels and all previously documented independent
 machine exceptions.
+
+## Independent-review follow-up
+
+The review of the first pushed head exposed three neighboring contract gaps.
+Seeded ss10 future-innovation ensembles now retain their uncertainty source
+through the kernel, point wrapper, means/bands and CLI/archive exports. Full/semi
+ss10 point and parameter-draw routes reject absent conditioning data before
+solving or implicitly reading a local file. Unconditional no-data runs remain
+valid. Finally, ss104 historical export dates come from the same native prepared
+frame as the returned arrays, preserving supplied presample rows instead of
+silently omitting a mismatched date axis. Actual CLI regressions cover both
+forecast and historical-state bands exports starting in 1959Q3.
