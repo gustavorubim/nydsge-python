@@ -90,7 +90,8 @@ def disturbance_attribution(
 def shock_groups(shocks: list[str]) -> dict[str, list[int]]:
     groups = {
         "Policy residual": [s for s in shocks if s.startswith(("rm_sh", "rm_ait_sh"))],
-        "Price / wage markups": ["lambda_f_sh", "lambda_w_sh"],
+        "Price markups": ["lambda_f_sh"],
+        "Wage markups": ["lambda_w_sh"],
         "Inflation target": ["pi_star_sh"],
         "Private demand": ["b_sh"],
         "Productivity": ["ztil_sh", "zp_sh"],
@@ -125,7 +126,9 @@ def export_decomposition(
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     validation = {}
-    for name in ("obs_corepce", "obs_gdp"):
+    for name in ("obs_corepce", "obs_gdp", "obs_nominalrate"):
+        if name not in names:
+            continue
         i = names.index(name)
         components = {
             label: 4 * arrays["contributions"][:, i, ids].sum(axis=1)
@@ -140,6 +143,8 @@ def export_decomposition(
         )
         error = float(np.max(np.abs(components["Numerical remainder"])))
         validation[name] = {
+            "max_reconstruction_error_plotted_units": error,
+            "units": "annual rate pp" if name == "obs_nominalrate" else "annualized log pp",
             "max_reconstruction_error_annual_log_pp": error,
             "tolerance": HD_TOLERANCE,
             "status": "reconstruction_pass" if error <= HD_TOLERANCE else "diagnostic",

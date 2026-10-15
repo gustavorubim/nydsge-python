@@ -14,7 +14,9 @@ import pandas as pd
 import scipy
 
 from general_analytics_tools.decomposition import disturbance_attribution, export_decomposition
+from general_analytics_tools.expectations import rate_expectations
 from general_analytics_tools.inputs import load_config, quarter, read_levels, sha256
+from general_analytics_tools.policy_paths import policy_paths
 from nydsge.forecast import forecast_linear_system
 from nydsge.kalman import kalman_log_likelihood, model_process_covariances, smooth_kalman_result
 from nydsge.models import Model1002
@@ -120,7 +122,9 @@ def policy_surprises(
 def dated_observations(model: Model1002, levels: pd.DataFrame) -> pd.DataFrame:
     observations = current_public_observables(model, levels)
     observations.index = pd.PeriodIndex(observations.pop("date").map(quarter), freq="Q")
-    return observations
+    return observations.loc[
+        observations.index >= quarter(str(model.get_setting("date_presample_start")))
+    ]
 
 
 def compute(config_path: Path, output: Path) -> dict[str, Any]:
@@ -170,12 +174,29 @@ def _compute(config: dict[str, Any], config_path: Path, output: Path) -> dict[st
     historical_levels = levels.loc[levels.date.map(quarter) <= end]
     historical = dated_observations(model, historical_levels)
     revised = dated_observations(model, levels)
+    if "expectations_csv" in config["inputs"]:
+        expectation_rows = rate_expectations(
+            pd.read_csv(config["inputs"]["expectations_csv"]),
+            pd.PeriodIndex(revised.index, freq="Q"),
+            config["rate_expectations"],
+            end,
+        )
+        expectation_rows.to_csv(output / "expected_rate_observations.csv", index_label="date")
+        revised.loc[:, expectation_rows.columns] = expectation_rows
+        historical.loc[:, expectation_rows.columns] = expectation_rows.reindex(historical.index)
+        channels = list(dict.fromkeys([*channels, *expectation_rows.columns]))
+        model.set_setting("cond_full_names", channels)
+    if config.get("population_endpoint") == "freeze_history":
+        revised.loc[historical.index, :] = historical
     endpoint = revised.copy()
     endpoint.loc[endpoint.index > end, :] = np.nan
     observed = endpoint.copy()
     for channel in channels:
         selected = revised.loc[revised.index > end, channel]
-        if not np.isfinite(selected.to_numpy()).all():
+        if (
+            channel in config.get("conditioning_observables", [])
+            and not np.isfinite(selected.to_numpy()).all()
+        ):
             raise ValueError(f"Incomplete conditioning measurement: {channel}.")
         observed.loc[observed.index > end, channel] = selected
     for label, frame in (
@@ -198,6 +219,30 @@ def _compute(config: dict[str, Any], config_path: Path, output: Path) -> dict[st
         model, system=system, data=endpoint, horizon=horizon, cond_type=kind
     )
     forecast = forecast_ss104(model, system=system, data=observed, horizon=horizon, cond_type=kind)
+    if config.get("survey_ablation"):
+        without = observed.copy()
+        expected_names = [f"obs_exp_nominalrate{i}" for i in range(1, 7)]
+        without.loc[:, expected_names] = np.nan
+        off = forecast_ss104(model, system=system, data=without, horizon=horizon, cond_type=kind)
+        ablation = []
+        for t, date in enumerate(
+            pd.period_range(cond_end + 1, periods=config["forecast_quarters"], freq="Q")
+        ):
+            for name, _, factor, unit in VARIABLES:
+                i = names.index(name)
+                ablation.append(
+                    {
+                        "quarter": str(date),
+                        "variable": name,
+                        "with_expectations": float(factor * forecast.observables[t, i]),
+                        "without_expectations": float(factor * off.observables[t, i]),
+                        "difference": float(
+                            factor * (forecast.observables[t, i] - off.observables[t, i])
+                        ),
+                        "units": unit,
+                    }
+                )
+        pd.DataFrame(ablation).to_csv(output / "expectations_ablation.csv", index=False)
     prepared = prepare_ss104_observations(model, observed)
     dates = pd.PeriodIndex(prepared.index, freq="Q")
     regimes = regime_indices_from_dates(model.get_setting("regime_dates"), list(dates))
@@ -241,6 +286,37 @@ def _compute(config: dict[str, Any], config_path: Path, output: Path) -> dict[st
     )
     decomposition, validation = export_decomposition(hd, dates, names, shocks)
     decomposition.to_csv(output / "decomposition.csv", index=False)
+    cyclical = decomposition.loc[
+        ~decomposition.component.isin(["Initial state", "Deterministic terms"])
+    ].copy()
+    cyclical.to_csv(output / "decomposition_cyclical.csv", index=False)
+    totals = []
+    for name in ("obs_corepce", "obs_gdp", "obs_nominalrate"):
+        i = names.index(name)
+        for t, date in enumerate(dates):
+            totals.append(
+                {
+                    "quarter": str(date),
+                    "variable": name,
+                    "fitted": float(4 * hd["fitted"][t, i]),
+                    "initial": float(4 * hd["initial"][t, i]),
+                    "deterministic": float(4 * hd["deterministic"][t, i]),
+                    "cyclical_fitted": float(
+                        4 * (hd["fitted"][t, i] - hd["initial"][t, i] - hd["deterministic"][t, i])
+                    ),
+                    "measurement_gap": None
+                    if not np.isfinite(hd["measurement_gap"][t, i])
+                    else float(4 * hd["measurement_gap"][t, i]),
+                    "cyclical_actual": None
+                    if not np.isfinite(prepared.iloc[t, i])
+                    else float(
+                        4 * (prepared.iloc[t, i] - hd["initial"][t, i] - hd["deterministic"][t, i])
+                    ),
+                    "units": "annual rate pp" if name == "obs_nominalrate" else "annualized log pp",
+                    "remainder": float(4 * hd["remainder"][t, i]),
+                }
+            )
+    pd.DataFrame(totals).to_csv(output / "decomposition_totals.csv", index=False)
     np.savez_compressed(
         output / "decomposition_arrays.npz",
         contributions=hd["contributions"],
@@ -263,6 +339,13 @@ def _compute(config: dict[str, Any], config_path: Path, output: Path) -> dict[st
         config.get("policy_shock"),
     )
     np.testing.assert_allclose(baseline, forecast.observables, atol=1e-10, rtol=0)
+    path_arrays, path_records = policy_paths(
+        system, states[-1], future_regimes, future, names, shocks, config.get("policy_paths", [])
+    )
+    if set(path_arrays) & set(scenarios):
+        raise ValueError("Policy paths and surprise labels must be distinct.")
+    scenarios.update(path_arrays)
+    scenario_records.extend(path_records)
     rows = []
     for label, array in [("Baseline", baseline), *scenarios.items()]:
         for t, date in enumerate(future):
@@ -351,6 +434,9 @@ def _compute(config: dict[str, Any], config_path: Path, output: Path) -> dict[st
         "shock_names": shocks,
         "sample": sample,
         "conditioning_observables": channels,
+        "rate_expectations": config.get("rate_expectations"),
+        "population_endpoint": config.get("population_endpoint", "recompute"),
+        "input_lead_quarter": str(quarter(sample["presample_start"]) - 1),
         "forecast_start": str(future[0]),
         "forecast_end": str(future[-1]),
         "history_plot_start": config.get("plot_history_start", str(dates[max(0, len(dates) - 24)])),
