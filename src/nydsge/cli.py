@@ -1123,7 +1123,9 @@ def estimate(
     try:
         data_frame = load_data(model_obj, path=data_path)
         start_date = _sample_start_date(model_obj, data_frame, in_sample=True)
-        data = df_to_matrix(model_obj, data_frame)
+        data = data_frame if model_obj.subspec == "ss104" else df_to_matrix(model_obj, data_frame)
+        if model_obj.subspec == "ss104":
+            start_date = None
         mode_result = None if mode_input is None else load_estimation_mode(mode_input)
         result = estimate_model(
             model_obj,

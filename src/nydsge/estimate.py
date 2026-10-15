@@ -157,7 +157,7 @@ class EstimateResult:
 
 def estimate(
     model: DSGEModel,
-    data: np.ndarray,
+    data: Any,
     *,
     verbose: str = "low",
     start_date: Any | None = None,
@@ -234,6 +234,27 @@ def estimate(
         msg = "proposal_scale must be positive."
         raise ValueError(msg)
 
+    if model.spec == "m1002" and model.subspec == "ss104":
+        if mh_draws or proposal_covariance is not None:
+            raise NotPortedError(
+                "ss104 MH sampling is not implemented; use explicit supplied parameter draws "
+                "for distribution forecasts, not an unconverged mode as a posterior."
+            )
+        if start_date is not None:
+            raise ValueError("ss104 data must carry quarterly dates; omit start_date.")
+        from nydsge.ss104_interface import estimate_ss104
+
+        return estimate_ss104(
+            model,
+            data,
+            optimize=optimize,
+            parameter_names=parameter_names,
+            optimizer_method=optimizer_method,
+            maxiter=maxiter,
+            compute_hessian=compute_hessian,
+            hessian_step=hessian_step,
+            mode=mode,
+        )
     if model.spec == "m1002" and model.subspec == "ss10":
         observations = np.asarray(data, dtype=np.float64)
         if observations.ndim != 2:

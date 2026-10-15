@@ -49,6 +49,19 @@ def translate(name):
     return name
 
 
+def julia_covariances(array):
+    """Orient raw HDF5.jl P(states, states, time) as Python(time, row, column).
+
+    h5py reverses all Julia axes. Covariance symmetry is mathematical, not
+    bitwise: ignoring the inner transpose hides material floating asymmetry.
+    Do not symmetrize the independent oracle while comparing it.
+    """
+    values = np.asarray(array)
+    if values.ndim != 3 or values.shape[1] != values.shape[2]:
+        raise ValueError("Expected raw Julia time x column x row covariance cube.")
+    return values.swapaxes(1, 2)
+
+
 def apply_parameter_vector(model, vector):
     """Validate inverse transforms, then replay Julia's exact model-space inputs.
 
@@ -210,7 +223,9 @@ def compare(path, *, model=None, system=None):
                         np.max(np.abs(reference - getattr(smooth, name)))
                     )
                 for name in ("predicted_covariances", "filtered_covariances"):
-                    reference = f[f"{prefix}/{name}"][...][:, states][:, :, states]
+                    reference = julia_covariances(f[f"{prefix}/{name}"][...])[:, states][
+                        :, :, states
+                    ]
                     actual = getattr(result, name)
                     if f"{prefix}/covariance_periods" in f:
                         actual = actual[f[f"{prefix}/covariance_periods"][...]]

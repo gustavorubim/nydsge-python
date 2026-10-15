@@ -1,72 +1,54 @@
 # nydsge
 
-**A native Python port of the New York Fed DSGE model workflow — built for full
-numerical parity with the upstream Julia implementation, with no Julia runtime
-dependency.**
+**Native Python implementation of covered New York Fed Model1002 workflows,
+with no Julia runtime dependency.**
 
-`nydsge` lets you construct, solve, estimate, forecast, validate, analyze, and
-benchmark the New York Fed's `Model1002` entirely in Python. It reproduces the
-behavior of [`FRBNY-DSGE/DSGE.jl`](https://github.com/FRBNY-DSGE/DSGE.jl) on a
-NumPy/SciPy float64 CPU reference path, and every translated surface is checked
-against Julia-generated oracle fixtures at strict tolerance.
+`nydsge` constructs, solves, filters, estimates and forecasts public
+[`FRBNY-DSGE/DSGE.jl`](https://github.com/FRBNY-DSGE/DSGE.jl) specifications on a
+NumPy/SciPy float64 CPU reference path. This is an independent implementation,
+not a Federal Reserve product or institutional certification. The source model
+is from the **Federal Reserve Bank of New York**, not the Board's FRB/US model.
 
-The runtime package (`src/nydsge/`) is pure Python. Julia is used **only** during
-development, under `tools/oracle_julia/`, to generate the parity fixtures — it is
-never called to compute results. Once fixtures exist, the package runs with no
-Julia installed.
-
----
-
-## Why this exists
-
-The NY Fed DSGE model is the reference implementation in the field, but it ties
-the full workflow to a Julia toolchain. `nydsge` removes that dependency while
-preserving results:
-
-- **Same numbers, no Julia at runtime.** The CPU float64 path matches DSGE.jl to
-  `atol = rtol = 1e-10` across setup, matrices, Kalman, posterior, forecasts, and
-  means/bands.
-- **Native Python ergonomics.** A `typer` CLI and a plain NumPy/pandas API, easy
-  to embed in Python pipelines, notebooks, and CI.
-- **Verifiable parity.** Every surface has a candidate export and a labeled oracle
-  comparison profile, so "it matches" is a reproducible command, not a claim.
-- **Optional acceleration.** Torch (CUDA/MPS) and JAX (CUDA) backends sit behind
-  an explicit runtime layer; NumPy CPU remains the release-blocking reference.
+Julia is optional offline development tooling for regenerating oracle fixtures.
+Normal computation does not invoke Julia or read oracle results. Python-only
+CI checks the committed fixtures; it does not regenerate the independent oracle.
 
 ## Current status
 
-The first hard target — strict CPU float64 parity for `Model1002("ss10")` with
-`data_vintage=181115` and `date_forecast_start=2018-Q4` — is validated at the
-release horizon (40 quarters) and production draw count (1000 draws). All
-numerical surfaces pass strict `1e-10`.
+The original `ss10` hard target (vintage `181115`, forecast start `2018-Q4`,
+40 quarters and 1,000 shared shock draws) passes the documented mixed
+`atol=rtol=1e-10` comparison. The public 29-regime `ss104` specification has
+separate matrix, likelihood, smoother and forecast gates. Its controlled replay
+and three parameter perturbation fixtures pass their original scoped gates;
+independent-machine exceptions remain disclosed. **There is no blanket
+`1e-10` claim for ss104 or for newly added features.**
 
-- Per-area parity status: [`docs/port_matrix.csv`](docs/port_matrix.csv)
-- Release-grade fixture recipe and results:
-  [`docs/release_fixture.md`](docs/release_fixture.md)
+Use the [feature and tolerance matrix](docs/feature_matrix.md) to distinguish
+Julia-parity coverage, native invariant tests and incomplete validation.
+The [daily-driver workflow](docs/daily_driver.md) gives clean-environment checks
+and reproducible analysis guidance. See also the
+[release fixture recipe](docs/release_fixture.md),
+[ss104 milestone evidence](docs/ss104_m6.md), and
+[per-area port inventory](docs/port_matrix.csv).
 
-Accelerator captures (macOS MPS, Linux CUDA/JAX) are pending real-machine runs;
-Windows CPU/CUDA baselines are captured.
+Public-default forecasts are illustrative conditional model results. The M7
+estimated mode remains **EXPERIMENTAL** and unconverged; it is not a validated posterior. Matching
+public source code does not imply matching the NY Fed's private production
+parameters, inputs, conditioning or published forecast. Empirical forecast
+accuracy needs a separate real-time out-of-sample evaluation, which is not yet
+provided. Historical OIS, survey and anticipated-GDP data gaps remain explicit.
 
-The `ss104-port` branch implements the public 29-regime ss104 specification,
-with M6 Julia-oracle parity and an offline local estimation/forecast workflow.
-See the [ss104 milestone log](docs/ss104_port.md) and
-[NY Fed forecast comparison](docs/ss104_forecast_comparison.md) for results,
-missing data, and the independent machine oracle's numerical exceptions. The
-M7 estimated forecast is **EXPERIMENTAL**: the fit reached its runtime limit
-and uses the best finite estimate, with optimizer convergence uncertified.
+- **Port correctness: MET** for the documented covered public-model contracts;
+  scope-specific tolerances and cross-machine exceptions remain in the matrix.
+- **Estimated-forecast readiness: NOT MET** for the unconverged M7 candidate.
 
-- **Port correctness: MET** — the public ss104 model passes the documented Julia
-  parity gates.
-- **Estimated-forecast readiness: NOT MET** — the M7 mode is unconverged and
-  historical OIS, survey and anticipated-GDP inputs have data gaps.
-
----
+Accelerator certification remains platform-specific; NumPy CPU is the reference.
 
 ## Installation
 
 ```powershell
-uv sync                 # core package (NumPy/SciPy CPU reference path)
-uv sync --extra plot    # + matplotlib for forecast report figures
+uv sync --locked        # core package (NumPy/SciPy CPU reference path)
+uv sync --locked --extra plot # + matplotlib for forecast report figures
 uv sync --extra torch   # + Torch backend (use a CUDA/MPS wheel for acceleration)
 uv sync --extra jax     # + JAX backend (CPU, or Linux CUDA)
 ```

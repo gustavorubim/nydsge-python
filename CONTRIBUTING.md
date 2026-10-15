@@ -27,15 +27,16 @@ to model surfaces.
 ## Development setup
 
 ```powershell
-uv sync
+uv sync --locked --extra plot
 ```
 
-Run the full gate before opening a pull request. All four must pass:
+Run the full gate before opening a pull request. All five must pass:
 
 ```powershell
 uv run ruff format --check .
 uv run ruff check .
 uv run ty check .
+uv run nydsge vv runtime-purity
 uv run pytest
 ```
 
@@ -99,3 +100,18 @@ forecasts, impact-normalized monetary surprises, diagnostic decompositions and
 reproducible plotting. Read its [agent instructions](general_analytics_tools/AGENTS.md)
 before extending that workflow. The toolkit reuses native model functionality;
 its numerical checks do not certify empirical calibration or estimated-forecast readiness.
+
+## Python-only daily-driver validation
+
+See [the feature/tolerance matrix](docs/feature_matrix.md) for scope-specific
+ss104 fixture gates and known cross-machine exceptions. The generic tolerance
+profiles above do not supersede those explicit assertions. New native features
+need numerical/timing/identity tests; do not call them Julia-parity validated
+until an independent pinned oracle covers them. Document the provenance and
+uncertainty represented by parameter draws, never assume a converged posterior.
+
+[Python CPU CI](.github/workflows/python-cpu.yml) runs locked Windows/Linux,
+Python 3.12/3.14 checks using committed fixtures, without Julia, data-service
+credentials or publishing permissions. Preserve this least-privilege scope.
+Report actual hosted check conclusions for the reviewed commit, not merely the
+existence of a workflow. See the [clean environment recipe](docs/daily_driver.md).

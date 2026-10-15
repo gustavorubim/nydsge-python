@@ -11,80 +11,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from nydsge.kalman import KalmanResult, _default_initial_state_covariance
-from nydsge.regimes import RegimeSwitchingSystem
+from nydsge.decomposition import regime_disturbance_attribution as disturbance_attribution
+
+__all__ = ["disturbance_attribution", "export_decomposition", "shock_groups"]
 
 HD_TOLERANCE = 1e-8  # Annualized log percentage points, never loosened by configuration.
-
-
-def disturbance_attribution(
-    system: RegimeSwitchingSystem,
-    filtered: KalmanResult,
-    smoothed_states: np.ndarray,
-    observations: np.ndarray,
-    regime_indices: np.ndarray,
-    *,
-    shock_covariances: np.ndarray,
-    process_covariances: np.ndarray | None,
-) -> dict[str, np.ndarray]:
-    """E[eps_t|Y] = Q_t R_t' r_t; verify against native smoothed states before attribution."""
-    count, n = smoothed_states.shape
-    path = system.period_systems(regime_indices, count)
-    j = path[0].measurement.QQ.shape[0]
-    r = np.zeros(n)
-    information_vectors = np.zeros_like(smoothed_states)
-    shocks = np.zeros((count, j))
-    for t in range(count - 1, -1, -1):
-        active = path[t]
-        transition = path[min(t + 1, count - 1)].transition.TTT
-        mask = np.isfinite(observations[t])
-        z = active.measurement.ZZ[mask]
-        e = active.measurement.EE[np.ix_(mask, mask)]
-        p = filtered.predicted_covariances[t]
-        if mask.any():
-            f = z @ p @ z.T + e
-            innovation = observations[t, mask] - z @ filtered.predicted_states[t]
-            innovation -= active.measurement.DD[mask]
-            gain = transition @ p @ np.linalg.solve(f, z).T
-            r = z.T @ np.linalg.solve(f, innovation) + (transition - gain @ z).T @ r
-        else:
-            r = transition.T @ r
-        information_vectors[t] = r
-        shocks[t] = shock_covariances[t] @ active.transition.RRR.T @ r
-    implied = filtered.predicted_states + np.einsum(
-        "tij,tj->ti", filtered.predicted_covariances, information_vectors
-    )
-    np.testing.assert_allclose(implied, smoothed_states, atol=1e-8, rtol=1e-10)
-    m0, p0 = _default_initial_state_covariance(
-        path[0], process_covariance=None if process_covariances is None else process_covariances[0]
-    )
-    initial = m0 + p0 @ path[0].transition.TTT.T @ information_vectors[0]
-    deterministic = np.zeros(n)
-    contributions = np.zeros((n, j))
-    obs_initial, obs_deterministic, obs_contributions = [], [], []
-    for t, active in enumerate(path):
-        a, b, c = active.transition.TTT, active.transition.RRR, active.transition.CCC
-        initial = a @ initial
-        deterministic = a @ deterministic + c
-        contributions = a @ contributions + b * shocks[t][None, :]
-        obs_initial.append(active.measurement.ZZ @ initial)
-        obs_deterministic.append(active.measurement.ZZ @ deterministic + active.measurement.DD)
-        obs_contributions.append(active.measurement.ZZ @ contributions)
-    fitted = np.array(
-        [s.measurement.ZZ @ smoothed_states[t] + s.measurement.DD for t, s in enumerate(path)]
-    )
-    parts = np.asarray(obs_contributions)
-    initial_obs, deterministic_obs = np.asarray(obs_initial), np.asarray(obs_deterministic)
-    remainder = fitted - (parts.sum(axis=2) + initial_obs + deterministic_obs)
-    return {
-        "contributions": parts,
-        "initial": initial_obs,
-        "deterministic": deterministic_obs,
-        "fitted": fitted,
-        "shocks": shocks,
-        "remainder": remainder,
-        "measurement_gap": observations - fitted,
-    }
 
 
 def shock_groups(shocks: list[str]) -> dict[str, list[int]]:
@@ -148,6 +79,19 @@ def export_decomposition(
             "max_reconstruction_error_annual_log_pp": error,
             "tolerance": HD_TOLERANCE,
             "status": "reconstruction_pass" if error <= HD_TOLERANCE else "diagnostic",
+            "worst_reconstruction_quarter": str(
+                dates[int(np.argmax(np.abs(components["Numerical remainder"])))]
+            ),
+            **(
+                {"max_innovation_condition_number": float(np.max(arrays["innovation_condition"]))}
+                if "innovation_condition" in arrays
+                else {}
+            ),
+            **(
+                {"max_state_reconstruction_error": float(np.max(np.abs(arrays["state_remainder"])))}
+                if "state_remainder" in arrays
+                else {}
+            ),
         }
         for label, values in components.items():
             rows.extend(

@@ -263,9 +263,7 @@ def model_process_covariances(
             return None
         covariances = []
         for i, active in enumerate(systems):
-            qq = active.measurement.QQ.copy()
-            if pre_zlb[i]:
-                qq[anticipated, :] = qq[:, anticipated] = 0.0
+            qq = model_shock_covariance(model, active, date=dates[i])
             rrr = active.transition.RRR
             covariances.append(rrr @ qq @ rrr.T)
         return np.asarray(covariances)
@@ -273,17 +271,35 @@ def model_process_covariances(
     transition = system.transition
     measurement = system.measurement
     post_zlb_process = transition.RRR @ measurement.QQ @ transition.RRR.T
-    pre_zlb_qq = measurement.QQ.copy()
-    anticipated_indexes = _anticipated_policy_shock_indexes(model)
-    if not anticipated_indexes:
+    if not _anticipated_policy_shock_indexes(model):
         return None
-    pre_zlb_qq[anticipated_indexes, :] = 0.0
-    pre_zlb_qq[:, anticipated_indexes] = 0.0
+    pre_zlb_qq = model_shock_covariance(model, system, date=start)
     pre_zlb_process = transition.RRR @ pre_zlb_qq @ transition.RRR.T
 
     covariances = np.repeat(post_zlb_process[np.newaxis, :, :], periods, axis=0)
     covariances[pre_zlb] = pre_zlb_process
     return covariances
+
+
+def model_shock_covariance(model: Any, system: System, *, date: Any) -> np.ndarray:
+    """Return dated model-innovation QQ, sharing the filter's availability rule.
+
+    Anticipated monetary policy innovations are absent before date_zlb_start.
+    This is an innovation covariance, before multiplication by RRR; it includes
+    measurement-state process innovations and excludes EE observation noise.
+    The returned copy can be factored or modified without changing the system.
+    """
+    covariance = np.asarray(system.measurement.QQ, dtype=np.float64).copy()
+    zlb_start = model.get_setting("date_zlb_start", None)
+    if (
+        getattr(model, "spec", None) == "m1002"
+        and zlb_start is not None
+        and _quarter_to_index(date) < _quarter_to_index(zlb_start)
+    ):
+        anticipated = _anticipated_policy_shock_indexes(model)
+        covariance[anticipated, :] = 0.0
+        covariance[:, anticipated] = 0.0
+    return covariance
 
 
 def _anticipated_policy_shock_indexes(model: Any) -> list[int]:
@@ -583,7 +599,10 @@ def _disturbance_smoother(system, result, data, *, regime_indices=None):
             innovation = observations[t, mask] - z @ predicted - d
             f = z @ covariance @ z.T + e
             inverse_z = np.linalg.solve(f, z)
-            gain = transition @ covariance @ inverse_z.T
+            # Reuse the filter's algebraic gain, including its transpose solve.
+            # Predicted covariances can be slightly asymmetric in floating point;
+            # replacing F^-1 with F^-T breaks the forward/backward identity.
+            gain = transition @ np.linalg.solve(f.T, z @ covariance.T).T
             residual_transition = transition - gain @ z
             r = z.T @ np.linalg.solve(f, innovation) + residual_transition.T @ r
             information = (
