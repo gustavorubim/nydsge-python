@@ -62,13 +62,13 @@ log inflation and effective FFR annual percent. No empirical accuracy claim foll
 
 ## Open numerical and scientific gates
 
-Full real-input HD remains **diagnostic** under the unchanged `1e-8` plotted-unit
-gate: core PCE about `2.70e-8`, GDP `2.86e-6`, FFR `3.04e-6`. The covariance condition
-number reaches `5.95e6`; state reconstruction discrepancy reaches `1.56e-5`.
-Joseph updates and arithmetic reordering did not establish a valid fix. Forcing
-unsupported discrepancies into shocks would change the inference and was rejected.
-See [the full diagnosis](hd_numerics.md). A separately validated stable
-filter/smoother investigation remains necessary before certifying this sample's HD.
+A subsequent filter-adjoint correction supersedes the initial diagnostic HD
+result. The backward gain now reuses the filter's transpose-solve algebra,
+preserving finite-precision covariance asymmetry. Fresh full-sample reconstruction
+errors are core PCE `8.45e-11`, GDP `1.64e-9`, FFR `1.33e-9`, all below the
+unchanged `1e-8` gate. The independent joint-Gaussian tests and a deterministic
+ill-conditioned regression check the correction without changing calibration or
+allocating residuals to shocks. See [the full diagnosis](hd_numerics.md).
 
 Fresh comparison with the existing independent box oracle retains conditional
 observable error `1.53848e-7 > 1e-7` and smoother errors above `5e-6`. Original
@@ -97,6 +97,6 @@ Hosted check results must be read from the PR for its exact head; the workflow
 definition alone does not establish a passing hosted run.
 
 Daily-driver verdict: materially better for reproducible native conditional
-forecasts and explicitly sourced uncertainty experiments. Strict real-sample HD,
+forecasts and explicitly sourced uncertainty experiments. Universal HD stability,
 cross-machine numerical robustness and posterior/empirical forecast readiness are
 not certified by this PR. The PR is for review and must not be auto-merged.

@@ -132,3 +132,77 @@ def test_attribution_rejects_wrong_initialization_covariance_and_regimes():
         regime_disturbance_attribution(
             system, f, states, np.array([[np.inf, 0.0]]), np.array([1]), shock_covariances=qq
         )
+
+
+def test_covariance_asymmetry_preserves_filter_adjoint_and_strict_hd_identity():
+    # A small synthetic COVID-scale variance contrast reproduces the defect:
+    # native predicted covariances are symmetric in theory, but not bitwise.
+    # Forming T P solve(F, Z)' silently uses F^-T instead of the actual filter's
+    # F^-1 and previously produced ~2.5e-6 plotted-unit reconstruction error.
+    rng = np.random.default_rng(0)
+    a = rng.normal(size=(3, 3)) * 0.15 + np.eye(3) * 0.5
+    r = rng.normal(size=(3, 2))
+    z = rng.normal(size=(2, 3))
+    q = np.diag([1e5, 1e-2])
+    active = System(
+        Transition(a, r, np.zeros(3)), Measurement(z, np.zeros(2), q, np.diag([0.01, 0.02]))
+    )
+    system = RegimeSwitchingSystem((active,))
+    observations = rng.normal(size=(4, 2))
+    mean, covariance = np.zeros(3), np.diag([1e5, 1.0, 0.1])
+    regimes = np.ones(4, dtype=int)
+    filtered = kalman_log_likelihood(
+        system,
+        observations,
+        regime_indices=regimes,
+        initial_state=mean,
+        initial_covariance=covariance,
+    )
+    saved_states = filtered.filtered_states.copy()
+    saved_covariances = filtered.filtered_covariances.copy()
+    smooth = smooth_kalman_result(system, filtered, data=observations)
+    assert smooth.smoothed_states is not None
+    result = regime_disturbance_attribution(
+        system,
+        filtered,
+        smooth.smoothed_states,
+        observations,
+        regimes,
+        shock_covariances=np.repeat(q[None], 4, axis=0),
+        initial_state=mean,
+        initial_covariance=covariance,
+    )
+    # Never repair this identity by reassigning a residual to shocks or replacing
+    # the native fitted path with the sum of contributions.
+    assert 4 * np.max(np.abs(result["remainder"])) <= 1e-8
+    assert np.max(np.abs(result["state_remainder"])) <= 1e-8
+    np.testing.assert_array_equal(filtered.filtered_states, saved_states)
+    np.testing.assert_array_equal(filtered.filtered_covariances, saved_covariances)
+
+
+@pytest.mark.parametrize("supply_process", [False, True])
+def test_attribution_rejects_shock_covariance_changed_after_first_period(supply_process):
+    active = System(
+        Transition(np.zeros((1, 1)), np.ones((1, 1)), np.zeros(1)),
+        Measurement(np.ones((1, 1)), np.zeros(1), np.ones((1, 1)), np.ones((1, 1))),
+    )
+    system = RegimeSwitchingSystem((active,))
+    observations = np.array([[0.0], [1.0]])
+    regimes = np.ones(2, dtype=int)
+    filtered = kalman_log_likelihood(system, observations, regime_indices=regimes)
+    states = smooth_kalman_result(system, filtered, data=observations).smoothed_states
+    assert states is not None
+    valid_q = np.ones((2, 1, 1))
+    kwargs = {"process_covariances": valid_q} if supply_process else {}
+    valid = regime_disturbance_attribution(
+        system, filtered, states, observations, regimes, shock_covariances=valid_q, **kwargs
+    )
+    np.testing.assert_allclose(valid["shocks"][:, 0], [0.0, 0.5], atol=1e-14)
+    wrong_q = np.array([[[1.0]], [[2.0]]])
+    # Also reject when the optional process path is internally consistent with
+    # wrong Q; neither path may silently reinterpret an existing filter result.
+    kwargs = {"process_covariances": wrong_q} if supply_process else {}
+    with pytest.raises(ValueError, match="period 1.*filter prediction"):
+        regime_disturbance_attribution(
+            system, filtered, states, observations, regimes, shock_covariances=wrong_q, **kwargs
+        )

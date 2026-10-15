@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from nydsge.forecast import forecast_linear_system
+from nydsge.kalman import model_shock_covariance
 from nydsge.parameters import TransformName, transform_to_estimation_space
 from nydsge.regimes import RegimeSwitchingSystem, regime_indices_from_dates
 from nydsge.solve import compute_system
@@ -61,8 +62,8 @@ def _future_shocks(model, system, prediction, rng):
     dates = pd.period_range(start + count_cond, periods=len(prediction.states), freq="Q")
     path = regime_indices_from_dates(model.get_setting("regime_dates"), dates)
     result = []
-    for regime in path:
-        covariance = np.asarray(system[regime, "QQ"], dtype=np.float64)
+    for date, regime in zip(dates, path, strict=True):
+        covariance = model_shock_covariance(model, system[regime], date=date)
         eigenvalues, eigenvectors = np.linalg.eigh((covariance + covariance.T) * 0.5)
         if np.min(eigenvalues) < -1e-10:
             raise ValueError("Forecast shock covariance is not positive semidefinite.")

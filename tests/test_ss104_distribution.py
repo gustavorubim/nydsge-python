@@ -175,3 +175,32 @@ def test_unknown_and_out_of_bounds_draws_fail_without_mutation(solved):
     with pytest.raises(ValueError, match="Out-of-bounds"):
         _parameter_model(model, [-100.0], ["gamma"])
     assert model.parameters["gamma"].value == original
+
+
+def test_future_anticipated_policy_shocks_share_filter_dated_availability(solved):
+    from nydsge.forecast import ForecastOutput
+    from nydsge.kalman import model_process_covariances, model_shock_covariance
+    from nydsge.ss104_distribution import _future_shocks
+
+    model, system = solved
+    historical = deepcopy(model)
+    historical.set_setting("date_forecast_start", "2008Q3")
+    prediction = ForecastOutput(np.zeros((2, 110)), np.zeros((2, 28)))
+    anticipated = [historical.indexes.exogenous_shocks[f"rm_shl{i}"] - 1 for i in range(1, 7)]
+    pre = model_shock_covariance(historical, system[1], date="2008Q3")
+    post = model_shock_covariance(historical, system[1], date="2008Q4")
+    np.testing.assert_array_equal(pre[anticipated], 0)
+    assert np.all(np.diag(post)[anticipated] > 0)
+    shocks = _future_shocks(historical, system, prediction, np.random.default_rng(17))
+    np.testing.assert_array_equal(shocks[0, anticipated], 0)
+    assert np.all(shocks[1, anticipated] != 0)
+    process = model_process_covariances(historical, system, 2, start_date="2008Q3")
+    assert process is not None
+    rrr = system[1, "RRR"]
+    np.testing.assert_array_equal(process[0], rrr @ pre @ rrr.T)
+    np.testing.assert_array_equal(process[1], rrr @ post @ rrr.T)
+    # No dated mask is applied to contemporary runs; the archived QQ stays intact.
+    np.testing.assert_array_equal(
+        model_shock_covariance(model, system[29], date="2026Q4"), system[29, "QQ"]
+    )
+    np.testing.assert_array_equal(system[1, "QQ"], post)

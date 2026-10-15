@@ -89,6 +89,21 @@ def regime_disturbance_attribution(
         rtol=1e-10,
     ):
         raise ValueError("Initial/process covariance does not match the filter initialization.")
+    if filtered.filtered_covariances.shape != (count, n, n):
+        raise ValueError("Filtered covariance shape must match smoothed states.")
+    # A supplied Q path must be the one actually used to filter every period,
+    # even when process_covariances is omitted or agrees with that supplied Q.
+    # Use the same scale-aware roundoff budget as the initialization check;
+    # this input-consistency tolerance does not change the plotted-unit HD gate.
+    for t in range(1, count):
+        transition = path[t].transition.TTT
+        expected = (
+            transition @ filtered.filtered_covariances[t - 1] @ transition.T + effective_process[t]
+        )
+        if not np.allclose(filtered.predicted_covariances[t], expected, atol=1e-10, rtol=1e-10):
+            raise ValueError(
+                f"Process covariance at period {t} does not match the filter prediction."
+            )
     innovation_condition = np.zeros(count)
     r = np.zeros(n)
     information_vectors = np.zeros_like(smoothed_states)
@@ -105,7 +120,9 @@ def regime_disturbance_attribution(
             innovation_condition[t] = np.linalg.cond(f)
             innovation = observations[t, mask] - z @ filtered.predicted_states[t]
             innovation -= active.measurement.DD[mask]
-            gain = transition @ p @ np.linalg.solve(f, z).T
+            # Match the actual filter gain, including roundoff asymmetry in P/F.
+            # P Z' F^-1 and P Z' F^-T are only interchangeable for exact symmetry.
+            gain = transition @ np.linalg.solve(f.T, z @ p.T).T
             r = z.T @ np.linalg.solve(f, innovation) + (transition - gain @ z).T @ r
         else:
             r = transition.T @ r
