@@ -1,0 +1,56 @@
+name: Python CPU reference
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-cpu-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  reference:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.12', '3.14']
+    env:
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      NUMEXPR_NUM_THREADS: '1'
+      MPLBACKEND: Agg
+      PYTHONHASHSEED: '0'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          version: '0.12.1'
+          enable-cache: false
+      - name: Install locked native CPU environment
+        run: uv sync --locked --python ${{ matrix.python }} --extra plot
+      - name: Formatting
+        run: uv run --no-sync ruff format --check .
+      - name: Lint
+        run: uv run --no-sync ruff check .
+      - name: Types
+        run: uv run --no-sync ty check .
+      - name: Runtime purity
+        run: uv run --no-sync nydsge vv runtime-purity
+      - name: Prepare ignored test artifacts
+        run: uv run --no-sync python -c "from pathlib import Path; Path('outputs').mkdir(exist_ok=True)"
+      - name: Committed-fixture and native tests
+        run: uv run --no-sync pytest --basetemp outputs/ci_pytest_tmp --junitxml outputs/ci_tests.xml
+      - name: Native offline public-snapshot smoke (no oracle input)
+        run: uv run --no-sync python scripts/smoke_daily_driver.py --output-dir outputs/ci_offline_smoke --draws 2 --horizon 2
