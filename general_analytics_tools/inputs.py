@@ -38,6 +38,10 @@ def load_config(path: Path) -> dict[str, Any]:
         "policy_impacts_bp",
         "plot_history_start",
         "policy_shock",
+        "rate_expectations",
+        "survey_ablation",
+        "population_endpoint",
+        "policy_paths",
     }
     if set(config) - allowed:
         raise ValueError(f"Unsupported config keys: {sorted(set(config) - allowed)}")
@@ -62,6 +66,15 @@ def load_config(path: Path) -> dict[str, Any]:
     if any(isinstance(x, bool) or not np.isfinite(x) or not 0 < abs(x) <= 200 for x in impacts):
         raise ValueError("Policy impacts must be finite, nonzero and within +/-200 bp.")
     config["policy_impacts_bp"] = impacts
+    if config.get("population_endpoint", "recompute") not in ("recompute", "freeze_history"):
+        raise ValueError("population_endpoint must be recompute or freeze_history.")
+    if ("expectations_csv" in config["inputs"]) != ("rate_expectations" in config):
+        raise ValueError("Expected-rate inputs and metadata must be supplied together.")
+    if not isinstance(config.get("survey_ablation", False), bool):
+        raise ValueError("survey_ablation must be boolean.")
+    paths = config.get("policy_paths", [])
+    if not isinstance(paths, list) or len(paths) + len(impacts) > 8:
+        raise ValueError("At most eight combined surprise and policy-path scenarios.")
     channels = config.get("conditioning_observables", [])
     if len(channels) != len(set(channels)):
         raise ValueError("Conditioning channels must be unique.")
@@ -126,17 +139,25 @@ def read_levels(config: dict[str, Any], output: Path) -> tuple[pd.DataFrame, dic
     levels = pd.read_csv(inputs["levels_csv"])
     if "date" not in levels:
         raise ValueError("Quarterly levels require a date column.")
+    if "public_sources_csv" in inputs:
+        from nydsge.public_sources import load_public_sources_csv, merge_public_sources
+
+        levels["date"] = levels.date.map(lambda x: str(quarter(x)).replace("Q", "-Q"))
+        public = load_public_sources_csv(inputs["public_sources_csv"])
+        public["date"] = public.date.map(lambda x: str(quarter(x)).replace("Q", "-Q"))
+        levels = merge_public_sources(levels, public)
     dates = pd.PeriodIndex(levels.date.map(quarter), freq="Q")
     if dates.has_duplicates or not dates.is_monotonic_increasing:
         raise ValueError("Quarterly levels must be unique and ordered.")
     sample = config["sample"]
-    start, end = quarter(sample["presample_start"]), quarter(sample["conditioning_end"])
+    start, end = quarter(sample["presample_start"]) - 1, quarter(sample["conditioning_end"])
     levels = levels.loc[(dates >= start) & (dates <= end)].copy()
     dates = pd.PeriodIndex(levels.date.map(quarter), freq="Q")
     expected = pd.period_range(start, end, freq="Q")
     if not dates.equals(expected) or len(dates) > 500:
         raise ValueError(
-            "Require a contiguous complete sample grid, at most 500 quarters; use NaN."
+            "Require one input quarter before presample_start and a contiguous grid, "
+            "at most 500 quarters; use NaN."
         )
     if "preserved_yield_csv" in inputs:
         union, restored = preserve_yield_history(

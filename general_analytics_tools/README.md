@@ -67,7 +67,7 @@ The producer must verify all required monthly/daily observations are released
 and the quarter is complete; three-month completeness cannot be inferred from
 an already averaged quarterly level. Use no channels and equal history/conditioning
 end dates for a purely historical-origin forecast. Native ss104 expected-rate
-conditioning rows remain missing unless explicitly supplied as channels.
+rows remain missing unless an explicit `expectations_csv` and metadata are supplied.
 
 For the original hours-only extension, list **only `obs_hours`**. Its native
 measurement uses separate quarterly means of SA production/nonsupervisory
@@ -88,6 +88,112 @@ the extended-population/all-missing conditional quarter, and the observed update
 neither contribution is an identified structural shock. It does not overwrite
 the original baseline. Historical revisions in other input levels must be
 documented by the input producer.
+
+## Dated expected-rate inputs and reproducible sample boundaries
+
+Supply **one genuine quarterly input before `presample_start`**. It participates
+in differences and the population HP window, then is removed from transformed
+observations before filtering, smoothing and likelihood scoring. A missing lead
+quarter is an error. This corrects the old boundary convention and can change
+forecasts; do not compare runs with different transform windows as survey effects.
+Optional `inputs.public_sources_csv` uses the native public-source merge, filling
+missing FRED columns without replacing finite observations.
+
+To assimilate expectations, add `inputs.expectations_csv` and `rate_expectations`:
+
+```json
+{
+  "kind": "survey",
+  "source_url": "https://www.newyorkfed.org/markets/market-intelligence/survey-of-market-expectations",
+  "vintage": "REPLACE_WITH_ACTUAL_SNAPSHOT",
+  "as_of": "REPLACE_WITH_TIMEZONE_AWARE_UTC_TIMESTAMP",
+  "units": "annual_percent",
+  "rate_concept": "REPLACE_WITH_ACTUAL_POINT_RATE_CONCEPT",
+  "mapping_notes": "State why this concept proxies native expected effective FFR",
+  "historical_vintage_policy": "point_in_time"
+}
+```
+
+CSV columns are `survey_date,available_date,target_quarter,rate`. OIS inputs use
+`kind: "ois"` and `observation_date` instead of `survey_date`. Units are explicitly
+`annual_percent` (divide by four), `annual_fraction` (multiply by 25), or
+`quarterly_model_rate` (unchanged). No percent/log-rate conversion is applied.
+The native noisy measurement rows are `obs_exp_nominalrate1` through `6`;
+horizon one means the **next quarter**, never the same quarter. Only the latest
+eligible formation date within each observation quarter is used. Missing targets
+stay missing; no interpolation, extrapolation or later-quarter backfill occurs.
+These point measurements do not require a complete monthly flow quarter.
+
+By default, historical publication must precede both the analysis as-of and each
+historical quarter end. A conditional nowcast quarter may use publications up to
+the analysis as-of. Explicit `historical_vintage_policy: "analysis_vintage"`
+instead permits retrospective publication within historical rows and must be
+labelled as such. A conservative retrieval date is not a verified publication
+date. The committed survey CSV has conservative October 12 availability, so its
+July formation does not prove July information availability. Preserve the source
+workbook hash and state if the workbook has not been independently retrieved.
+
+Survey target rates and OIS quotes proxy the native expected effective quarterly
+rate only through the supplied mapping assumption. This adds no term-premium,
+risk-neutral or target-to-effective spread measurement equation. OIS support is
+an explicit input contract, not evidence that a particular market feed is valid.
+`survey_ablation: true` exports same-model, same-data, same-window on/off forecasts
+in `expectations_ablation.csv`; it also works as a zero-effect check when no
+expectations are supplied. `population_endpoint: "freeze_history"` preserves the
+original history transforms and appends only conditional rows; default `recompute`
+retains endpoint revision attribution. Both choices are recorded in the manifest.
+
+## Verified policy paths
+
+Optional `policy_paths` contains at most eight distinct labelled specifications:
+
+```json
+[
+  {
+    "label": "Hold 3.75 percent for four quarters",
+    "kind": "held_rate",
+    "information": "sequential_surprises",
+    "start_quarter": "2027Q1",
+    "rates_annual_percent": [3.75, 3.75, 3.75, 3.75]
+  },
+  {
+    "label": "Announce next-quarter 25bp deviation",
+    "kind": "forward_guidance",
+    "information": "announced",
+    "announcement_quarter": "2027Q1",
+    "start_quarter": "2027Q2",
+    "deviations_bp": [25]
+  }
+]
+```
+
+Choose exactly one target vector: absolute annual percent rates or basis-point
+deviations from the same baseline. Null entries leave quarters unconstrained.
+Held-rate paths solve a fresh unanticipated active monetary innovation each
+target quarter; agents do not know later innovations in advance. Guidance solves
+native `rm_ait_shl1..6` innovations **at announcement**, which may affect output
+and inflation immediately while targeting rates one to six quarters later.
+Rank-deficient or unreachable targets fail. Actual rate targets are verified to
+`1e-8` annual percentage points, and innovations, constraints, information and
+errors are archived. Zero prior variance on anticipated shocks is recorded:
+such paths are off-prior-support hypotheticals, with no standard-deviation or
+posterior-probability claim. An effective quarterly rate path does not identify
+an intraday FOMC surprise. Operational desk scripts and configurations remain
+separate; toolkit support does not certify parity with an unseen adapter.
+
+## Full and cyclical historical decomposition
+
+Price and wage markups are separate groups. Core PCE, GDP per capita and Fed
+funds have full decomposition figures; FFR uses annual rate percentage points.
+The cyclical dashboard subtracts initial-state and deterministic contributions
+from fitted and observed totals, retaining every shock group and numerical
+remainder. It is a model-centred accounting view, not a newly estimated output gap.
+`decomposition_cyclical.csv` contains the cyclical components;
+`decomposition_totals.csv` retains full, initial, deterministic, cyclical totals,
+measurement gaps and remainders. Full arrays and original levels remain available.
+The full-sample gate remains **1e-8 in plotted units**, including for cyclical
+figures. A diagnostic result never becomes a pass by dropping a remainder or
+subtracting a large baseline; status applies only to the specific run.
 
 ### Guard rolling yield history
 
@@ -141,8 +247,8 @@ It exports every shock contribution plus the posterior initial-state term,
 deterministic `CCC`/`DD` terms, numerical reconstruction remainder and the
 observed-minus-fitted measurement gap. None is forced to zero or hidden.
 
-Core PCE/GDP reconstructions are checked over the **whole sample** against an
-immutable threshold of **1e-8 annualized log pp**. A failure does not invalidate
+Core PCE/GDP/Fed funds reconstructions are checked over the **whole sample** against an
+immutable threshold of **1e-8 plotted units**. A failure does not invalidate
 an independently verified forecast, but its HD chart is prominently
 **DIAGNOSTIC**, including a residual strip and the actual maximum error. The
 known earlier GDP diagnostic missed this gate; inspect the current run rather
@@ -170,7 +276,7 @@ policy credibility assumptions and omitted energy/distribution channels.
 - Frozen levels, transformed observations, forecasts, endpoint/news attribution,
   grouped HD CSV and raw decomposition arrays.
 - `figures/`: baseline dashboard; policy-surprise dashboard; core PCE and GDP
-  HD charts; `figures.json` hashes and one-line captions.
+  and Fed funds full HD charts; cyclical dashboard; `figures.json` hashes and one-line captions.
 
 Before delivery: verify the intended revision/import path; audit actual source
 coverage and revisions; run in a new directory; inspect `status.json` and every

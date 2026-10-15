@@ -240,7 +240,7 @@ def test_renderer_is_compute_free_and_preserves_diagnostic_label(tmp_path, monke
 
     monkeypatch.setattr(matplotlib.axes.Axes, "set_title", title)
     plots = render(archive)
-    assert len(plots) == 4 and all(p.stat().st_size > 1000 for p in plots)
+    assert len(plots) == 6 and all(p.stat().st_size > 1000 for p in plots)
     assert any("DIAGNOSTIC" in label for label in titles)
     assert (archive / "figures/figures.json").is_file()
 

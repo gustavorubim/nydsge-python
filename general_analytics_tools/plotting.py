@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import textwrap
 from pathlib import Path
+from urllib.parse import urlparse
 
 import matplotlib
 
@@ -28,7 +30,13 @@ PALETTE = (
     "#c5c5c5",
     "#525252",
     "#df2525",
+    "#adb940",
 )
+
+
+def figure_note(fig, x, y, value, **kwargs):
+    """Wrap provenance notes within the figure canvas."""
+    fig.text(x, y, textwrap.fill(value, 190), **kwargs)
 
 
 def render(archive: Path, destination: Path | None = None) -> list[Path]:
@@ -51,7 +59,11 @@ def render(archive: Path, destination: Path | None = None) -> list[Path]:
     cond_end = quarter(meta["sample"]["conditioning_end"])
     origin = quarter(meta["forecast_start"])
     source = meta["source"]
+    source_names = "; ".join(
+        dict.fromkeys(urlparse(url).netloc for url in source.get("source_urls", []))
+    )
     footer = (
+        f"Sources: {source_names or 'see source manifest'}. "
         f"Input vintage: {source['vintage']}; retrieved {source['retrieved_at_utc']}. "
         f"Forecasts {meta['forecast_start']}–{meta['forecast_end']}; CPI not substituted. No bands."
     )
@@ -103,7 +115,7 @@ def render(archive: Path, destination: Path | None = None) -> list[Path]:
     fig.suptitle(
         "ss104 public defaults | observed history, conditional nowcast and forecasts", fontsize=16
     )
-    fig.text(0.02, 0.02, footer, fontsize=9)
+    figure_note(fig, 0.02, 0.02, textwrap.fill(footer, 175), fontsize=8)
     fig.tight_layout(rect=(0, 0.06, 1, 0.94))
     paths = [out / "01_baseline_dashboard.png"]
     fig.savefig(paths[-1], dpi=170)
@@ -141,15 +153,17 @@ def render(archive: Path, destination: Path | None = None) -> list[Path]:
         ax.tick_params(axis="x", rotation=35)
     axes[0, 0].legend(fontsize=8)
     fig.suptitle(
-        f"Unanticipated monetary innovations at {meta['forecast_start']} "
-        "| actual FFR impact normalization",
+        f"Monetary scenarios from {meta['forecast_start']} | verified quarterly FFR targets",
         fontsize=15,
     )
-    fig.text(
+    figure_note(
+        fig,
         0.02,
         0.02,
-        "One innovation at impact; zero later innovations. Subsequent rates endogenous: "
-        "not held paths or intraday FOMC estimates. " + footer,
+        "Surprises: one impact innovation. Held paths: sequential surprises. "
+        "Guidance: news at announcement. "
+        "See manifest for exact constraints and information; not intraday FOMC estimates. "
+        + footer,
         fontsize=8,
     )
     fig.tight_layout(rect=(0, 0.06, 1, 0.94))
@@ -161,7 +175,10 @@ def render(archive: Path, destination: Path | None = None) -> list[Path]:
     for name, title, filename in (
         ("obs_corepce", "Core PCE inflation", "03_hd_corepce.png"),
         ("obs_gdp", "Real GDP per capita growth", "04_hd_gdp_percapita.png"),
+        ("obs_nominalrate", "Effective Fed funds rate", "05_hd_fed_funds.png"),
     ):
+        if name not in meta["HD"]:
+            continue
         frame = full_history.loc[full_history.variable == name].copy()
         periods = pd.PeriodIndex(frame.quarter.map(quarter), freq="Q")
         keep = periods >= start
@@ -177,13 +194,14 @@ def render(archive: Path, destination: Path | None = None) -> list[Path]:
             raise ValueError("Incomplete decomposition components.")
         i = meta["observable_names"].index(name)
         error = meta["HD"][name]["max_reconstruction_error_annual_log_pp"]
+        hd_unit = "annual rate pp" if name == "obs_nominalrate" else "annualized log pp"
         diagnostic = meta["HD"][name]["status"] == "diagnostic"
         fig, (ax, residual_ax) = plt.subplots(
             2, 1, figsize=(16, 8), sharex=True, gridspec_kw={"height_ratios": [4, 1]}
         )
         x = np.arange(len(frame))
         positive, negative = np.zeros(len(frame)), np.zeros(len(frame))
-        for label, color in zip(order, PALETTE, strict=True):
+        for label, color in zip(order, PALETTE[: len(order)], strict=True):
             values = components[label].to_numpy()
             ax.bar(
                 x,
@@ -203,7 +221,7 @@ def render(archive: Path, destination: Path | None = None) -> list[Path]:
             else "reconstruction verified"
         )
         ax.set_title(f"{title} | {suffix}")
-        ax.set_ylabel("Annualized quarterly log rate / contributions (pp)")
+        ax.set_ylabel(f"Level / contributions ({hd_unit})")
         ax.axhline(0, color="grey", lw=0.8)
         ax.grid(axis="y", alpha=0.2)
         ax.legend(ncol=4, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.22))
@@ -229,38 +247,126 @@ def render(archive: Path, destination: Path | None = None) -> list[Path]:
         fig.suptitle(
             "ss104 historical decomposition | conditional structural interpretation", fontsize=15
         )
-        fig.text(
+        figure_note(
+            fig,
             0.02,
             0.015,
-            f"Max full-sample reconstruction error {error:.3g} annualized log pp; threshold 1e-8. "
-            "Partial quarters are latent except declared observations. " + footer,
+            textwrap.fill(
+                f"Max full-sample reconstruction error {error:.3g} {hd_unit}; threshold 1e-8. "
+                "Partial quarters are latent except declared observations. " + footer,
+                190,
+            ),
             fontsize=8,
         )
         fig.subplots_adjust(top=0.88, bottom=0.13, hspace=0.72)
         paths.append(out / filename)
         fig.savefig(paths[-1], dpi=170)
         plt.close(fig)
+    hd_names = [
+        name for name in ("obs_corepce", "obs_gdp", "obs_nominalrate") if name in meta["HD"]
+    ]
+    fig, axes = plt.subplots(len(hd_names), 1, figsize=(16, 4 * len(hd_names)))
+    for ax, name in zip(np.atleast_1d(axes), hd_names, strict=True):
+        frame = full_history.loc[full_history.variable == name].copy()
+        periods = pd.PeriodIndex(frame.quarter.map(quarter), freq="Q")
+        keep = periods >= start
+        frame = frame.loc[keep]
+        pieces = (
+            hd.loc[(hd.variable == name) & (hd.quarter.map(quarter) >= start)]
+            .pivot(index="quarter", columns="component", values="contribution")
+            .reindex(frame.quarter)
+        )
+        baseline_terms = pieces["Initial state"] + pieces["Deterministic terms"]
+        order = [
+            label
+            for label in dict.fromkeys(hd.component)
+            if label not in ("Initial state", "Deterministic terms")
+        ]
+        x = np.arange(len(frame))
+        positive, negative = np.zeros(len(frame)), np.zeros(len(frame))
+        color_map = dict(
+            zip(
+                dict.fromkeys(hd.component),
+                PALETTE[: len(dict.fromkeys(hd.component))],
+                strict=True,
+            )
+        )
+        for label in order:
+            color = color_map[label]
+            values = pieces[label].to_numpy()
+            ax.bar(
+                x,
+                values,
+                bottom=np.where(values >= 0, positive, negative),
+                color=color,
+                label=label,
+            )
+            positive += np.maximum(values, 0)
+            negative += np.minimum(values, 0)
+        ax.plot(
+            x,
+            frame.fitted.to_numpy() - baseline_terms.to_numpy(),
+            color="black",
+            label="Fitted minus initial/deterministic",
+        )
+        ax.plot(
+            x,
+            frame.actual.to_numpy() - baseline_terms.to_numpy(),
+            "o",
+            color="black",
+            ms=3,
+            label="Actual minus initial/deterministic",
+        )
+        ax.set_title(f"{name} | {meta['HD'][name]['status']} | same 1e-8 full reconstruction gate")
+        ax.set_ylabel("Annual rate pp" if name == "obs_nominalrate" else "Annualized log pp")
+        ax.set_xticks(x[::2], frame.quarter.iloc[::2], rotation=35)
+        ax.axhline(0, color="grey", lw=0.8)
+    axes[0].legend(ncol=4, fontsize=7)
+    fig.suptitle(
+        "Cyclical contributions | initial and deterministic terms subtracted, remainder retained"
+    )
+    figure_note(
+        fig,
+        0.02,
+        0.01,
+        "Full levels, initial/deterministic terms and measurement gaps remain in "
+        "full-HD figures and CSVs. " + footer,
+        fontsize=8,
+    )
+    fig.tight_layout(rect=(0, 0.04, 1, 0.96))
+    paths.append(out / "06_hd_cyclical.png")
+    fig.savefig(paths[-1], dpi=170)
+    plt.close(fig)
     (out / "figures.json").write_text(
         json.dumps(
             {
+                "renderer_sha256": sha256(Path(__file__)),
                 "archive_manifest_sha256": sha256(archive / "manifest.json"),
                 "figures": {p.name: sha256(p) for p in paths},
                 "captions": {
-                    paths[0].name: (
+                    "01_baseline_dashboard.png": (
                         "Actual compatible history and explicitly latent conditional nowcasts, "
                         "then fixed-default forecasts; no uncertainty bands."
                     ),
-                    paths[1].name: (
-                        "Policy surprises normalized to actual annualized Fed funds impact; "
-                        "later rates follow model dynamics."
+                    "02_policy_surprises.png": (
+                        "Quarterly monetary surprises, sequential held rates and announced news; "
+                        "actual rate constraints and information are recorded in the manifest."
                     ),
-                    paths[2].name: (
+                    "03_hd_corepce.png": (
                         "Core PCE contributions include initial state, deterministic terms and "
                         "visible numerical remainder; attribution is conditional on the model."
                     ),
-                    paths[3].name: (
+                    "04_hd_gdp_percapita.png": (
                         "GDP per capita contributions and explicit residual; diagnostic whenever "
                         "the strict reconstruction gate fails."
+                    ),
+                    "05_hd_fed_funds.png": (
+                        "Fed funds full reconstruction in annual rate percentage points; "
+                        "strict diagnostic gate retained."
+                    ),
+                    "06_hd_cyclical.png": (
+                        "Cyclical shock contributions subtract initial and deterministic terms; "
+                        "numerical remainder remains visible."
                     ),
                 },
             },
