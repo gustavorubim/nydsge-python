@@ -45,6 +45,8 @@ class ForecastOutput:
     history_observable_samples: np.ndarray | None = None
     history_pseudo_observable_samples: np.ndarray | None = None
     log_likelihood: float | None = None
+    uncertainty_sources: tuple[str, ...] = ()
+    parameter_draw_provenance: str | None = None
 
 
 @dataclass(frozen=True)
@@ -52,6 +54,8 @@ class MeansBands:
     mean: np.ndarray
     lower: np.ndarray
     upper: np.ndarray
+    uncertainty_sources: tuple[str, ...] = ()
+    parameter_draw_provenance: str | None = None
 
 
 @dataclass(frozen=True)
@@ -628,10 +632,12 @@ def meansbands_from_forecast(
 ) -> MeansBands:
     samples = _forecast_sample_array(forecast, source)
     if samples is not None:
-        return meansbands_from_samples(
-            samples,
-            lower_quantile=lower_quantile,
-            upper_quantile=upper_quantile,
+        return replace(
+            meansbands_from_samples(
+                samples, lower_quantile=lower_quantile, upper_quantile=upper_quantile
+            ),
+            uncertainty_sources=forecast.uncertainty_sources,
+            parameter_draw_provenance=forecast.parameter_draw_provenance,
         )
     values = _forecast_array(forecast, source)
     return MeansBands(mean=values.copy(), lower=values.copy(), upper=values.copy())
@@ -742,6 +748,8 @@ def reverse_transform_forecast(model: DSGEModel, forecast: ForecastOutput) -> Fo
             ).reshape(forecast.history_pseudo_observable_samples.shape)
         ),
         log_likelihood=forecast.log_likelihood,
+        uncertainty_sources=forecast.uncertainty_sources,
+        parameter_draw_provenance=forecast.parameter_draw_provenance,
     )
 
 
@@ -762,6 +770,8 @@ def reverse_transform_meansbands(
         mean=transform(model, meansbands.mean),
         lower=transform(model, meansbands.lower),
         upper=transform(model, meansbands.upper),
+        uncertainty_sources=meansbands.uncertainty_sources,
+        parameter_draw_provenance=meansbands.parameter_draw_provenance,
     )
 
 
@@ -782,12 +792,49 @@ def forecast_one(
     draws: int = 0,
     seed: int | None = None,
     sampler: MetropolisHastingsResult | None = None,
+    parameter_draws: np.ndarray | None = None,
+    parameter_names: Sequence[str] | None = None,
+    parameter_draw_provenance: str | None = None,
+    draw_future_shocks: bool = False,
 ) -> ForecastOutput:
     if model.spec == "m1002" and model.subspec == "ss104":
-        if input_type != "mode" or draws or sampler is not None or shock_samples is not None:
-            raise NotPortedError("ss104 supports fixed-parameter mode forecasts only.")
+        from nydsge.ss104_distribution import forecast_ss104_distribution
         from nydsge.ss104_workflow import forecast_ss104
 
+        if input_type not in {"mode", "full"}:
+            raise ValueError("ss104 input_type must be mode or full.")
+        if sampler is not None:
+            raise ValueError(
+                "Supply labeled model-space parameter_draws for ss104, not an ss10 sampler."
+            )
+        if input_type == "full":
+            if shocks is not None:
+                raise ValueError("Use shock_samples for full-distribution forecasts.")
+            return forecast_ss104_distribution(
+                model,
+                parameter_draws=parameter_draws,
+                parameter_names=parameter_names,
+                parameter_draw_provenance=parameter_draw_provenance,
+                draw_future_shocks=draw_future_shocks,
+                draws=draws,
+                seed=seed,
+                shock_samples=shock_samples,
+                data=data,
+                horizon=horizon,
+                cond_type=cond_type,
+                initial_state=initial_state,
+                history_method=history_method,
+                conditional_periods=conditional_periods,
+            )
+        if (
+            draws
+            or shock_samples is not None
+            or parameter_draws is not None
+            or draw_future_shocks
+            or parameter_names is not None
+            or parameter_draw_provenance is not None
+        ):
+            raise ValueError("Distribution inputs require input_type='full'.")
         return forecast_ss104(
             model,
             data=data,
@@ -798,6 +845,13 @@ def forecast_one(
             history_method=history_method,
             conditional_periods=conditional_periods,
         )
+    if (
+        parameter_draws is not None
+        or draw_future_shocks
+        or parameter_names is not None
+        or parameter_draw_provenance is not None
+    ):
+        raise ValueError("Explicit labeled parameter draws are currently supported for ss104 only.")
     if model.spec == "m1002" and model.subspec == "ss10":
         if input_type not in {"mode", "full"}:
             msg = (
@@ -1047,10 +1101,14 @@ def compute_meansbands(
     draws: int = 0,
     seed: int | None = None,
     sampler: MetropolisHastingsResult | None = None,
+    parameter_draws: np.ndarray | None = None,
+    parameter_names: Sequence[str] | None = None,
+    parameter_draw_provenance: str | None = None,
+    draw_future_shocks: bool = False,
     lower_quantile: float = 0.05,
     upper_quantile: float = 0.95,
 ) -> MeansBands:
-    if model.spec == "m1002" and model.subspec == "ss10":
+    if model.spec == "m1002" and model.subspec in {"ss10", "ss104"}:
         if input_type not in {"mode", "full"}:
             msg = (
                 "Only input_type='mode' or input_type='full' are ported for "
@@ -1073,6 +1131,10 @@ def compute_meansbands(
             draws=draws,
             seed=seed,
             sampler=sampler,
+            parameter_draws=parameter_draws,
+            parameter_names=parameter_names,
+            parameter_draw_provenance=parameter_draw_provenance,
+            draw_future_shocks=draw_future_shocks,
         )
         return meansbands_from_forecast(
             forecast,
