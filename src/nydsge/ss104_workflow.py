@@ -69,6 +69,10 @@ def forecast_ss104(
     horizon = int(model.get_setting("forecast_horizons", 40) if horizon is None else horizon)
     if horizon < 0:
         raise ValueError("Forecast horizon must be nonnegative.")
+    if data is None and cond_type != "none":
+        raise ValueError("Full/semi conditioning requires dated observations at forecast start.")
+    if data is None and conditional_periods not in (None, 0):
+        raise ValueError("conditional_periods requires dated conditional observations.")
     system = compute_system(model) if system is None else system
     if not isinstance(system, RegimeSwitchingSystem):
         raise TypeError("ss104 forecasting requires a RegimeSwitchingSystem.")
@@ -83,9 +87,17 @@ def forecast_ss104(
     count_cond = 0
     if data is not None:
         frame = prepare_ss104_observations(model, data)
-        if frame.empty or frame.index[-1] < forecast_start - 1:
+        if (
+            frame.empty
+            or frame.index[-1] < forecast_start - 1
+            or frame.index[0] > forecast_start - 1
+        ):
             raise ValueError("History must reach the quarter preceding forecast start.")
         count_cond = int((frame.index >= forecast_start).sum())
+        if cond_type != "none" and not count_cond:
+            raise ValueError(
+                "Full/semi conditioning requires dated observations at forecast start."
+            )
         if conditional_periods is not None and count_cond != conditional_periods:
             raise ValueError("conditional_periods disagrees with dated data.")
         if count_cond > horizon:

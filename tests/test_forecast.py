@@ -899,7 +899,7 @@ def test_forecast_one_model1002_full_conditioning_solves_conditional_shocks() ->
 
 def test_forecast_one_model1002_conditional_data_validates_periods() -> None:
     model = Model1002(settings={"forecast_horizon": 1})
-    data = _dated_observable_frame(model, ["2018-Q4", "2019-Q1"])
+    data = _dated_observable_frame(model, ["2018-Q3", "2018-Q4", "2019-Q1"])
 
     with pytest.raises(ValueError, match="cannot exceed"):
         forecast_one(model, "mode", "semi", ["forecastobs"], data=data)

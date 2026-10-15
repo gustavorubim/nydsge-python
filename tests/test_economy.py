@@ -356,3 +356,54 @@ def test_report_labels_parameter_refresh(tmp_path) -> None:
     assert "loaded saved posterior mode" not in report
     assert "- Partial-quarter conditioning: none" in report
     assert "- First unconditioned forecast quarter: **2026-Q3**" in report
+
+
+@pytest.mark.parametrize("lead", [False, True])
+@pytest.mark.parametrize("conditioning", [None, "2025-Q3"])
+@pytest.mark.parametrize("start", ["2025-Q1", "2025-Q2"])
+def test_live_levels_grid_matches_frozen_lead_and_conditioning_window(
+    tmp_path, monkeypatch, lead, conditioning, start
+):
+    from dataclasses import replace
+
+    from nydsge.economy import _load_fred_levels
+
+    # Synthetic source includes both boundary quarters and an extra future row.
+    # A lead quarter is a real source value, not an interpolated initialization.
+    source = pd.DataFrame(
+        {
+            "date": ["2024-Q4", "2025-Q1", "2025-Q2", "2025-Q3", "2025-Q4"],
+            "GDP": [90.0, 100.0, 110.0, np.nan, np.nan],
+        }
+    )
+    snapshot = tmp_path / "levels.csv"
+    source.to_csv(snapshot, index=False)
+    config = load_quarterly_economy_config(
+        Path(__file__).resolve().parents[1] / "configs/quarterly_economy.json"
+    )
+    config = replace(
+        config,
+        start_date=start,
+        model_end_date="2025-Q2",
+        conditioning_end_date=conditioning,
+        difference_lead_quarter=lead,
+        fred_levels_path=None,
+    )
+    monkeypatch.setattr(
+        "nydsge.economy.load_current_fred_series", lambda mnemonic, **kwargs: source.copy()
+    )
+    live = _load_fred_levels(config, ["GDP"], fetcher=None)
+    frozen = _load_fred_levels(replace(config, fred_levels_path=snapshot), ["GDP"], fetcher=None)
+    pd.testing.assert_frame_equal(live, frozen)
+    first = pd.Period(start.replace("-Q", "Q"), freq="Q")
+    assert isinstance(first, pd.Period)
+    first = first - int(lead)
+    last = pd.Period((conditioning or "2025-Q2").replace("-Q", "Q"), freq="Q")
+    assert live.date.tolist() == [
+        f"{q.year}-Q{q.quarter}" for q in pd.period_range(first, last, freq="Q")
+    ]
+    if lead:
+        assert live.GDP.iloc[0] == (90.0 if start == "2025-Q1" else 100.0)
+    if conditioning:
+        assert pd.isna(live.GDP.iloc[-1])  # absent released input remains missing
+    assert "2025-Q4" not in live.date.tolist()
