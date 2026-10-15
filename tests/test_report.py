@@ -151,6 +151,8 @@ def test_generate_forecast_report_with_figures(tmp_path) -> None:
     pytest.importorskip("matplotlib")
     model = _model()
     data = _simulated_frame(model, 32, seed=11)
+    # The short synthetic history ends in 2016Q3; forecast in the next quarter.
+    model.set_setting("date_forecast_start", "2016-Q4")
     artifacts = generate_forecast_report(
         model,
         output_dir=tmp_path / "report",

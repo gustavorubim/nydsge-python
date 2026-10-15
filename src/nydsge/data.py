@@ -28,6 +28,10 @@ class DataNotAvailableError(FileNotFoundError):
     """Raised when no local data fixture or input dataset is available."""
 
 
+class _FredNoObservationsError(ValueError):
+    """A valid FRED response explicitly contains an empty observations list."""
+
+
 class FredApiError(ValueError):
     """Raised when the FRED API returns a JSON error payload."""
 
@@ -147,7 +151,7 @@ def transform_data(
 
     working = prepare_population_data(
         model,
-        _sort_by_date(levels.copy()),
+        validate_quarterly_grid(levels.copy()),
         population_forecast=population_forecast,
     )
     transformed = pd.DataFrame(index=working.index)
@@ -289,7 +293,7 @@ def load_fred_api_source(
                 aggregation=aggregation,
                 fetcher=fetcher,
             )
-        except ValueError as err:
+        except _FredNoObservationsError as err:
             if mnemonic not in OPTIONAL_SOURCE_MNEMONICS:
                 raise
             if merged is None:
@@ -365,10 +369,14 @@ def load_fred_api_series(
         raise ValueError(msg)
     if error_message := _fred_api_error_message(payload):
         raise FredApiError(error_message, code=_fred_api_error_code(payload))
-    observations = payload.get("observations", [])
+    observations = payload.get("observations")
     if not isinstance(observations, list):
         msg = f"FRED API response for {mnemonic} did not include observations."
         raise ValueError(msg)
+    if not observations:
+        raise _FredNoObservationsError(
+            f"FRED API response for {mnemonic} contains no observations."
+        )
     values = _fred_observations_frame(observations, mnemonic)
     if values.empty:
         msg = f"FRED API response for {mnemonic} did not include usable dated observations."
@@ -686,7 +694,7 @@ def df_to_matrix(
     include_presample: bool = False,
 ) -> np.ndarray:
     del cond_type
-    working = _sort_by_date(df.copy())
+    working = validate_quarterly_grid(df.copy())
 
     columns = list(model.observables.keys())
     if any(column not in working.columns for column in columns):
@@ -712,6 +720,7 @@ def filter_data_by_sample(
     in_sample: bool = True,
     include_presample: bool = False,
 ) -> pd.DataFrame:
+    df = validate_quarterly_grid(df)
     if "date" not in df.columns:
         return df
     forecast_start = model.get_setting("date_forecast_start", None)
@@ -736,6 +745,7 @@ def date_labels_for_sample(
     in_sample: bool = True,
     include_presample: bool = False,
 ) -> list[str]:
+    df = validate_quarterly_grid(df)
     if "date" not in df.columns:
         return []
     filtered = filter_data_by_sample(
@@ -761,9 +771,42 @@ def quarter_label(value: Any) -> str:
     return _quarter_label_from_index(_quarter_to_index(value))
 
 
+def validate_quarterly_grid(
+    df: pd.DataFrame, *, required_start: Any | None = None, required_end: Any | None = None
+) -> pd.DataFrame:
+    """Sort dated rows by quarter and reject duplicate/missing calendar periods.
+
+    Missing observations belong in explicit NaN rows. Undated tables remain
+    supported as positional inputs unless a dated endpoint is requested.
+    """
+    if "date" not in df and isinstance(df.index, (pd.PeriodIndex, pd.DatetimeIndex)):
+        df = df.copy()
+        df["date"] = df.index
+    if "date" not in df:
+        if required_start is not None or required_end is not None:
+            raise ValueError("A date column is required to validate quarterly sample endpoints.")
+        return df
+    working = _sort_by_date(df)
+    dates = _quarter_index(working["date"])
+    if len(np.unique(dates)) != len(dates):
+        raise ValueError("Quarterly data contain duplicate quarters.")
+    if len(dates) > 1 and np.any(np.diff(dates) != 1):
+        raise ValueError("Quarterly data must be contiguous; retain NaN rows for missing quarters.")
+    if required_start is not None and (
+        not len(dates) or dates[0] != _quarter_to_index(required_start)
+    ):
+        raise ValueError(f"Quarterly data must start at {quarter_label(required_start)}.")
+    if required_end is not None and (
+        not len(dates) or dates[-1] != _quarter_to_index(required_end)
+    ):
+        raise ValueError(f"Quarterly data must end at {quarter_label(required_end)}.")
+    return working
+
+
 def _sort_by_date(df: pd.DataFrame) -> pd.DataFrame:
     if "date" in df.columns:
-        return df.sort_values("date").reset_index(drop=True)
+        # String aliases and timestamps must share calendar ordering.
+        return df.iloc[np.argsort(_quarter_index(df["date"]), kind="stable")].reset_index(drop=True)
     return df
 
 
@@ -1532,10 +1575,12 @@ def _quarter_to_index(value: Any) -> int:
         month = int(value.month)
         quarter = (month - 1) // 3 + 1
         return int(value.year) * 4 + quarter
-    text = str(value)
-    if "-Q" in text:
-        year, quarter = text.split("-Q", 1)
-        return int(year) * 4 + int(quarter[0])
+    text = str(value).strip().upper()
+    if "Q" in text:
+        year, quarter = text.replace("-Q", "Q").split("Q", 1)
+        if not quarter.isdigit() or not 1 <= int(quarter) <= 4:
+            raise ValueError(f"Invalid quarterly date: {value!r}.")
+        return int(year) * 4 + int(quarter)
     parsed = pd.Timestamp(text)
     quarter = (int(parsed.month) - 1) // 3 + 1
     return int(parsed.year) * 4 + quarter

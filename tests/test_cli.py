@@ -1443,7 +1443,7 @@ def test_forecast_command_can_use_conditional_sampler_history(tmp_path) -> None:
 
 
 def test_forecast_command_can_include_filter_backed_history(tmp_path) -> None:
-    data_path = _write_observable_csv(tmp_path, periods=2)
+    data_path = _write_dated_observable_csv(tmp_path, dates=["2018-Q2", "2018-Q3"])
 
     result = CliRunner().invoke(
         app,
@@ -1464,7 +1464,7 @@ def test_forecast_command_can_include_filter_backed_history(tmp_path) -> None:
 
 
 def test_forecast_command_can_include_smoothed_history(tmp_path) -> None:
-    data_path = _write_observable_csv(tmp_path, periods=2)
+    data_path = _write_dated_observable_csv(tmp_path, dates=["2018-Q2", "2018-Q3"])
 
     result = CliRunner().invoke(
         app,
@@ -1487,7 +1487,7 @@ def test_forecast_command_can_include_smoothed_history(tmp_path) -> None:
 
 
 def test_forecast_command_can_include_pseudo_observables(tmp_path) -> None:
-    data_path = _write_observable_csv(tmp_path, periods=2)
+    data_path = _write_dated_observable_csv(tmp_path, dates=["2018-Q2", "2018-Q3"])
 
     result = CliRunner().invoke(
         app,
@@ -1541,7 +1541,7 @@ def test_meansbands_command_rejects_transformed_states() -> None:
 
 
 def test_meansbands_command_can_use_histobs_source(tmp_path) -> None:
-    data_path = _write_observable_csv(tmp_path, periods=2)
+    data_path = _write_dated_observable_csv(tmp_path, dates=["2018-Q2", "2018-Q3"])
 
     result = CliRunner().invoke(
         app,
@@ -1598,7 +1598,7 @@ def test_meansbands_command_can_use_sampler_draw_archive(tmp_path) -> None:
 
 
 def test_meansbands_command_can_use_smoothed_histobs_source(tmp_path) -> None:
-    data_path = _write_observable_csv(tmp_path, periods=2)
+    data_path = _write_dated_observable_csv(tmp_path, dates=["2018-Q2", "2018-Q3"])
 
     result = CliRunner().invoke(
         app,
@@ -1811,6 +1811,8 @@ def test_vv_raw_data_smoke_builds_observables_and_candidate_suite(tmp_path) -> N
             "2016-Q3",
             "--end-date",
             "2016-Q4",
+            "--forecast-start",
+            "2017-Q1",
             "--population-forecast",
             str(population_forecast_path),
             "--no-hpfilter-population",

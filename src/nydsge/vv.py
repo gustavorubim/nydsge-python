@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict, dataclass
 from importlib import import_module
@@ -1746,6 +1747,25 @@ def save_canonical_fixture(
     return path
 
 
+def _save_uncertainty_metadata(path: Path, output: ForecastOutput | MeansBands) -> None:
+    """Keep nonnumeric provenance beside an independently readable numeric archive.
+
+    A filename-specific JSON sidecar avoids object arrays/pickle and keeps the
+    oracle array loader's numeric namespace unchanged. The hash binds metadata
+    to this exact archive; deterministic rewrites cannot leave stale provenance.
+    """
+    metadata = {
+        "schema_version": 1,
+        "archive": path.name,
+        "archive_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "uncertainty_sources": list(output.uncertainty_sources),
+        "parameter_draw_provenance": output.parameter_draw_provenance,
+    }
+    path.with_suffix(path.suffix + ".metadata.json").write_text(
+        json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
+    )
+
+
 def save_forecast_fixture(
     forecast: ForecastOutput,
     directory: Path,
@@ -1831,6 +1851,7 @@ def save_forecast_fixture(
             ),
         },
     )
+    _save_uncertainty_metadata(path, forecast)
     return path
 
 
@@ -1857,6 +1878,7 @@ def save_meansbands_fixture(
             "upper": meansbands.upper,
         },
     )
+    _save_uncertainty_metadata(path, meansbands)
     return path
 
 

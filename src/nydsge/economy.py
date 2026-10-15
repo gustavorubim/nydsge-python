@@ -836,8 +836,8 @@ def _load_fred_levels(
                 "date": [
                     _quarter_label(period)
                     for period in pd.period_range(
-                        _period(config.start_date),
-                        _period(config.model_end_date),
+                        _levels_start(config),
+                        _levels_end(config),
                         freq="Q",
                     )
                 ]

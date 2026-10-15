@@ -1121,7 +1121,9 @@ def estimate(
         runtime=RuntimeConfig(backend=_parse_backend(backend), device=_parse_device(device)),
     )
     try:
-        data_frame = load_data(model_obj, path=data_path)
+        data_frame = load_data(
+            model_obj, path=data_path, check_empty_columns=model_obj.subspec != "ss104"
+        )
         start_date = _sample_start_date(model_obj, data_frame, in_sample=True)
         data = data_frame if model_obj.subspec == "ss104" else df_to_matrix(model_obj, data_frame)
         if model_obj.subspec == "ss104":
@@ -5459,6 +5461,8 @@ def _forecast_manifest(
         "horizon": horizon,
         "history_method": history_method,
         "transformed": transformed,
+        "uncertainty_sources": list(forecast.uncertainty_sources),
+        "parameter_draw_provenance": forecast.parameter_draw_provenance,
         "labels": labels,
     }
     sampler_metadata = _sampler_manifest(sampler, sampler_path)
@@ -5496,7 +5500,11 @@ def _meansbands_manifest(
         )
         if source in {"history_observables", "histobs", "history_states", "histstates"}
         or source in {"history_pseudo_observables", "histpseudo", "histpseudoobs"}
-        else _forecast_date_labels(model, bands.mean.shape[0])
+        else _forecast_date_labels(
+            model,
+            bands.mean.shape[0],
+            offset=(horizon - bands.mean.shape[0]) if cond_type != "none" else 0,
+        )
     )
     variable_labels = _variable_labels_for_source(model, source)
     labels: dict[str, dict[str, list[str]]] = {}
@@ -5518,6 +5526,8 @@ def _meansbands_manifest(
         "source": source,
         "history_method": history_method,
         "transformed": transformed,
+        "uncertainty_sources": list(bands.uncertainty_sources),
+        "parameter_draw_provenance": bands.parameter_draw_provenance,
         "labels": labels,
     }
     sampler_metadata = _sampler_manifest(sampler, sampler_path)
@@ -5658,7 +5668,7 @@ def _history_date_labels(
         load_data(
             model,
             path=data_path,
-            check_empty_columns=not allow_empty_data_columns,
+            check_empty_columns=not (allow_empty_data_columns or model.subspec == "ss104"),
         ),
     )
 
@@ -5700,7 +5710,7 @@ def _load_cli_data(
     return load_data(
         model,
         path=data_path,
-        check_empty_columns=not allow_empty_data_columns,
+        check_empty_columns=not (allow_empty_data_columns or model.subspec == "ss104"),
     )
 
 
@@ -5961,7 +5971,7 @@ def report_forecast(
             data=data,
             history_method=history_method,
             irf_normalization=irf_normalization,
-            check_empty_columns=not allow_empty_data_columns,
+            check_empty_columns=not (allow_empty_data_columns or model_obj.subspec == "ss104"),
             make_plots=not no_plots,
         ),
         json_output=json_output,
@@ -6056,7 +6066,7 @@ def report_historical_decomposition(
             model_obj,
             output_dir=output_dir,
             data=data,
-            check_empty_columns=not allow_empty_data_columns,
+            check_empty_columns=not (allow_empty_data_columns or model_obj.subspec == "ss104"),
             make_plots=not no_plots,
         ),
         json_output=json_output,

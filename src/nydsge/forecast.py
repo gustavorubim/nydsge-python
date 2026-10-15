@@ -20,6 +20,8 @@ from nydsge.kalman import (
     KalmanResult,
     kalman_log_likelihood,
     model_process_covariances,
+    model_shock_covariance,
+    observables_from_states,
     pseudo_observables_from_states,
     smooth_kalman_result,
 )
@@ -448,6 +450,7 @@ def forecast_parameter_draws(
     history_observable_samples = None
     history_pseudo_observable_samples = None
     log_likelihood_samples = None
+    conditional_outputs: list[ForecastOutput] = []
     selected_history_method = _normalize_history_method(history_method)
     normalized_cond_type = _normalize_cond_type(cond_type)
     if data is None and normalized_cond_type != "none":
@@ -477,47 +480,33 @@ def forecast_parameter_draws(
                 sampler.parameter_names,
                 parameter_values,
             )
-            system = compute_system(model)
-            start = _initial_forecast_state(system, initial_state)
-            history_states = None
-            history_observables = None
-            history_pseudo_observables = None
-            log_likelihood = None
-            if data_split is not None:
-                filtered = kalman_log_likelihood(
-                    system,
-                    data_split.observations,
-                    process_covariances=model_process_covariances(
-                        model,
-                        system,
-                        data_split.observations.shape[0],
-                        start_date=data_split.start_date,
-                    ),
-                    backend=get_backend(model.runtime),
-                )
-                log_likelihood = filtered.log_likelihood
-                filtered_history_states = _states_for_history_method(
-                    system,
-                    filtered,
-                    selected_history_method,
-                )
-                historical_states = filtered_history_states[: data_split.history_periods]
-                if initial_state is None and filtered_history_states.shape[0] > 0:
-                    start = filtered_history_states[-1].copy()
-                history_states = historical_states
-                history_observables = data_split.observations[: data_split.history_periods]
-                if include_pseudo:
-                    history_pseudo_observables = pseudo_observables_from_states(
-                        system,
-                        historical_states,
-                    )
-            output = forecast_linear_system(
-                system,
-                start,
-                horizon=forecast_horizon,
-                include_pseudo=include_pseudo,
-                backend=get_backend(model.runtime),
+            requested = ["forecastobs"]
+            if data is not None:
+                requested.extend(("histstates", "histobs"))
+            if include_pseudo:
+                requested.append("forecastpseudo")
+                if data is not None:
+                    requested.append("histpseudo")
+            # Reuse the point driver so an identical parameter row has identical
+            # history, full/semi conditioning, target solving and terminal state.
+            output = _forecast_one_linear_model(
+                model,
+                "mode",
+                normalized_cond_type,
+                requested,
+                horizon=horizon,
+                initial_state=initial_state,
+                data=data,
+                check_empty_columns=check_empty_columns,
+                history_method=selected_history_method,
+                conditional_periods=conditional_periods,
             )
+            history_states = output.history_states
+            history_observables = output.history_observables
+            history_pseudo_observables = output.history_pseudo_observables
+            log_likelihood = output.log_likelihood
+            if output.conditional_states is not None:
+                conditional_outputs.append(output)
             if state_samples is None:
                 state_samples = np.zeros(
                     (parameter_draws.shape[0], *output.states.shape),
@@ -598,6 +587,21 @@ def forecast_parameter_draws(
             if pseudo_observable_samples is None
             else np.mean(pseudo_observable_samples, axis=0)
         ),
+        conditional_states=(
+            None
+            if not conditional_outputs
+            else np.mean([output.conditional_states for output in conditional_outputs], axis=0)
+        ),
+        conditional_observables=(
+            None
+            if not conditional_outputs
+            else np.mean([output.conditional_observables for output in conditional_outputs], axis=0)
+        ),
+        conditional_shocks=(
+            None
+            if not conditional_outputs or conditional_outputs[0].conditional_shocks is None
+            else np.mean([output.conditional_shocks for output in conditional_outputs], axis=0)
+        ),
         state_samples=state_samples,
         observable_samples=observable_samples,
         pseudo_observable_samples=pseudo_observable_samples,
@@ -617,6 +621,10 @@ def forecast_parameter_draws(
         history_state_samples=history_state_samples,
         history_observable_samples=history_observable_samples,
         history_pseudo_observable_samples=history_pseudo_observable_samples,
+        uncertainty_sources=("parameter_draws",),
+        parameter_draw_provenance=(
+            "Supplied MetropolisHastingsResult draws; convergence is not certified by forecasting."
+        ),
         log_likelihood=(
             None if log_likelihood_samples is None else float(np.mean(log_likelihood_samples))
         ),
@@ -775,6 +783,252 @@ def reverse_transform_meansbands(
     )
 
 
+def _forecast_one_linear_model(
+    model: DSGEModel,
+    input_type: str,
+    cond_type: str,
+    output_vars: list[str],
+    *,
+    check_empty_columns: bool = True,
+    horizon: int | None = None,
+    initial_state: np.ndarray | None = None,
+    shocks: np.ndarray | None = None,
+    shock_samples: np.ndarray | None = None,
+    data: Any | None = None,
+    history_method: str = "filtered",
+    conditional_periods: int | None = None,
+    draws: int = 0,
+    seed: int | None = None,
+    sampler: MetropolisHastingsResult | None = None,
+    parameter_draws: np.ndarray | None = None,
+    parameter_names: Sequence[str] | None = None,
+    parameter_draw_provenance: str | None = None,
+    draw_future_shocks: bool = False,
+) -> ForecastOutput:
+    if input_type not in {"mode", "full"}:
+        msg = "Only input_type='mode' or input_type='full' are ported for Model1002 ss10 forecasts."
+        raise NotPortedError(msg)
+    normalized_cond_type = _normalize_cond_type(cond_type)
+    if input_type == "full" and draws <= 0 and sampler is None and shock_samples is None:
+        msg = "input_type='full' requires draws > 0, shock_samples, or a sampler result."
+        raise ValueError(msg)
+    if sampler is not None and input_type != "full":
+        msg = "Sampler-draw forecasts require input_type='full'."
+        raise ValueError(msg)
+    if sampler is not None and draws > 0:
+        msg = "Use either structural shock draws or sampler draws, not both."
+        raise ValueError(msg)
+    if sampler is not None and shock_samples is not None:
+        msg = "Use either structural shock samples or sampler draws, not both."
+        raise ValueError(msg)
+    selected_history_method = _normalize_history_method(history_method)
+    forecast_horizon = int(
+        horizon if horizon is not None else model.get_setting("forecast_horizon", 40)
+    )
+    include_pseudo = _any_output_requested(
+        output_vars,
+        _forecast_pseudo_output_names() | _history_pseudo_output_names(),
+    )
+    if sampler is not None:
+        if shocks is not None or shock_samples is not None:
+            msg = "Explicit shocks are not supported with sampler-draw forecasts."
+            raise ValueError(msg)
+        forecast = forecast_parameter_draws(
+            model,
+            sampler,
+            horizon=forecast_horizon,
+            initial_state=initial_state,
+            include_pseudo=include_pseudo,
+            data=(
+                data
+                if data is not None
+                else (
+                    load_data(model, check_empty_columns=check_empty_columns)
+                    if normalized_cond_type != "none" or _requires_history(output_vars)
+                    else None
+                )
+            ),
+            check_empty_columns=check_empty_columns,
+            cond_type=normalized_cond_type,
+            conditional_periods=conditional_periods,
+            history_method=selected_history_method,
+        )
+        return ForecastOutput(
+            states=forecast.states,
+            observables=forecast.observables,
+            pseudo_observables=forecast.pseudo_observables,
+            conditional_states=forecast.conditional_states,
+            conditional_observables=forecast.conditional_observables,
+            conditional_shocks=forecast.conditional_shocks,
+            state_samples=forecast.state_samples,
+            observable_samples=forecast.observable_samples,
+            pseudo_observable_samples=forecast.pseudo_observable_samples,
+            history_states=(
+                forecast.history_states if _output_requested(output_vars, "histstates") else None
+            ),
+            history_observables=(
+                forecast.history_observables if _output_requested(output_vars, "histobs") else None
+            ),
+            history_pseudo_observables=(
+                forecast.history_pseudo_observables
+                if _any_output_requested(output_vars, _history_pseudo_output_names())
+                else None
+            ),
+            history_state_samples=(
+                forecast.history_state_samples
+                if _output_requested(output_vars, "histstates")
+                else None
+            ),
+            history_observable_samples=(
+                forecast.history_observable_samples
+                if _output_requested(output_vars, "histobs")
+                else None
+            ),
+            history_pseudo_observable_samples=(
+                forecast.history_pseudo_observable_samples
+                if _any_output_requested(output_vars, _history_pseudo_output_names())
+                else None
+            ),
+            log_likelihood=forecast.log_likelihood,
+            uncertainty_sources=forecast.uncertainty_sources,
+            parameter_draw_provenance=forecast.parameter_draw_provenance,
+        )
+
+    system = compute_system(model)
+    start = _initial_forecast_state(system, initial_state)
+    history_states = None
+    history_observables = None
+    history_pseudo_observables = None
+    conditional_shocks = None
+    conditional_states = None
+    conditional_observables = None
+    log_likelihood = None
+    if data is not None or _requires_history(output_vars):
+        data_split = _forecast_data_split(
+            model,
+            data,
+            check_empty_columns=check_empty_columns,
+            cond_type=normalized_cond_type,
+            conditional_periods=conditional_periods,
+        )
+        if data_split.conditional_periods > forecast_horizon:
+            msg = (
+                "Conditional data periods cannot exceed the requested forecast "
+                f"horizon: {data_split.conditional_periods} > {forecast_horizon}."
+            )
+            raise ValueError(msg)
+        forecast_horizon -= data_split.conditional_periods
+        filter_observations = (
+            data_split.observations[: data_split.history_periods]
+            if normalized_cond_type == "full" and data_split.conditional_periods > 0
+            else data_split.observations
+        )
+        if filter_observations.shape[0] > 0:
+            filtered = kalman_log_likelihood(
+                system,
+                filter_observations,
+                process_covariances=model_process_covariances(
+                    model,
+                    system,
+                    filter_observations.shape[0],
+                    start_date=data_split.start_date,
+                ),
+                backend=get_backend(model.runtime),
+            )
+            log_likelihood = filtered.log_likelihood
+            filtered_history_states = _states_for_history_method(
+                system,
+                filtered,
+                selected_history_method,
+            )
+            historical_states = filtered_history_states[: data_split.history_periods]
+            if normalized_cond_type == "semi" and data_split.conditional_periods:
+                conditional_states = filtered_history_states[data_split.history_periods :]
+                conditional_observables = observables_from_states(system, conditional_states)
+            if initial_state is None and filtered_history_states.shape[0] > 0:
+                start = filtered_history_states[-1].copy()
+        else:
+            if not isinstance(system, System):
+                raise NotPortedError("Empty forecast histories require a single-regime system.")
+            historical_states = np.zeros((0, system.transition.TTT.shape[0]))
+        if _output_requested(output_vars, "histstates"):
+            history_states = historical_states
+        if _output_requested(output_vars, "histobs"):
+            history_observables = data_split.observations[: data_split.history_periods]
+        if _any_output_requested(output_vars, _history_pseudo_output_names()):
+            history_pseudo_observables = pseudo_observables_from_states(
+                system,
+                historical_states,
+            )
+        if normalized_cond_type == "full" and data_split.conditional_periods > 0:
+            if not isinstance(system, System):
+                raise NotPortedError("Full conditioning requires a single-regime system.")
+            conditional_targets = data_split.observations[data_split.history_periods :]
+            conditioning = solve_shocks_for_observable_targets(
+                system,
+                start,
+                conditional_targets,
+            )
+            conditional_shocks = conditioning.shocks
+            conditional_states = conditioning.states
+            conditional_observables = conditioning.observables
+            if conditional_states.shape[0] > 0:
+                start = conditional_states[-1].copy()
+
+    if input_type == "full":
+        if shocks is not None:
+            msg = "Explicit shocks are only supported for input_type='mode'."
+            raise ValueError(msg)
+        if not isinstance(system, System):
+            raise NotPortedError("Shock-sample forecasts require a single-regime system.")
+        forecast = forecast_linear_system_samples(
+            system,
+            start,
+            horizon=forecast_horizon,
+            draws=draws,
+            seed=seed,
+            shock_samples=shock_samples,
+            include_pseudo=include_pseudo,
+            backend=get_backend(model.runtime),
+        )
+    else:
+        forecast = forecast_linear_system(
+            system,
+            start,
+            horizon=forecast_horizon,
+            shocks=shocks,
+            include_pseudo=include_pseudo,
+            backend=get_backend(model.runtime),
+        )
+    return ForecastOutput(
+        states=forecast.states,
+        observables=forecast.observables,
+        pseudo_observables=forecast.pseudo_observables,
+        conditional_shocks=conditional_shocks,
+        conditional_states=conditional_states,
+        conditional_observables=conditional_observables,
+        state_samples=forecast.state_samples,
+        observable_samples=forecast.observable_samples,
+        pseudo_observable_samples=forecast.pseudo_observable_samples,
+        history_states=history_states,
+        history_observables=history_observables,
+        history_pseudo_observables=history_pseudo_observables,
+        history_state_samples=_repeat_history_samples(
+            history_states,
+            forecast.state_samples,
+        ),
+        history_observable_samples=_repeat_history_samples(
+            history_observables,
+            forecast.observable_samples,
+        ),
+        history_pseudo_observable_samples=_repeat_history_samples(
+            history_pseudo_observables,
+            forecast.pseudo_observable_samples,
+        ),
+        log_likelihood=log_likelihood,
+    )
+
+
 def forecast_one(
     model: DSGEModel,
     input_type: str,
@@ -853,226 +1107,22 @@ def forecast_one(
     ):
         raise ValueError("Explicit labeled parameter draws are currently supported for ss104 only.")
     if model.spec == "m1002" and model.subspec == "ss10":
-        if input_type not in {"mode", "full"}:
-            msg = (
-                "Only input_type='mode' or input_type='full' are ported for "
-                "Model1002 ss10 forecasts."
-            )
-            raise NotPortedError(msg)
-        normalized_cond_type = _normalize_cond_type(cond_type)
-        if input_type == "full" and draws <= 0 and sampler is None and shock_samples is None:
-            msg = "input_type='full' requires draws > 0, shock_samples, or a sampler result."
-            raise ValueError(msg)
-        if sampler is not None and input_type != "full":
-            msg = "Sampler-draw forecasts require input_type='full'."
-            raise ValueError(msg)
-        if sampler is not None and draws > 0:
-            msg = "Use either structural shock draws or sampler draws, not both."
-            raise ValueError(msg)
-        if sampler is not None and shock_samples is not None:
-            msg = "Use either structural shock samples or sampler draws, not both."
-            raise ValueError(msg)
-        selected_history_method = _normalize_history_method(history_method)
-        forecast_horizon = int(
-            horizon if horizon is not None else model.get_setting("forecast_horizon", 40)
-        )
-        include_pseudo = _any_output_requested(
+        return _forecast_one_linear_model(
+            model,
+            input_type,
+            cond_type,
             output_vars,
-            _forecast_pseudo_output_names() | _history_pseudo_output_names(),
-        )
-        if sampler is not None:
-            if shocks is not None or shock_samples is not None:
-                msg = "Explicit shocks are not supported with sampler-draw forecasts."
-                raise ValueError(msg)
-            forecast = forecast_parameter_draws(
-                model,
-                sampler,
-                horizon=forecast_horizon,
-                initial_state=initial_state,
-                include_pseudo=include_pseudo,
-                data=(
-                    data
-                    if data is not None
-                    else (
-                        load_data(model, check_empty_columns=check_empty_columns)
-                        if normalized_cond_type != "none" or _requires_history(output_vars)
-                        else None
-                    )
-                ),
-                check_empty_columns=check_empty_columns,
-                cond_type=normalized_cond_type,
-                conditional_periods=conditional_periods,
-                history_method=selected_history_method,
-            )
-            return ForecastOutput(
-                states=forecast.states,
-                observables=forecast.observables,
-                pseudo_observables=forecast.pseudo_observables,
-                state_samples=forecast.state_samples,
-                observable_samples=forecast.observable_samples,
-                pseudo_observable_samples=forecast.pseudo_observable_samples,
-                history_states=(
-                    forecast.history_states
-                    if _output_requested(output_vars, "histstates")
-                    else None
-                ),
-                history_observables=(
-                    forecast.history_observables
-                    if _output_requested(output_vars, "histobs")
-                    else None
-                ),
-                history_pseudo_observables=(
-                    forecast.history_pseudo_observables
-                    if _any_output_requested(output_vars, _history_pseudo_output_names())
-                    else None
-                ),
-                history_state_samples=(
-                    forecast.history_state_samples
-                    if _output_requested(output_vars, "histstates")
-                    else None
-                ),
-                history_observable_samples=(
-                    forecast.history_observable_samples
-                    if _output_requested(output_vars, "histobs")
-                    else None
-                ),
-                history_pseudo_observable_samples=(
-                    forecast.history_pseudo_observable_samples
-                    if _any_output_requested(output_vars, _history_pseudo_output_names())
-                    else None
-                ),
-                log_likelihood=forecast.log_likelihood,
-            )
-
-        system = compute_system(model)
-        start = _initial_forecast_state(system, initial_state)
-        history_states = None
-        history_observables = None
-        history_pseudo_observables = None
-        conditional_shocks = None
-        conditional_states = None
-        conditional_observables = None
-        log_likelihood = None
-        if data is not None or _requires_history(output_vars):
-            data_split = _forecast_data_split(
-                model,
-                data,
-                check_empty_columns=check_empty_columns,
-                cond_type=normalized_cond_type,
-                conditional_periods=conditional_periods,
-            )
-            if data_split.conditional_periods > forecast_horizon:
-                msg = (
-                    "Conditional data periods cannot exceed the requested forecast "
-                    f"horizon: {data_split.conditional_periods} > {forecast_horizon}."
-                )
-                raise ValueError(msg)
-            forecast_horizon -= data_split.conditional_periods
-            filter_observations = (
-                data_split.observations[: data_split.history_periods]
-                if normalized_cond_type == "full" and data_split.conditional_periods > 0
-                else data_split.observations
-            )
-            if filter_observations.shape[0] > 0:
-                filtered = kalman_log_likelihood(
-                    system,
-                    filter_observations,
-                    process_covariances=model_process_covariances(
-                        model,
-                        system,
-                        filter_observations.shape[0],
-                        start_date=data_split.start_date,
-                    ),
-                    backend=get_backend(model.runtime),
-                )
-                log_likelihood = filtered.log_likelihood
-                filtered_history_states = _states_for_history_method(
-                    system,
-                    filtered,
-                    selected_history_method,
-                )
-                historical_states = filtered_history_states[: data_split.history_periods]
-                if initial_state is None and filtered_history_states.shape[0] > 0:
-                    start = filtered_history_states[-1].copy()
-            else:
-                if not isinstance(system, System):
-                    raise NotPortedError("Empty forecast histories require a single-regime system.")
-                historical_states = np.zeros((0, system.transition.TTT.shape[0]))
-            if _output_requested(output_vars, "histstates"):
-                history_states = historical_states
-            if _output_requested(output_vars, "histobs"):
-                history_observables = data_split.observations[: data_split.history_periods]
-            if _any_output_requested(output_vars, _history_pseudo_output_names()):
-                history_pseudo_observables = pseudo_observables_from_states(
-                    system,
-                    historical_states,
-                )
-            if normalized_cond_type == "full" and data_split.conditional_periods > 0:
-                if not isinstance(system, System):
-                    raise NotPortedError("Full conditioning requires a single-regime system.")
-                conditional_targets = data_split.observations[data_split.history_periods :]
-                conditioning = solve_shocks_for_observable_targets(
-                    system,
-                    start,
-                    conditional_targets,
-                )
-                conditional_shocks = conditioning.shocks
-                conditional_states = conditioning.states
-                conditional_observables = conditioning.observables
-                if conditional_states.shape[0] > 0:
-                    start = conditional_states[-1].copy()
-
-        if input_type == "full":
-            if shocks is not None:
-                msg = "Explicit shocks are only supported for input_type='mode'."
-                raise ValueError(msg)
-            if not isinstance(system, System):
-                raise NotPortedError("Shock-sample forecasts require a single-regime system.")
-            forecast = forecast_linear_system_samples(
-                system,
-                start,
-                horizon=forecast_horizon,
-                draws=draws,
-                seed=seed,
-                shock_samples=shock_samples,
-                include_pseudo=include_pseudo,
-                backend=get_backend(model.runtime),
-            )
-        else:
-            forecast = forecast_linear_system(
-                system,
-                start,
-                horizon=forecast_horizon,
-                shocks=shocks,
-                include_pseudo=include_pseudo,
-                backend=get_backend(model.runtime),
-            )
-        return ForecastOutput(
-            states=forecast.states,
-            observables=forecast.observables,
-            pseudo_observables=forecast.pseudo_observables,
-            conditional_shocks=conditional_shocks,
-            conditional_states=conditional_states,
-            conditional_observables=conditional_observables,
-            state_samples=forecast.state_samples,
-            observable_samples=forecast.observable_samples,
-            pseudo_observable_samples=forecast.pseudo_observable_samples,
-            history_states=history_states,
-            history_observables=history_observables,
-            history_pseudo_observables=history_pseudo_observables,
-            history_state_samples=_repeat_history_samples(
-                history_states,
-                forecast.state_samples,
-            ),
-            history_observable_samples=_repeat_history_samples(
-                history_observables,
-                forecast.observable_samples,
-            ),
-            history_pseudo_observable_samples=_repeat_history_samples(
-                history_pseudo_observables,
-                forecast.pseudo_observable_samples,
-            ),
-            log_likelihood=log_likelihood,
+            check_empty_columns=check_empty_columns,
+            horizon=horizon,
+            initial_state=initial_state,
+            shocks=shocks,
+            shock_samples=shock_samples,
+            data=data,
+            history_method=history_method,
+            conditional_periods=conditional_periods,
+            draws=draws,
+            seed=seed,
+            sampler=sampler,
         )
 
     msg = (
@@ -1449,8 +1499,9 @@ def historical_decomposition(
 
     Smoothed states are obtained from the RTS smoother. Smoothed structural
     shocks are recovered from the transition identity
-    ``RRR @ eps_t = s_t - TTT @ s_{t-1} - CCC`` via ``pinv(RRR)`` (the smoothed
-    state innovation lies in the column space of ``RRR``). Each shock's
+    ``RRR @ eps_t = s_t - TTT @ s_{t-1} - CCC``. Full-column-rank RRR uses its
+    unique inverse allocation; rank-deficient RRR uses the dated innovation QQ
+    to allocate observationally equivalent shocks by their covariance. Each shock's
     contribution is then propagated through the state recursion and mapped to
     observables, yielding a decomposition that reconciles to the smoothed path.
     """
@@ -1466,6 +1517,7 @@ def historical_decomposition(
         check_empty_columns=check_empty_columns,
         cond_type="none",
         conditional_periods=None,
+        require_forecast_origin=False,
     )
     observations = np.asarray(split.observations, dtype=np.float64)
     periods = observations.shape[0]
@@ -1498,6 +1550,14 @@ def historical_decomposition(
     n_states = ttt.shape[0]
     n_shocks = rrr.shape[1]
     rrr_pinv = np.linalg.pinv(rrr)
+    rank_deficient = np.linalg.matrix_rank(rrr) < n_shocks
+    if rank_deficient:
+        import pandas as pd
+
+        start_date = split.start_date or model.get_setting(
+            "date_mainsample_start", model.get_setting("date_presample_start")
+        )
+        dates = pd.period_range(str(start_date).replace("-Q", "Q"), periods=periods, freq="Q")
     # The decomposition anchors on an initial state and attributes structural
     # shocks to each subsequent period via the transition identity
     # ``RRR @ eps_t = s_t - TTT @ s_{t-1} - CCC``. With no explicit initial state
@@ -1518,7 +1578,11 @@ def historical_decomposition(
     previous = anchor
     for period in range(first_shock_period, periods):
         state_innovation = smoothed_states[period] - ttt @ previous - ccc
-        smoothed_shocks[period] = rrr_pinv @ state_innovation
+        recovery = rrr_pinv
+        if rank_deficient:
+            qq = model_shock_covariance(model, system, date=dates[period])
+            recovery = _covariance_weighted_shock_recovery(rrr, qq)
+        smoothed_shocks[period] = recovery @ state_innovation
         running = ttt @ running + rrr * smoothed_shocks[period][np.newaxis, :]
         state_contributions[period] = running
         previous = smoothed_states[period]
@@ -1546,6 +1610,21 @@ def historical_decomposition(
         residual=residual,
         reconciliation_max_abs_error=reconciliation,
     )
+
+
+def _covariance_weighted_shock_recovery(rrr: np.ndarray, qq: np.ndarray) -> np.ndarray:
+    """Gaussian allocation of indistinguishable innovations, including singular QQ.
+
+    Whitened minimum-norm recovery is Q R' (R Q R')^+ in exact arithmetic,
+    but avoids squaring the condition number when forming R Q R'. Zero-variance
+    innovations receive zero allocation; unsupported state movements remain in
+    the public reconstruction error instead of being assigned fictitious shocks.
+    """
+    values, vectors = np.linalg.eigh((qq + qq.T) * 0.5)
+    if np.min(values) < -1e-10:
+        raise ValueError("Historical shock covariance must be positive semidefinite.")
+    root = vectors * np.sqrt(np.maximum(values, 0))
+    return root @ np.linalg.pinv(rrr @ root)
 
 
 def _observable_shock_design(system: System, *, horizon: int) -> np.ndarray:
@@ -1602,10 +1681,26 @@ def _forecast_data_split(
     check_empty_columns: bool,
     cond_type: str,
     conditional_periods: int | None,
+    require_forecast_origin: bool = True,
 ) -> _ForecastDataSplit:
     if data is None:
         data = load_data(model, check_empty_columns=check_empty_columns)
     if hasattr(data, "columns"):
+        import pandas as pd
+
+        origin = pd.Period(model.get_setting("date_forecast_start"), freq="Q")
+        if not isinstance(origin, pd.Period):
+            raise ValueError("Forecast start must be a valid quarter.")
+        history_labels = date_labels_for_sample(model, data, in_sample=True)
+        if require_forecast_origin and (
+            not history_labels or pd.Period(history_labels[-1], freq="Q") != origin - 1
+        ):
+            raise ValueError("Dated forecast history must reach the quarter before forecast start.")
+        if cond_type != "none":
+            conditional_labels = date_labels_for_sample(model, data, in_sample=False)
+            if conditional_labels and pd.Period(conditional_labels[0], freq="Q") != origin:
+                raise ValueError("Conditional data must begin at forecast start.")
+
         if cond_type == "none":
             observations = df_to_matrix(model, data, in_sample=True)
             return _ForecastDataSplit(
