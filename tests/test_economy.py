@@ -44,6 +44,8 @@ def test_shock_taxonomy_assigns_every_model_shock_exactly_once() -> None:
     assert len(assigned) == len(set(assigned))
     assert "corepce_sh" in SHOCK_GROUPS["Measurement innovations"]
     assert SHOCK_GROUPS["Government spending"] == ("g_sh",)
+    assert SHOCK_GROUPS["Price markup"] == ("lambda_f_sh",)
+    assert SHOCK_GROUPS["Wage markup"] == ("lambda_w_sh",)
 
 
 def test_structural_scenario_components_compound_with_timing_and_decay() -> None:
